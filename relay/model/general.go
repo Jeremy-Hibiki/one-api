@@ -2,7 +2,7 @@ package model
 
 type ResponseFormat struct {
 	Type       string `json:"type,omitempty"`
-	JsonSchema string `json:"json_schema,omitempty"`
+	JsonSchema any    `json:"json_schema,omitempty"`
 }
 
 type StreamOptions struct {
