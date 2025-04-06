@@ -37,6 +37,9 @@ func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
 		aliModel = strings.TrimSuffix(aliModel, EnableSearchModelSuffix)
 	}
 	request.TopP = helper.Float64PtrMax(request.TopP, 0.9999)
+	if !enableSearch {
+		request.SearchOptions = nil
+	}
 	return &ChatRequest{
 		Model: aliModel,
 		Input: Input{
@@ -44,6 +47,7 @@ func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
 		},
 		Parameters: Parameters{
 			EnableSearch:      enableSearch,
+			SearchOptions:     request.SearchOptions,
 			IncrementalOutput: request.Stream,
 			Seed:              uint64(request.Seed),
 			MaxTokens:         request.MaxTokens,
@@ -134,10 +138,11 @@ func embeddingResponseAli2OpenAI(response *EmbeddingResponse) *openai.EmbeddingR
 
 func responseAli2OpenAI(response *ChatResponse) *openai.TextResponse {
 	fullTextResponse := openai.TextResponse{
-		Id:      response.RequestId,
-		Object:  "chat.completion",
-		Created: helper.GetTimestamp(),
-		Choices: response.Output.Choices,
+		Id:         response.RequestId,
+		Object:     "chat.completion",
+		Created:    helper.GetTimestamp(),
+		Choices:    response.Output.Choices,
+		SearchInfo: response.Output.SearchInfo,
 		Usage: model.Usage{
 			PromptTokens:     response.Usage.InputTokens,
 			CompletionTokens: response.Usage.OutputTokens,
@@ -159,11 +164,12 @@ func streamResponseAli2OpenAI(aliResponse *ChatResponse) *openai.ChatCompletions
 		choice.FinishReason = &finishReason
 	}
 	response := openai.ChatCompletionsStreamResponse{
-		Id:      aliResponse.RequestId,
-		Object:  "chat.completion.chunk",
-		Created: helper.GetTimestamp(),
-		Model:   "qwen",
-		Choices: []openai.ChatCompletionsStreamResponseChoice{choice},
+		Id:         aliResponse.RequestId,
+		Object:     "chat.completion.chunk",
+		Created:    helper.GetTimestamp(),
+		Model:      "qwen",
+		Choices:    []openai.ChatCompletionsStreamResponseChoice{choice},
+		SearchInfo: aliResponse.Output.SearchInfo,
 	}
 	return &response
 }

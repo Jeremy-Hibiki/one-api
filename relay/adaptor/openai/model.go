@@ -111,11 +111,12 @@ type TextResponseChoice struct {
 }
 
 type TextResponse struct {
-	Id          string               `json:"id"`
-	Model       string               `json:"model,omitempty"`
-	Object      string               `json:"object"`
-	Created     int64                `json:"created"`
-	Choices     []TextResponseChoice `json:"choices"`
+	Id          string                  `json:"id"`
+	Model       string                  `json:"model,omitempty"`
+	Object      string                  `json:"object"`
+	Created     int64                   `json:"created"`
+	Choices     []TextResponseChoice    `json:"choices"`
+	SearchInfo  *map[string]interface{} `json:"search_info,omitempty"`
 	model.Usage `json:"usage"`
 }
 
@@ -153,12 +154,13 @@ type ChatCompletionsStreamResponseChoice struct {
 }
 
 type ChatCompletionsStreamResponse struct {
-	Id      string                                `json:"id"`
-	Object  string                                `json:"object"`
-	Created int64                                 `json:"created"`
-	Model   string                                `json:"model"`
-	Choices []ChatCompletionsStreamResponseChoice `json:"choices"`
-	Usage   *model.Usage                          `json:"usage,omitempty"`
+	Id         string                                `json:"id"`
+	Object     string                                `json:"object"`
+	Created    int64                                 `json:"created"`
+	Model      string                                `json:"model"`
+	Choices    []ChatCompletionsStreamResponseChoice `json:"choices"`
+	SearchInfo *map[string]interface{}               `json:"search_info,omitempty"`
+	Usage      *model.Usage                          `json:"usage,omitempty"`
 }
 
 type CompletionsStreamResponse struct {

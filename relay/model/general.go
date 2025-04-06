@@ -92,6 +92,10 @@ type GeneralOpenAIRequest struct {
 	// Anthropic
 	// -------------------------------------
 	Thinking *Thinking `json:"thinking,omitempty"`
+	// -------------------------------------
+	// DashScope Qwen
+	// -------------------------------------
+	SearchOptions *map[string]interface{} `json:"search_options,omitempty"`
 }
 
 // WebSearchOptions is the tool searches the web for relevant results to use in a response.
