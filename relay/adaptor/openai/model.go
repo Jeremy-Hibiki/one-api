@@ -111,13 +111,13 @@ type TextResponseChoice struct {
 }
 
 type TextResponse struct {
-	Id          string                  `json:"id"`
-	Model       string                  `json:"model,omitempty"`
-	Object      string                  `json:"object"`
-	Created     int64                   `json:"created"`
-	Choices     []TextResponseChoice    `json:"choices"`
-	SearchInfo  *map[string]interface{} `json:"search_info,omitempty"`
-	References  *map[string]interface{} `json:"references,omitempty"`
+	Id          string                    `json:"id"`
+	Model       string                    `json:"model,omitempty"`
+	Object      string                    `json:"object"`
+	Created     int64                     `json:"created"`
+	Choices     []TextResponseChoice      `json:"choices"`
+	SearchInfo  *map[string]interface{}   `json:"search_info,omitempty"`
+	References  *[]map[string]interface{} `json:"references,omitempty"`
 	model.Usage `json:"usage"`
 }
 
