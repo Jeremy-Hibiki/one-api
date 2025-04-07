@@ -47,6 +47,11 @@ type ChatRequest struct {
 	// 2. The value range is [0.0, 2.0]. If not provided, the recommended value for each model is used.
 	// 3. It is not recommended to use this unless necessary, as unreasonable values can affect the results.
 	Temperature *float64 `json:"Temperature,omitempty"`
+	/* Search Related Parameters */
+	EnableEnhancement      bool   `json:"EnableEnhancement,omitempty"`
+	Citation               bool   `json:"Citation,omitempty"`
+	SearchInfo             string `json:"SearchInfo,omitempty"`
+	ForceSearchEnhancement bool   `json:"ForceSearchEnhancement,omitempty"`
 }
 
 type Error struct {
@@ -67,13 +72,14 @@ type ResponseChoices struct {
 }
 
 type ChatResponse struct {
-	Choices []ResponseChoices `json:"Choices,omitempty"`   // 结果
-	Created int64             `json:"Created,omitempty"`   // unix 时间戳的字符串
-	Id      string            `json:"Id,omitempty"`        // 会话 id
-	Usage   Usage             `json:"Usage,omitempty"`     // token 数量
-	Error   Error             `json:"Error,omitempty"`     // 错误信息 注意：此字段可能返回 null，表示取不到有效值
-	Note    string            `json:"Note,omitempty"`      // 注释
-	ReqID   string            `json:"RequestId,omitempty"` // 唯一请求 Id，每次请求都会返回。用于反馈接口入参
+	Choices    []ResponseChoices `json:"Choices,omitempty"`    // 结果
+	Created    int64             `json:"Created,omitempty"`    // unix 时间戳的字符串
+	Id         string            `json:"Id,omitempty"`         // 会话 id
+	Usage      Usage             `json:"Usage,omitempty"`      // token 数量
+	Error      Error             `json:"Error,omitempty"`      // 错误信息 注意：此字段可能返回 null，表示取不到有效值
+	Note       string            `json:"Note,omitempty"`       // 注释
+	ReqID      string            `json:"RequestId,omitempty"`  // 唯一请求 Id，每次请求都会返回。用于反馈接口入参
+	SearchInfo *map[string]any   `json:"SearchInfo,omitempty"` // 搜索信息
 }
 
 type ChatResponseP struct {

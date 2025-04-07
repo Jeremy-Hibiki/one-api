@@ -117,6 +117,7 @@ type TextResponse struct {
 	Created     int64                   `json:"created"`
 	Choices     []TextResponseChoice    `json:"choices"`
 	SearchInfo  *map[string]interface{} `json:"search_info,omitempty"`
+	References  *map[string]interface{} `json:"references,omitempty"`
 	model.Usage `json:"usage"`
 }
 

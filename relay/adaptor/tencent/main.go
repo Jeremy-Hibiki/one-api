@@ -107,9 +107,10 @@ func embeddingResponseTencent2OpenAI(response *EmbeddingResponse) *openai.Embedd
 
 func responseTencent2OpenAI(response *ChatResponse) *openai.TextResponse {
 	fullTextResponse := openai.TextResponse{
-		Id:      response.ReqID,
-		Object:  "chat.completion",
-		Created: helper.GetTimestamp(),
+		Id:         response.ReqID,
+		Object:     "chat.completion",
+		Created:    helper.GetTimestamp(),
+		SearchInfo: response.SearchInfo,
 		Usage: model.Usage{
 			PromptTokens:     response.Usage.PromptTokens,
 			CompletionTokens: response.Usage.CompletionTokens,
