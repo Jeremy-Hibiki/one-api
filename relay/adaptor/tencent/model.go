@@ -48,10 +48,13 @@ type ChatRequest struct {
 	// 3. It is not recommended to use this unless necessary, as unreasonable values can affect the results.
 	Temperature *float64 `json:"Temperature,omitempty"`
 	/* Search Related Parameters */
-	EnableEnhancement      bool   `json:"EnableEnhancement,omitempty"`
-	Citation               bool   `json:"Citation,omitempty"`
-	SearchInfo             string `json:"SearchInfo,omitempty"`
-	ForceSearchEnhancement bool   `json:"ForceSearchEnhancement,omitempty"`
+	EnableEnhancement          *bool `json:"EnableEnhancement,omitempty"`
+	Citation                   *bool `json:"Citation,omitempty"`
+	SearchInfo                 *bool `json:"SearchInfo,omitempty"`
+	EnableSpeedSearch          *bool `json:"EnableSpeedSearch,omitempty"`
+	EnableDeepSearch           *bool `json:"EnableDeepSearch,omitempty"`
+	ForceSearchEnhancement     *bool `json:"ForceSearchEnhancement,omitempty"`
+	EnableRecommendedQuestions *bool `json:"EnableRecommendedQuestions,omitempty"`
 }
 
 type Error struct {

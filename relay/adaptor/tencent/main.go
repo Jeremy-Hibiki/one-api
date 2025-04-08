@@ -38,11 +38,18 @@ func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
 		})
 	}
 	return &ChatRequest{
-		Model:       &request.Model,
-		Stream:      &request.Stream,
-		Messages:    messages,
-		TopP:        request.TopP,
-		Temperature: request.Temperature,
+		Model:                      &request.Model,
+		Stream:                     &request.Stream,
+		Messages:                   messages,
+		TopP:                       request.TopP,
+		Temperature:                request.Temperature,
+		EnableEnhancement:          request.EnableEnhancement,
+		Citation:                   request.Citation,
+		SearchInfo:                 request.SearchInfo,
+		EnableSpeedSearch:          request.EnableSpeedSearch,
+		EnableDeepSearch:           request.EnableDeepSearch,
+		ForceSearchEnhancement:     request.ForceSearchEnhancement,
+		EnableRecommendedQuestions: request.EnableRecommendedQuestions,
 	}
 }
 
@@ -145,6 +152,9 @@ func streamResponseTencent2OpenAI(TencentResponse *ChatResponse) *openai.ChatCom
 			choice.FinishReason = &constant.StopFinishReason
 		}
 		response.Choices = append(response.Choices, choice)
+	}
+	if TencentResponse.SearchInfo != nil {
+		response.SearchInfo = TencentResponse.SearchInfo
 	}
 	return &response
 }

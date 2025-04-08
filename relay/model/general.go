@@ -93,9 +93,19 @@ type GeneralOpenAIRequest struct {
 	// -------------------------------------
 	Thinking *Thinking `json:"thinking,omitempty"`
 	// -------------------------------------
-	// DashScope Qwen
+	// DashScope Ali Qwen
 	// -------------------------------------
 	SearchOptions *map[string]interface{} `json:"search_options,omitempty"`
+	// -------------------------------------
+	// Tencent Hunyuan
+	// -------------------------------------
+	EnableEnhancement          *bool `json:"enable_enhancement,omitempty"`
+	Citation                   *bool `json:"citation,omitempty"`
+	SearchInfo                 *bool `json:"search_info,omitempty"`
+	EnableSpeedSearch          *bool `json:"enable_speed_search,omitempty"`
+	EnableDeepSearch           *bool `json:"enable_deep_search,omitempty"`
+	ForceSearchEnhancement     *bool `json:"force_search_enhancement,omitempty"`
+	EnableRecommendedQuestions *bool `json:"enable_recommended_questions,omitempty"`
 }
 
 // WebSearchOptions is the tool searches the web for relevant results to use in a response.
