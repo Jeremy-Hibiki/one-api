@@ -128,8 +128,9 @@ func responseTencent2OpenAI(response *ChatResponse) *openai.TextResponse {
 		choice := openai.TextResponseChoice{
 			Index: 0,
 			Message: model.Message{
-				Role:    "assistant",
-				Content: response.Choices[0].Messages.Content,
+				Role:             "assistant",
+				Content:          response.Choices[0].Messages.Content,
+				ReasoningContent: response.Choices[0].Messages.ReasoningContent,
 			},
 			FinishReason: response.Choices[0].FinishReason,
 		}
@@ -148,6 +149,7 @@ func streamResponseTencent2OpenAI(TencentResponse *ChatResponse) *openai.ChatCom
 	if len(TencentResponse.Choices) > 0 {
 		var choice openai.ChatCompletionsStreamResponseChoice
 		choice.Delta.Content = TencentResponse.Choices[0].Delta.Content
+		choice.Delta.ReasoningContent = TencentResponse.Choices[0].Delta.ReasoningContent
 		if TencentResponse.Choices[0].FinishReason == "stop" {
 			choice.FinishReason = &constant.StopFinishReason
 		}
