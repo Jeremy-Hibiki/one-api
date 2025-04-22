@@ -35,7 +35,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           tags: |
-            type=schedule,pattern=nightly
+            type=raw,value=nightly
           images: |
             ${{ secrets.ALIYUN_REGISTRY }}/${{ secrets.ALIYUN_USERNAME }}/one-api
             ghcr.io/${{ env.IMAGE_NAME }}
