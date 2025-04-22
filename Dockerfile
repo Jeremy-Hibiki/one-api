@@ -16,6 +16,8 @@ RUN cd /web/air && yarn install
 
 RUN mkdir -p /web/build
 
+RUN yarn config set registry 'https://registry.npmjs.org/' -g
+
 # Build the web projects
 # do not build parallel to avoid OOM on github actions
 RUN DISABLE_ESLINT_PLUGIN='true' REACT_APP_VERSION=$(cat ./VERSION) npm run build --prefix /web/default
@@ -40,14 +42,14 @@ RUN echo "Building for TARGETARCH=${TARGETARCH}" && \
 # For ARM64 builds
 RUN apt-get update && \
     if [ "${TARGETARCH}" = "arm64" ]; then \
-        apt-get install -y gcc-aarch64-linux-gnu && \
-        export CC=aarch64-linux-gnu-gcc && \
-        export GOARCH=arm64 && \
-        export CGO_ENABLED=1 && \
-        # This is critical for ARM64 cross-compilation
-        export CGO_CFLAGS="-g -O2 -fPIC"; \
+    apt-get install -y gcc-aarch64-linux-gnu && \
+    export CC=aarch64-linux-gnu-gcc && \
+    export GOARCH=arm64 && \
+    export CGO_ENABLED=1 && \
+    # This is critical for ARM64 cross-compilation
+    export CGO_CFLAGS="-g -O2 -fPIC"; \
     else \
-        apt-get install -y build-essential; \
+    apt-get install -y build-essential; \
     fi
 
 # Common dependencies
@@ -65,13 +67,13 @@ COPY --from=builder /web/build ./web/build
 
 # Simplified build command that handles both architectures
 RUN if [ "${TARGETARCH}" = "arm64" ]; then \
-        CC=aarch64-linux-gnu-gcc \
-        CGO_ENABLED=1 \
-        GOARCH=arm64 \
-        CGO_CFLAGS="-g -O2 -fPIC" \
-        go build -trimpath -ldflags "-s -w -X github.com/songquanpeng/one-api/common.Version=$(cat VERSION)" -o one-api; \
+    CC=aarch64-linux-gnu-gcc \
+    CGO_ENABLED=1 \
+    GOARCH=arm64 \
+    CGO_CFLAGS="-g -O2 -fPIC" \
+    go build -trimpath -ldflags "-s -w -X github.com/songquanpeng/one-api/common.Version=$(cat VERSION)" -o one-api; \
     else \
-        go build -trimpath -ldflags "-s -w -X github.com/songquanpeng/one-api/common.Version=$(cat VERSION)" -o one-api; \
+    go build -trimpath -ldflags "-s -w -X github.com/songquanpeng/one-api/common.Version=$(cat VERSION)" -o one-api; \
     fi
 
 # Use a pre-built image that already has ffmpeg for ARM64
