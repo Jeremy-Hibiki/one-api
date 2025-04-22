@@ -3,7 +3,7 @@ package tencent
 type Message struct {
 	Role             string  `json:"Role"`
 	Content          string  `json:"Content"`
-	ReasoningContent *string `json:"ReasoningContent"`
+	ReasoningContent *string `json:"ReasoningContent,omitempty"`
 }
 
 type ChatRequest struct {
