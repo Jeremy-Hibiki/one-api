@@ -132,6 +132,22 @@ type GeneralOpenAIRequest struct {
 	// Response API
 	// -------------------------------------
 	Reasoning *OpenAIResponseReasoning `json:"reasoning,omitempty" binding:"omitempty,oneof=auto concise detailed"`
+	// -------------------------------------
+	// vLLM Specific APIs
+	// -------------------------------------
+	Echo                    *bool                   `json:"echo,omitempty"`
+	AddGenerationPrompt     *bool                   `json:"add_generation_prompt,omitempty"`
+	ContinueFinalMessage    *bool                   `json:"continue_final_message,omitempty"`
+	AddSpecialTokens        *bool                   `json:"add_special_tokens,omitempty"`
+	ChatTemplateKwargs      *map[string]interface{} `json:"chat_template_kwargs,omitempty"`
+	MMProcessorKwargs       *map[string]interface{} `json:"mm_processor_kwargs,omitempty"`
+	GuidedJSON              *interface{}            `json:"guided_json,omitempty"`
+	GuidedRegex             *string                 `json:"guided_regex,omitempty"`
+	GuidedChoice            *[]string               `json:"guided_choice,omitempty"`
+	GuidedGrammar           *string                 `json:"guided_grammar,omitempty"`
+	StructuralTag           *string                 `json:"structural_tag,omitempty"`
+	GuidedDecodingBackend   *string                 `json:"guided_decoding_backend,omitempty"`
+	GuidedWhitespacePattern *string                 `json:"guided_whitespace_pattern,omitempty"`
 }
 
 type OpenAIResponseReasoning struct {
