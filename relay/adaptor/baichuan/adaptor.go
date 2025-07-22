@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/relay/adaptor"
@@ -33,6 +34,11 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, request *model.ImageReques
 	return nil, nil
 }
 
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, error) {
+	// Baichuan adapter is not fully implemented yet
+	return nil, errors.New("Claude Messages API not implemented for Baichuan adapter")
+}
+
 func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Reader) (*http.Response, error) {
 	return nil, nil
 }
@@ -51,7 +57,7 @@ func (a *Adaptor) GetChannelName() string {
 
 // GetDefaultModelPricing returns the pricing information for Baichuan models
 // Based on Baichuan pricing: https://platform.baichuan-ai.com/price
-func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelPrice {
+func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 	return ModelRatios
 }
 

@@ -15,11 +15,11 @@ import (
 
 // MockAdaptor implements the adaptor.Adaptor interface for testing
 type MockAdaptor struct {
-	pricing map[string]adaptor.ModelPrice
+	pricing map[string]adaptor.ModelConfig
 	name    string
 }
 
-func (m *MockAdaptor) GetDefaultModelPricing() map[string]adaptor.ModelPrice {
+func (m *MockAdaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 	return m.pricing
 }
 
@@ -49,6 +49,9 @@ func (m *MockAdaptor) ConvertRequest(c *gin.Context, relayMode int, request *rel
 func (m *MockAdaptor) ConvertImageRequest(c *gin.Context, request *relaymodel.ImageRequest) (any, error) {
 	return nil, nil
 }
+func (m *MockAdaptor) ConvertClaudeRequest(c *gin.Context, request *relaymodel.ClaudeRequest) (any, error) {
+	return nil, nil
+}
 func (m *MockAdaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Reader) (*http.Response, error) {
 	return nil, nil
 }
@@ -64,7 +67,7 @@ func mockGetAdaptor(apiType int) adaptor.Adaptor {
 	case apitype.OpenAI:
 		return &MockAdaptor{
 			name: "openai",
-			pricing: map[string]adaptor.ModelPrice{
+			pricing: map[string]adaptor.ModelConfig{
 				"gpt-4":         {Ratio: 30 * 0.000001, CompletionRatio: 2.0},
 				"gpt-3.5-turbo": {Ratio: 1.5 * 0.000001, CompletionRatio: 2.0},
 			},
@@ -72,7 +75,7 @@ func mockGetAdaptor(apiType int) adaptor.Adaptor {
 	case apitype.Anthropic:
 		return &MockAdaptor{
 			name: "anthropic",
-			pricing: map[string]adaptor.ModelPrice{
+			pricing: map[string]adaptor.ModelConfig{
 				"claude-3-opus":   {Ratio: 15 * 0.000001, CompletionRatio: 5.0},
 				"claude-3-sonnet": {Ratio: 3 * 0.000001, CompletionRatio: 5.0},
 			},
@@ -80,7 +83,7 @@ func mockGetAdaptor(apiType int) adaptor.Adaptor {
 	case apitype.Gemini:
 		return &MockAdaptor{
 			name: "gemini",
-			pricing: map[string]adaptor.ModelPrice{
+			pricing: map[string]adaptor.ModelConfig{
 				"gemini-pro": {Ratio: 0.5 * 0.000001, CompletionRatio: 3.0},
 				"gpt-4":      {Ratio: 25 * 0.000001, CompletionRatio: 2.5}, // Conflict with OpenAI
 			},

@@ -17,7 +17,9 @@ import {
   Select,
   MenuItem,
   IconButton,
-  FormHelperText
+  FormHelperText,
+  Box,
+  Typography
 } from '@mui/material';
 
 import Visibility from '@mui/icons-material/Visibility';
@@ -58,9 +60,14 @@ const originInputs = {
 
 const EditModal = ({ open, userId, onCancel, onOk }) => {
   const theme = useTheme();
+  const [loading, setLoading] = useState(false);
   const [inputs, setInputs] = useState(originInputs);
   const [groupOptions, setGroupOptions] = useState([]);
   const [showPassword, setShowPassword] = useState(false);
+
+  // TOTP related state
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [totpLoading, setTotpLoading] = useState(false);
 
   const submit = async (values, { setErrors, setStatus, setSubmitting }) => {
     setSubmitting(true);
@@ -96,13 +103,22 @@ const EditModal = ({ open, userId, onCancel, onOk }) => {
   };
 
   const loadUser = async () => {
-    let res = await API.get(`/api/user/${userId}`);
-    const { success, message, data } = res.data;
+    setLoading(true);
+    try {
+      let res = await API.get(`/api/user/${userId}`);
+      const { success, message, data } = res.data;
     if (success) {
       data.is_edit = true;
       setInputs(data);
+      // Set TOTP status from user data
+      setTotpEnabled(data.totp_secret && data.totp_secret !== '');
     } else {
       showError(message);
+    }
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -113,6 +129,22 @@ const EditModal = ({ open, userId, onCancel, onOk }) => {
     } catch (error) {
       showError(error.message);
     }
+  };
+
+  const adminDisableTotp = async () => {
+    setTotpLoading(true);
+    try {
+      const res = await API.post(`/api/user/totp/disable/${userId}`);
+      if (res.data.success) {
+        showSuccess('TOTP has been successfully disabled for the user');
+        setTotpEnabled(false);
+      } else {
+        showError(res.data.message);
+      }
+    } catch (error) {
+      showError('Failed to disable TOTP');
+    }
+    setTotpLoading(false);
   };
 
   useEffect(() => {
@@ -131,8 +163,34 @@ const EditModal = ({ open, userId, onCancel, onOk }) => {
       </DialogTitle>
       <Divider />
       <DialogContent>
-        <Formik initialValues={inputs} enableReinitialize validationSchema={validationSchema} onSubmit={submit}>
-          {({ errors, handleBlur, handleChange, handleSubmit, touched, values, isSubmitting }) => (
+        {loading ? (
+          <Box
+            sx={{
+              minHeight: '400px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: 'background.paper',
+              borderRadius: '8px',
+              margin: '1rem 0'
+            }}
+          >
+            <Box
+              sx={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '1rem',
+                color: 'text.secondary'
+              }}
+            >
+              <div className="ui active inline loader"></div>
+              <Typography>正在加载用户信息...</Typography>
+            </Box>
+          </Box>
+        ) : (
+          <Formik initialValues={inputs} enableReinitialize validationSchema={validationSchema} onSubmit={submit}>
+            {({ errors, handleBlur, handleChange, handleSubmit, touched, values, isSubmitting }) => (
             <form noValidate onSubmit={handleSubmit}>
               <FormControl fullWidth error={Boolean(touched.username && errors.username)} sx={{ ...theme.typography.otherInput }}>
                 <InputLabel htmlFor="channel-username-label">用户名</InputLabel>
@@ -264,6 +322,53 @@ const EditModal = ({ open, userId, onCancel, onOk }) => {
                   </FormControl>
                 </>
               )}
+
+              {/* Admin TOTP Section - Show when admin is editing users */}
+              {userId && (
+                <>
+                  <Divider sx={{ my: 2 }}>双因子认证 (TOTP) - 管理员控制</Divider>
+                  {totpEnabled ? (
+                    <div style={{
+                      marginTop: 16,
+                      padding: 16,
+                      backgroundColor: '#fff3cd',
+                      border: '1px solid #ffeaa7',
+                      borderRadius: 4
+                    }}>
+                      <div style={{ fontWeight: 'bold', color: '#856404', marginBottom: 8 }}>
+                        此用户已启用 TOTP
+                      </div>
+                      <div style={{ color: '#856404', marginBottom: 12 }}>
+                        作为管理员，如果用户被锁定，您可以为其禁用 TOTP。
+                      </div>
+                      <Button
+                        variant="contained"
+                        color="error"
+                        onClick={adminDisableTotp}
+                        disabled={totpLoading}
+                      >
+                        {totpLoading ? '处理中...' : '管理员禁用 TOTP'}
+                      </Button>
+                    </div>
+                  ) : (
+                    <div style={{
+                      marginTop: 16,
+                      padding: 16,
+                      backgroundColor: '#d1ecf1',
+                      border: '1px solid #bee5eb',
+                      borderRadius: 4
+                    }}>
+                      <div style={{ fontWeight: 'bold', color: '#0c5460', marginBottom: 8 }}>
+                        此用户未启用 TOTP
+                      </div>
+                      <div style={{ color: '#0c5460' }}>
+                        此用户尚未启用双因子认证。
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
               <DialogActions>
                 <Button onClick={onCancel}>取消</Button>
                 <Button disableElevation disabled={isSubmitting} type="submit" variant="contained" color="primary">
@@ -273,6 +378,7 @@ const EditModal = ({ open, userId, onCancel, onOk }) => {
             </form>
           )}
         </Formik>
+        )}
       </DialogContent>
     </Dialog>
   );

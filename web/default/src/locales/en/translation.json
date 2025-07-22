@@ -11,9 +11,17 @@
     "setting": "Settings",
     "about": "About",
     "chat": "Chat",
+    "more": "More",
+    "language": "Language",
     "login": "Login",
     "logout": "Logout",
-    "register": "Register"
+    "register": "Register",
+    "toggleTheme": "Toggle Theme",
+    "theme": {
+      "light": "Light",
+      "dark": "Dark",
+      "system": "System"
+    }
   },
   "topup": {
     "title": "Top Up Center",
@@ -92,6 +100,7 @@
     "edit": {
       "title_edit": "Update Channel Information",
       "title_create": "Create New Channel",
+      "loading": "Loading channel information...",
       "type": "Type",
       "name": "Name",
       "name_placeholder": "Please enter name",
@@ -102,14 +111,20 @@
       "models_placeholder": "Please select models supported by this channel",
       "model_mapping": "Model Mapping",
       "model_mapping_placeholder": "Optional, used to modify model names in request body. A JSON string where keys are request model names and values are target model names",
+      "model_mapping_help": "Redirects incoming model requests to different models. For example, map 'gpt-4-0314' to 'gpt-4' to handle deprecated model names. JSON format: {\"requested_model\": \"actual_model\"}",
+      "model_configs": "Model Configs",
+      "model_configs_placeholder": "Optional, unified model configuration including pricing and properties. JSON format where keys are model names and values contain ratio, completion_ratio, and max_tokens fields.",
+      "model_configs_help": "Configure pricing and limits per model. 'ratio' sets input token cost, 'completion_ratio' sets output token cost multiplier, 'max_tokens' sets request limit. Overrides default pricing.",
       "system_prompt": "System Prompt",
       "system_prompt_placeholder": "Optional, used to force set system prompt. Use with custom model & model mapping. First create a unique custom model name above, then map it to a natively supported model",
+      "system_prompt_help": "Forces a specific system prompt for all requests through this channel. Useful for creating specialized AI assistants or enforcing specific behavior patterns.",
       "proxy_url": "Proxy",
       "proxy_url_placeholder": "This is optional and used for API calls via a proxy. Please enter the proxy URL, formatted as: https://domain.com",
       "base_url": "Base URL",
       "base_url_placeholder": "The Base URL required by the OpenAPI SDK",
       "ratelimit": "Channel RateLimit",
       "ratelimit_placeholder": "Limit the rate for each token in each channel (3min), The default(0) is Unlimited",
+      "ratelimit_help": "Controls the maximum number of requests per token per channel within a 3-minute window. Set to 0 for unlimited requests. This helps prevent abuse and manage API usage.",
       "key": "Key",
       "key_placeholder": "Please enter key",
       "batch": "Batch Create",
@@ -141,6 +156,7 @@
         "name_required": "Please enter channel name and key!",
         "models_required": "Please select at least one model!",
         "model_mapping_invalid": "Model mapping must be valid JSON format!",
+        "model_configs_invalid": "Model configs must be valid JSON format!",
         "model_ratio_invalid": "Model pricing must be valid JSON format!",
         "completion_ratio_invalid": "Completion pricing must be valid JSON format!",
         "update_success": "Channel updated successfully!",
@@ -212,6 +228,7 @@
     "edit": {
       "title_edit": "Update Token Information",
       "title_create": "Create New Token",
+      "loading": "Loading token information...",
       "name": "Name",
       "name_placeholder": "Please enter name",
       "models": "Model Scope",
@@ -299,6 +316,7 @@
     "edit": {
       "title_edit": "Update Redemption Code",
       "title_create": "Create New Redemption Code",
+      "loading": "Loading redemption information...",
       "name": "Name",
       "name_placeholder": "Please enter name",
       "quota": "Quota",
@@ -360,6 +378,7 @@
     "title": "User Management",
     "edit": {
       "title": "Update User Information",
+      "loading": "Loading user information...",
       "username": "Username",
       "username_placeholder": "Please enter new username",
       "password": "Password",

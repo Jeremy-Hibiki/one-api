@@ -1,11 +1,11 @@
 package deepl
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/relay/adaptor"
@@ -47,6 +47,12 @@ func (a *Adaptor) ConvertImageRequest(_ *gin.Context, request *model.ImageReques
 		return nil, errors.New("request is nil")
 	}
 	return request, nil
+}
+
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, error) {
+	// DeepL is a translation service, not a chat completion service
+	// Claude Messages API is not applicable for translation
+	return nil, errors.New("Claude Messages API not supported by DeepL translation service")
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Reader) (*http.Response, error) {

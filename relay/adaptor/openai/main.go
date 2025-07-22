@@ -13,17 +13,20 @@ import (
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/conv"
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
 	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
 )
 
+// Use shared constants from openai_compatible package
 const (
-	dataPrefix       = "data: "
-	done             = "[DONE]"
-	dataPrefixLength = len(dataPrefix)
+	dataPrefix       = openai_compatible.DataPrefix
+	done             = openai_compatible.Done
+	dataPrefixLength = openai_compatible.DataPrefixLength
 )
 
 // StreamHandler processes streaming responses from OpenAI API
@@ -48,7 +51,7 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 
 	// Process each line from the stream
 	for scanner.Scan() {
-		data := NormalizeDataLine(scanner.Text())
+		data := openai_compatible.NormalizeDataLine(scanner.Text())
 
 		// logger.Debugf(c.Request.Context(), "stream response: %s", data)
 
@@ -208,6 +211,15 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	// Reset response body for forwarding to client
 	resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 	logger.Debugf(c.Request.Context(), "handler response: %s", string(responseBody))
+
+	// Check if this is a Claude Messages conversion - if so, don't write response here
+	// The DoResponse method will handle the conversion and response writing
+	if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists && isClaudeConversion.(bool) {
+		// For Claude Messages conversion, just return the usage information
+		// The DoResponse method will handle the response conversion and writing
+		calculateTokenUsage(&textResponse, promptTokens, modelName)
+		return nil, &textResponse.Usage
+	}
 
 	// Forward all response headers (not just first value of each)
 	for k, values := range resp.Header {
@@ -441,7 +453,7 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 
 	// Process each line from the stream
 	for scanner.Scan() {
-		data := NormalizeDataLine(scanner.Text())
+		data := openai_compatible.NormalizeDataLine(scanner.Text())
 
 		logger.Debugf(c.Request.Context(), "receive stream event: %s", data)
 
@@ -468,11 +480,16 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 
 		// Handle full response events (like response.completed)
 		var responseAPIChunk ResponseAPIResponse
+		var outputIndex *int
 		if fullResponse != nil {
 			responseAPIChunk = *fullResponse
 		} else if streamEvent != nil {
 			// Convert streaming event to ResponseAPIResponse for processing
 			responseAPIChunk = ConvertStreamEventToResponse(streamEvent)
+			// Preserve the output_index from the streaming event for proper tool call indexing
+			if streamEvent.OutputIndex >= 0 {
+				outputIndex = &streamEvent.OutputIndex
+			}
 		} else {
 			// Skip this chunk if we can't parse it
 			continue
@@ -499,8 +516,8 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 			}
 		}
 
-		// Convert Response API chunk to ChatCompletion streaming format
-		chatCompletionChunk := ConvertResponseAPIStreamToChatCompletion(&responseAPIChunk)
+		// Convert Response API chunk to ChatCompletion streaming format with proper index context
+		chatCompletionChunk := ConvertResponseAPIStreamToChatCompletionWithIndex(&responseAPIChunk, outputIndex)
 
 		// Accumulate usage information
 		if chatCompletionChunk.Usage != nil {
@@ -674,7 +691,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 
 	// Process each line from the stream
 	for scanner.Scan() {
-		data := NormalizeDataLine(scanner.Text())
+		data := openai_compatible.NormalizeDataLine(scanner.Text())
 
 		logger.Debugf(c.Request.Context(), "receive stream event: %s", data)
 

@@ -9,9 +9,11 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/songquanpeng/one-api/relay/relaymode"
 )
 
 type Adaptor struct {
@@ -24,7 +26,13 @@ func (a *Adaptor) Init(meta *meta.Meta) {
 // https://docs.anthropic.com/claude/reference/messages_post
 // anthopic migrate to Message API
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
-	return fmt.Sprintf("%s/v1/messages", meta.BaseURL), nil
+	// Handle different relay modes for Anthropic
+	switch meta.Mode {
+	case relaymode.ClaudeMessages:
+		return fmt.Sprintf("%s/v1/messages", meta.BaseURL), nil
+	default:
+		return fmt.Sprintf("%s/v1/messages", meta.BaseURL), nil
+	}
 }
 
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Request, meta *meta.Meta) error {
@@ -37,10 +45,21 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Request, meta *me
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("anthropic-beta", "messages-2023-12-15")
 
+	// set beta headers for specific models
+	var betaHeaders []string
+
 	// https://x.com/alexalbert__/status/1812921642143900036
 	// claude-3-5-sonnet can support 8k context
 	if strings.HasPrefix(meta.ActualModelName, "claude-3-7-sonnet") {
-		req.Header.Set("anthropic-beta", "output-128k-2025-02-19")
+		betaHeaders = append(betaHeaders, "output-128k-2024-11-06")
+	}
+
+	if strings.HasPrefix(meta.ActualModelName, "claude-4") {
+		betaHeaders = append(betaHeaders, "interleaved-thinking-2025-05-14")
+	}
+
+	if len(betaHeaders) > 0 {
+		req.Header.Set("anthropic-beta", strings.Join(betaHeaders, ","))
 	}
 
 	return nil
@@ -51,7 +70,7 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 		return nil, errors.New("request is nil")
 	}
 
-	c.Set("claude_model", request.Model)
+	c.Set(ctxkey.ClaudeModel, request.Model)
 	return ConvertRequest(c, *request)
 }
 
@@ -59,6 +78,33 @@ func (a *Adaptor) ConvertImageRequest(_ *gin.Context, request *model.ImageReques
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
+	return request, nil
+}
+
+// ConvertClaudeRequest implements direct pass-through for Claude Messages API requests.
+// Instead of converting the request format, this method:
+// 1. Parses the request for billing/token counting purposes
+// 2. Sets flags to use the original request body directly for upstream calls
+// 3. Ensures maximum compatibility with Anthropic's API by avoiding conversion artifacts
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("request is nil")
+	}
+
+	c.Set(ctxkey.ClaudeModel, request.Model)
+	// Mark this as a native Claude Messages request (no conversion needed)
+	c.Set(ctxkey.ClaudeMessagesNative, true)
+	// Set flag to use direct pass-through instead of conversion
+	c.Set(ctxkey.ClaudeDirectPassthrough, true)
+
+	// Still parse the request for billing purposes, but we won't use the converted result
+	// The original request body will be forwarded directly for better compatibility
+	_, err := ConvertClaudeRequest(c, *request)
+	if err != nil {
+		return nil, err
+	}
+
+	// Return the original request - this won't be marshaled since we use direct pass-through
 	return request, nil
 }
 
@@ -84,7 +130,7 @@ func (a *Adaptor) GetChannelName() string {
 }
 
 // Pricing methods - Anthropic adapter manages its own model pricing
-func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelPrice {
+func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 	return ModelRatios
 }
 

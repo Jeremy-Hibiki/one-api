@@ -42,6 +42,7 @@ func SetApiRouter(router *gin.Engine) {
 			selfRoute.Use(middleware.UserAuth())
 			{
 				selfRoute.GET("/dashboard", controller.GetUserDashboard)
+				selfRoute.GET("/dashboard/users", controller.GetDashboardUsers)
 				selfRoute.GET("/self", controller.GetSelf)
 				selfRoute.PUT("/self", controller.UpdateSelf)
 				selfRoute.DELETE("/self", controller.DeleteSelf)
@@ -49,6 +50,10 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.GET("/aff", controller.GetAffCode)
 				selfRoute.POST("/topup", controller.TopUp)
 				selfRoute.GET("/available_models", controller.GetUserAvailableModels)
+				selfRoute.GET("/totp/status", controller.GetTotpStatus)
+				selfRoute.GET("/totp/setup", controller.SetupTotp)
+				selfRoute.POST("/totp/confirm", controller.ConfirmTotp)
+				selfRoute.POST("/totp/disable", controller.DisableTotp)
 			}
 
 			adminRoute := userRoute.Group("/")
@@ -61,6 +66,7 @@ func SetApiRouter(router *gin.Engine) {
 				adminRoute.POST("/manage", controller.ManageUser)
 				adminRoute.PUT("/", controller.UpdateUser)
 				adminRoute.DELETE("/:id", controller.DeleteUser)
+				adminRoute.POST("/totp/disable/:id", controller.AdminDisableUserTotp)
 			}
 		}
 		optionRoute := apiRouter.Group("/option")
@@ -87,6 +93,17 @@ func SetApiRouter(router *gin.Engine) {
 			channelRoute.PUT("/pricing/:id", controller.UpdateChannelPricing)
 			channelRoute.DELETE("/disabled", controller.DeleteDisabledChannel)
 			channelRoute.DELETE("/:id", controller.DeleteChannel)
+		}
+		debugRoute := apiRouter.Group("/debug")
+		debugRoute.Use(middleware.AdminAuth())
+		{
+			debugRoute.POST("/channel/:id/debug", controller.DebugChannelModelConfigs)
+			debugRoute.GET("/channels", controller.DebugAllChannelModelConfigs)
+			debugRoute.POST("/channel/:id/fix", controller.FixChannelModelConfigs)
+			debugRoute.GET("/channels/validate", controller.ValidateAllChannelModelConfigs)
+			debugRoute.POST("/channels/remigrate", controller.RemigratAllChannels)
+			debugRoute.GET("/channel/:id/migration-status", controller.GetChannelMigrationStatus)
+			debugRoute.POST("/channels/clean", controller.CleanAllMixedModelData)
 		}
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())

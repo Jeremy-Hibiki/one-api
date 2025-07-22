@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"time"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
@@ -128,10 +128,15 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	return nil
 }
 
-// getChannelRatios gets channel model and completion ratios
+// getChannelRatios gets channel model and completion ratios from unified ModelConfigs
 func getChannelRatios(c *gin.Context, channelId int) (map[string]float64, map[string]float64) {
 	channel := c.MustGet(ctxkey.ChannelModel).(*model.Channel)
-	return channel.GetModelRatio(), channel.GetCompletionRatio()
+
+	// Only use unified ModelConfigs after migration
+	modelRatios := channel.GetModelRatioFromConfigs()
+	completionRatios := channel.GetCompletionRatioFromConfigs()
+
+	return modelRatios, completionRatios
 }
 
 // getAndValidateResponseAPIRequest gets and validates Response API request

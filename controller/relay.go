@@ -43,6 +43,8 @@ func relayHelper(c *gin.Context, relayMode int) *model.ErrorWithStatusCode {
 		err = controller.RelayProxyHelper(c, relayMode)
 	case relaymode.ResponseAPI:
 		err = controller.RelayResponseAPIHelper(c)
+	case relaymode.ClaudeMessages:
+		err = controller.RelayClaudeMessagesHelper(c)
 	default:
 		err = controller.RelayTextHelper(c)
 	}
@@ -96,6 +98,23 @@ func Relay(c *gin.Context) {
 		retryTimes = retryTimes * 2 // Increase retry attempts for 429 errors
 		logger.Infof(ctx, "429 error detected, increasing retry attempts to %d to exhaust alternative channels", retryTimes)
 	}
+
+	// For 413 errors, increase retry attempts to exhaust all available channels
+	// to avoid returning 413 to users when other channels might be available
+	if bizErr.StatusCode == http.StatusRequestEntityTooLarge {
+		// Get the total number of channels for this model/group
+		// and try to retry all channels
+		channels, err := dbmodel.GetChannelsFromCache(group, originalModel)
+		if err != nil {
+			retryTimes = 1
+			logger.Debugf(ctx, "413 error detected, Get channels from cache error: %v", err)
+			logger.Warnf(ctx, "413 error detected, Failed to get total number of channels for a model/group from cache. increasing retry attempts to %d", retryTimes)
+		} else {
+			retryTimes = len(channels) - 1
+			logger.Infof(ctx, "413 error detected, increasing retry attempts to %d to exhaust alternative channels", retryTimes)
+		}
+	}
+
 	// Track failed channels to avoid retrying them, especially for 429 errors
 	failedChannels := make(map[int]bool)
 	failedChannels[lastFailedChannelId] = true
@@ -110,30 +129,36 @@ func Relay(c *gin.Context) {
 	// since the highest priority channel is rate limited
 	shouldTryLowerPriorityFirst := bizErr.StatusCode == http.StatusTooManyRequests
 
+	// For 413 errors, we should try Larger MaxTokens channels
+	shouldTryLargerMaxTokensFirst := bizErr.StatusCode == http.StatusRequestEntityTooLarge
+
 	for i := retryTimes; i > 0; i-- {
 		var channel *dbmodel.Channel
 		var err error
 
 		// Try to find an available channel, preferring lower priority channels for 429 errors
 		if config.DebugEnabled {
-			logger.Infof(ctx, "Debug: Attempting retry %d, excluding channels: %v, shouldTryLowerPriorityFirst: %v",
-				retryTimes-i+1, getChannelIds(failedChannels), shouldTryLowerPriorityFirst)
+			logger.Infof(ctx, "Debug: Attempting retry %d, excluding channels: %v, shouldTryLowerPriorityFirst: %v, shouldTryLargerMaxTokensFirst: %v",
+				retryTimes-i+1, getChannelIds(failedChannels), shouldTryLowerPriorityFirst, shouldTryLargerMaxTokensFirst)
 		}
 
-		if shouldTryLowerPriorityFirst {
+		if shouldTryLargerMaxTokensFirst {
+			// For 413 errors, try larger max_tokens channels
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, true)
+		} else if shouldTryLowerPriorityFirst {
 			// For 429 errors, first try lower priority channels while excluding failed ones
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels)
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, false)
 			if err != nil {
 				// If no lower priority channels available, try highest priority channels (excluding failed ones)
 				logger.Infof(ctx, "No lower priority channels available, trying highest priority channels, excluding: %v", getChannelIds(failedChannels))
-				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels)
+				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, false)
 			}
 		} else {
 			// For non-429 errors, try highest priority first, then lower priority (excluding failed ones)
-			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels)
+			channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, false, failedChannels, false)
 			if err != nil {
 				logger.Infof(ctx, "No highest priority channels available, trying lower priority channels, excluding: %v", getChannelIds(failedChannels))
-				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels)
+				channel, err = dbmodel.CacheGetRandomSatisfiedChannelExcluding(group, originalModel, true, failedChannels, false)
 			}
 		}
 
@@ -270,16 +295,28 @@ func logChannelSuspensionStatus(ctx context.Context, group, model string, failed
 func processChannelRelayError(ctx context.Context, userId int, channelId int, channelName string, group string, originalModel string, err model.ErrorWithStatusCode) {
 	logger.Errorf(ctx, "relay error (channel id %d, name %s, user_id %d, group: %s, model: %s): %s", channelId, channelName, userId, group, originalModel, err.Message)
 
+	// Handle 400 errors differently - they are client request issues, not channel problems
+	if err.StatusCode == http.StatusBadRequest {
+		// For 400 errors, log but don't disable channel or suspend abilities
+		// These are typically schema validation errors or malformed requests
+		logger.Infof(ctx, "client request error (400) for channel %d (%s) - not disabling channel as this is not a channel issue", channelId, channelName)
+		// Still emit failure for monitoring purposes, but don't disable the channel
+		monitor.Emit(channelId, false)
+		return
+	}
+
 	if err.StatusCode == http.StatusTooManyRequests {
 		// For 429, we will suspend the specific model for a while
 		logger.Infof(ctx, "suspending model %s in group %s on channel %d (%s) due to rate limit", originalModel, group, channelId, channelName)
 		if suspendErr := dbmodel.SuspendAbility(ctx,
 			group, originalModel, channelId,
 			config.ChannelSuspendSecondsFor429); suspendErr != nil {
-			logger.Errorf(ctx, "failed to suspend ability for channel %d, model %s, group %s: %v", channelId, originalModel, group, suspendErr)
+			logger.Errorf(ctx, "failed to suspend ability for channel %d, model %s, group %s: %v", channelId, originalModel, group, errors.Wrap(suspendErr, "suspend ability failed"))
 		}
 	}
 
+	// Only disable channel for server errors (5xx) or specific client errors that indicate channel issues
+	// 400 errors are client request problems and should not disable channels
 	if monitor.ShouldDisableChannel(&err.Error, err.StatusCode) {
 		monitor.DisableChannel(channelId, channelName, err.Message)
 	} else {
