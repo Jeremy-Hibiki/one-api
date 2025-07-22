@@ -2,9 +2,28 @@ package model
 
 import (
 	"mime/multipart"
-
-	"github.com/songquanpeng/one-api/relay/adaptor/openrouter"
 )
+
+// RequestProvider customize how your requests are routed using the provider object
+// in the request body for Chat Completions and Completions.
+//
+// https://openrouter.ai/docs/features/provider-routing
+type RequestProvider struct {
+	// Order is list of provider names to try in order (e.g. ["Anthropic", "OpenAI"]). Default: empty
+	Order []string `json:"order,omitempty"`
+	// AllowFallbacks is whether to allow backup providers when the primary is unavailable. Default: true
+	AllowFallbacks bool `json:"allow_fallbacks,omitempty"`
+	// RequireParameters is only use providers that support all parameters in your request. Default: false
+	RequireParameters bool `json:"require_parameters,omitempty"`
+	// DataCollection is control whether to use providers that may store data ("allow" or "deny"). Default: "allow"
+	DataCollection string `json:"data_collection,omitempty" binding:"omitempty,oneof=allow deny"`
+	// Ignore is list of provider names to skip for this request. Default: empty
+	Ignore []string `json:"ignore,omitempty"`
+	// Quantizations is list of quantization levels to filter by (e.g. ["int4", "int8"]). Default: empty
+	Quantizations []string `json:"quantizations,omitempty"`
+	// Sort is sort providers by price or throughput (e.g. "price" or "throughput"). Default: empty
+	Sort string `json:"sort,omitempty" binding:"omitempty,oneof=price throughput latency"`
+}
 
 type ResponseFormat struct {
 	Type       string      `json:"type,omitempty"`
@@ -31,6 +50,7 @@ type GeneralOpenAIRequest struct {
 	// https://platform.openai.com/docs/api-reference/chat/create
 	Messages []Message `json:"messages,omitempty"`
 	Model    string    `json:"model,omitempty"`
+	Arn      string    `json:"arn,omitempty"` // for aws arn
 	Store    *bool     `json:"store,omitempty"`
 	Metadata any       `json:"metadata,omitempty"`
 	// FrequencyPenalty is a number between -2.0 and 2.0 that penalizes
@@ -68,7 +88,7 @@ type GeneralOpenAIRequest struct {
 	ParallelTooCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	User             string          `json:"user,omitempty"`
 	FunctionCall     any             `json:"function_call,omitempty"`
-	Functions        any             `json:"functions,omitempty"`
+	Functions        []Function      `json:"functions,omitempty"`
 	// https://platform.openai.com/docs/api-reference/embeddings/create
 	Input          any    `json:"input,omitempty"`
 	EncodingFormat string `json:"encoding_format,omitempty"`
@@ -83,11 +103,13 @@ type GeneralOpenAIRequest struct {
 	// Others
 	Instruction string `json:"instruction,omitempty"`
 	NumCtx      int    `json:"num_ctx,omitempty"`
+	// Duration is the length of the audio/video in seconds
+	Duration *int `json:"duration,omitempty"`
 	// -------------------------------------
 	// Openrouter
 	// -------------------------------------
-	Provider         *openrouter.RequestProvider `json:"provider,omitempty"`
-	IncludeReasoning *bool                       `json:"include_reasoning,omitempty"`
+	Provider         *RequestProvider `json:"provider,omitempty"`
+	IncludeReasoning *bool            `json:"include_reasoning,omitempty"`
 	// -------------------------------------
 	// Anthropic
 	// -------------------------------------
@@ -106,6 +128,17 @@ type GeneralOpenAIRequest struct {
 	EnableDeepSearch           *bool `json:"enable_deep_search,omitempty"`
 	ForceSearchEnhancement     *bool `json:"force_search_enhancement,omitempty"`
 	EnableRecommendedQuestions *bool `json:"enable_recommended_questions,omitempty"`
+	// -------------------------------------
+	// Response API
+	// -------------------------------------
+	Reasoning *OpenAIResponseReasoning `json:"reasoning,omitempty" binding:"omitempty,oneof=auto concise detailed"`
+}
+
+type OpenAIResponseReasoning struct {
+	// Effort defines the reasoning effort level
+	Effort *string `json:"effort,omitempty" binding:"omitempty,oneof=low medium high"`
+	// Summary defines whether to include a summary of the reasoning
+	Summary *string `json:"summary,omitempty" binding:"omitempty,oneof=auto concise detailed"`
 }
 
 // WebSearchOptions is the tool searches the web for relevant results to use in a response.

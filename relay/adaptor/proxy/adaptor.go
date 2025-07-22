@@ -6,8 +6,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	channelhelper "github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/meta"
@@ -19,7 +20,9 @@ var _ adaptor.Adaptor = new(Adaptor)
 
 const channelName = "proxy"
 
-type Adaptor struct{}
+type Adaptor struct {
+	adaptor.DefaultPricingMethods
+}
 
 func (a *Adaptor) Init(meta *meta.Meta) {
 }
@@ -45,7 +48,14 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Met
 		}
 	}
 
-	return nil, nil
+	// Return empty usage with zero tokens for proxy requests
+	// This will allow proper logging in postConsumeQuota without charging anything
+	return &model.Usage{
+		PromptTokens:     0,
+		CompletionTokens: 0,
+		TotalTokens:      0,
+		ToolsCost:        0,
+	}, nil
 }
 
 func (a *Adaptor) GetModelList() (models []string) {

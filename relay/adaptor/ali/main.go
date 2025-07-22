@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
@@ -77,7 +78,9 @@ func ConvertImageRequest(request model.ImageRequest) *ImageRequest {
 	imageRequest.Model = request.Model
 	imageRequest.Parameters.Size = strings.Replace(request.Size, "x", "*", -1)
 	imageRequest.Parameters.N = request.N
-	imageRequest.ResponseFormat = request.ResponseFormat
+	if request.ResponseFormat != nil {
+		imageRequest.ResponseFormat = *request.ResponseFormat
+	}
 
 	return &imageRequest
 }

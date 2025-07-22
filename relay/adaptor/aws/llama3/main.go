@@ -12,11 +12,12 @@ import (
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/random"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
@@ -74,7 +75,6 @@ func Handler(c *gin.Context, awsCli *bedrockruntime.Client, modelName string) (*
 	if err != nil {
 		return utils.WrapErr(errors.Wrap(err, "awsModelID")), nil
 	}
-
 	awsModelID = utils.ConvertModelID2CrossRegionProfile(awsModelID, awsCli.Options().Region)
 	awsReq := &bedrockruntime.InvokeModelInput{
 		ModelId:     aws.String(awsModelID),
@@ -145,7 +145,6 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 	if err != nil {
 		return utils.WrapErr(errors.Wrap(err, "awsModelID")), nil
 	}
-
 	awsModelID = utils.ConvertModelID2CrossRegionProfile(awsModelID, awsCli.Options().Region)
 	awsReq := &bedrockruntime.InvokeModelWithResponseStreamInput{
 		ModelId:     aws.String(awsModelID),

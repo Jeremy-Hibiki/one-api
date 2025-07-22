@@ -1,9 +1,10 @@
 package aws
 
 import (
+	"github.com/Laisky/errors/v2"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
 	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
@@ -25,7 +26,10 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	if err != nil {
 		return nil, errors.Wrap(err, "convert request")
 	}
-
+	claudeReq.AnthropicVersion = "bedrock-2023-05-31"
+	claudeReq.MaxTokens = request.MaxTokens
+	claudeReq.TopK = request.TopK
+	claudeReq.TopP = request.TopP
 	c.Set(ctxkey.RequestModel, request.Model)
 	c.Set(ctxkey.ConvertedRequest, claudeReq)
 	return claudeReq, nil

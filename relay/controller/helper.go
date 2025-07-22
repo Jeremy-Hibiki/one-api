@@ -7,21 +7,24 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
+	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
+	"github.com/songquanpeng/one-api/relay/billing"
+	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/constant/role"
 	"github.com/songquanpeng/one-api/relay/controller/validator"
 	"github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/songquanpeng/one-api/relay/pricing"
 	"github.com/songquanpeng/one-api/relay/relaymode"
 )
 
@@ -47,6 +50,13 @@ func getAndValidateTextRequest(c *gin.Context, relayMode int) (*relaymodel.Gener
 func getPromptTokens(ctx context.Context, textRequest *relaymodel.GeneralOpenAIRequest, relayMode int) int {
 	switch relayMode {
 	case relaymode.ChatCompletions:
+		actualModel := textRequest.Model
+		// video request
+		if strings.HasPrefix(actualModel, "veo-") {
+			return ratio.TokensPerSec * 8
+		}
+
+		// text request
 		return openai.CountTokenMessages(ctx, textRequest.Messages, textRequest.Model)
 	case relaymode.Completions:
 		return openai.CountTokenInput(textRequest.Prompt, textRequest.Model)
@@ -61,7 +71,30 @@ func getPreConsumedQuota(textRequest *relaymodel.GeneralOpenAIRequest, promptTok
 	if textRequest.MaxTokens != 0 {
 		preConsumedTokens += int64(textRequest.MaxTokens)
 	}
-	return int64(float64(preConsumedTokens) * ratio)
+
+	baseQuota := int64(float64(preConsumedTokens) * ratio)
+
+	// Add estimated structured output cost if using JSON schema
+	// This ensures pre-consumption quota accounts for the additional structured output costs
+	if textRequest.ResponseFormat != nil &&
+		textRequest.ResponseFormat.Type == "json_schema" &&
+		textRequest.ResponseFormat.JsonSchema != nil {
+		// Estimate structured output cost based on max tokens (conservative approach)
+		estimatedCompletionTokens := textRequest.MaxTokens
+		if estimatedCompletionTokens == 0 {
+			// If no max tokens specified, use a conservative estimate
+			estimatedCompletionTokens = 1000
+		}
+
+		// Apply the same 25% multiplier used in post-consumption
+		// Note: We can't get exact model ratio here easily, so use the base ratio as approximation
+		estimatedStructuredCost := int64(float64(estimatedCompletionTokens) * 0.25 * ratio)
+		baseQuota += estimatedStructuredCost
+
+		logger.Debugf(context.Background(), "Pre-consumption: added estimated structured output cost %d for JSON schema request", estimatedStructuredCost)
+	}
+
+	return baseQuota
 }
 
 func preConsumeQuota(c *gin.Context, textRequest *relaymodel.GeneralOpenAIRequest, promptTokens int, ratio float64, meta *meta.Meta) (int64, *relaymodel.ErrorWithStatusCode) {
@@ -104,13 +137,16 @@ func postConsumeQuota(ctx context.Context,
 	preConsumedQuota int64,
 	modelRatio float64,
 	groupRatio float64,
-	systemPromptReset bool) (quota int64) {
+	systemPromptReset bool,
+	channelCompletionRatio map[string]float64) (quota int64) {
 	if usage == nil {
 		logger.Error(ctx, "usage is nil, which is unexpected")
 		return
 	}
 
-	completionRatio := billingratio.GetCompletionRatio(textRequest.Model, meta.ChannelType)
+	// Use three-layer pricing system for completion ratio
+	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	completionRatio := pricing.GetCompletionRatioWithThreeLayers(textRequest.Model, channelCompletionRatio, pricingAdaptor)
 	promptTokens := usage.PromptTokens
 	// It appears that DeepSeek's official service automatically merges ReasoningTokens into CompletionTokens,
 	// but the behavior of third-party providers may differ, so for now we do not add them manually.
@@ -127,37 +163,11 @@ func postConsumeQuota(ctx context.Context,
 		// we cannot just return, because we may have to return the pre-consumed quota
 		quota = 0
 	}
+	// Use centralized detailed billing function to follow DRY principle
 	quotaDelta := quota - preConsumedQuota
-	err := model.PostConsumeTokenQuota(meta.TokenId, quotaDelta)
-	if err != nil {
-		logger.Error(ctx, "error consuming token remain quota: "+err.Error())
-	}
-	err = model.CacheUpdateUserQuota(ctx, meta.UserId)
-	if err != nil {
-		logger.Error(ctx, "error update user quota cache: "+err.Error())
-	}
-
-	var logContent string
-	if usage.ToolsCost == 0 {
-		logContent = fmt.Sprintf("model rate %.2f, group rate %.2f, completion rate %.2f", modelRatio, groupRatio, completionRatio)
-	} else {
-		logContent = fmt.Sprintf("model rate %.2f, group rate %.2f, completion rate %.2f, tools cost %d", modelRatio, groupRatio, completionRatio, usage.ToolsCost)
-	}
-	model.RecordConsumeLog(ctx, &model.Log{
-		UserId:            meta.UserId,
-		ChannelId:         meta.ChannelId,
-		PromptTokens:      promptTokens,
-		CompletionTokens:  completionTokens,
-		ModelName:         textRequest.Model,
-		TokenName:         meta.TokenName,
-		Quota:             int(quota),
-		Content:           logContent,
-		IsStream:          meta.IsStream,
-		ElapsedTime:       helper.CalcElapsedTime(meta.StartTime),
-		SystemPromptReset: systemPromptReset,
-	})
-	model.UpdateUserUsedQuotaAndRequestCount(meta.UserId, quota)
-	model.UpdateChannelUsedQuota(meta.ChannelId, quota)
+	billing.PostConsumeQuotaDetailed(ctx, meta.TokenId, quotaDelta, quota, meta.UserId, meta.ChannelId,
+		promptTokens, completionTokens, modelRatio, groupRatio, textRequest.Model, meta.TokenName,
+		meta.IsStream, meta.StartTime, systemPromptReset, completionRatio, usage.ToolsCost)
 
 	return quota
 }

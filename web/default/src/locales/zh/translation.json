@@ -108,6 +108,8 @@
       "proxy_url_placeholder": "此项可选，用于通过代理站来进行 API 调用，请输入代理站地址，格式为：https://domain.com。注意，这里所需要填入的代理地址仅会在实际请求时替换域名部分，如果你想填入 OpenAI SDK 中所要求的 Base URL，请使用 OpenAI 兼容渠道类型",
       "base_url": "Base URL",
       "base_url_placeholder": "OpenAPI SDK 中所要求的 Base URL",
+      "ratelimit": "渠道限速",
+      "ratelimit_placeholder": "为每个Token 的每个Channel限速 (3分钟), 默认0为不限速",
       "key": "密钥",
       "key_placeholder": "请输入密钥",
       "batch": "批量创建",
@@ -119,6 +121,12 @@
       },
       "oauth_jwt_config": "OAuth JWT Config",
       "oauth_jwt_config_placeholder": "请输入 OAuth JWT Config 配置信息",
+      "model_ratio": "模型定价",
+      "model_ratio_placeholder": "可选，渠道专用模型定价，JSON 格式。留空则使用默认定价。",
+      "model_ratio_help": "JSON 格式：{\"模型名称\": 价格倍率}。价格倍率乘以 token 数量计算费用。",
+      "completion_ratio": "输出定价",
+      "completion_ratio_placeholder": "可选，渠道专用输出 token 定价倍率，JSON 格式。",
+      "completion_ratio_help": "JSON 格式：{\"模型名称\": 输出倍率}。输出倍率乘以输出 token 数量。",
       "buttons": {
         "cancel": "取消",
         "submit": "提交",
@@ -126,12 +134,15 @@
         "fill_all": "填入所有模型",
         "clear": "清除所有模型",
         "add_custom": "填入",
-        "custom_placeholder": "输入自定义模型名称"
+        "custom_placeholder": "输入自定义模型名称",
+        "load_defaults": "加载默认值"
       },
       "messages": {
         "name_required": "请填写渠道名称和渠道密钥！",
         "models_required": "请至少选择一个模型！",
         "model_mapping_invalid": "模型映射必须是合法的 JSON 格式！",
+        "model_ratio_invalid": "模型定价必须是合法的 JSON 格式！",
+        "completion_ratio_invalid": "输出定价必须是合法的 JSON 格式！",
         "update_success": "渠道更新成功！",
         "create_success": "渠道创建成功！",
         "oauth_jwt_config_invalid_format": "OAuth JWT Config 必须是是合法的 JSON 格式！",

@@ -7,25 +7,35 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+
+	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
+	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
 )
 
-var ModelList = []string{
+// ModelRatios contains all supported models and their pricing ratios
+// Model list is derived from the keys of this map, eliminating redundancy
+// Based on VertexAI Imagen pricing: https://cloud.google.com/vertex-ai/generative-ai/pricing
+var ModelRatios = map[string]adaptor.ModelPrice{
 	// -------------------------------------
-	// generate
+	// Image Generation Models
 	// -------------------------------------
-	"imagen-3.0-generate-001", "imagen-3.0-generate-002",
-	"imagen-3.0-fast-generate-001",
+	"imagen-3.0-generate-001":      {Ratio: 40.0 * ratio.MilliTokensUsd, CompletionRatio: 1.0}, // $0.04 per image
+	"imagen-3.0-generate-002":      {Ratio: 40.0 * ratio.MilliTokensUsd, CompletionRatio: 1.0}, // $0.04 per image
+	"imagen-3.0-fast-generate-001": {Ratio: 20.0 * ratio.MilliTokensUsd, CompletionRatio: 1.0}, // $0.02 per image
 	// -------------------------------------
-	// edit
+	// Image Editing Models
 	// -------------------------------------
-	"imagen-3.0-capability-001",
+	"imagen-3.0-capability-001": {Ratio: 50.0 * ratio.MilliTokensUsd, CompletionRatio: 1.0}, // $0.05 per image
 }
+
+// ModelList derived from ModelRatios for backward compatibility
+var ModelList = adaptor.GetModelListFromPricing(ModelRatios)
 
 type Adaptor struct {
 }
@@ -41,7 +51,7 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, request *model.ImageRequest) (any, error) {
 	meta := meta.GetByContext(c)
 
-	if request.ResponseFormat != "b64_json" {
+	if request.ResponseFormat == nil || *request.ResponseFormat != "b64_json" {
 		return nil, errors.New("only support b64_json response format")
 	}
 	if request.N <= 0 {

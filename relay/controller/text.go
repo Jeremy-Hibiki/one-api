@@ -6,23 +6,26 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/pkg/errors"
+
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/metrics"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/apitype"
 	"github.com/songquanpeng/one-api/relay/billing"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	metalib "github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/songquanpeng/one-api/relay/pricing"
 )
 
 func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
@@ -46,8 +49,20 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	meta.ActualModelName = textRequest.Model
 	// set system prompt if not empty
 	systemPromptReset := setSystemPrompt(ctx, textRequest, meta.ForcedSystemPrompt)
-	// get model ratio & group ratio
-	modelRatio := billingratio.GetModelRatio(textRequest.Model, meta.ChannelType)
+
+	// get channel-specific pricing if available
+	var channelModelRatio map[string]float64
+	var channelCompletionRatio map[string]float64
+	if channelModel, ok := c.Get(ctxkey.ChannelModel); ok {
+		if channel, ok := channelModel.(*model.Channel); ok {
+			channelModelRatio = channel.GetModelRatio()
+			channelCompletionRatio = channel.GetCompletionRatio()
+		}
+	}
+
+	// get model ratio using three-layer pricing system
+	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	modelRatio := pricing.GetModelRatioWithThreeLayers(textRequest.Model, channelModelRatio, pricingAdaptor)
 	// groupRatio := billingratio.GetGroupRatio(meta.Group)
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
 
@@ -99,11 +114,54 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// post-consume quota
 	quotaId := c.GetInt(ctxkey.Id)
 	requestId := c.GetString(ctxkey.RequestId)
+
+	// Record detailed Prometheus metrics
+	if usage != nil {
+		// Get user information for metrics
+		userId := strconv.Itoa(meta.UserId)
+		username := c.GetString(ctxkey.Username)
+		if username == "" {
+			username = "unknown"
+		}
+		group := meta.Group
+		if group == "" {
+			group = "default"
+		}
+
+		// Record relay request metrics with actual usage
+		metrics.GlobalRecorder.RecordRelayRequest(
+			meta.StartTime,
+			meta.ChannelId,
+			channeltype.IdToName(meta.ChannelType),
+			meta.ActualModelName,
+			userId,
+			true,
+			usage.PromptTokens,
+			usage.CompletionTokens,
+			0, // Will be calculated in postConsumeQuota
+		)
+
+		// Record user metrics
+		userBalance := float64(c.GetInt64(ctxkey.UserQuota))
+		metrics.GlobalRecorder.RecordUserMetrics(
+			userId,
+			username,
+			group,
+			0, // Will be calculated in postConsumeQuota
+			usage.PromptTokens,
+			usage.CompletionTokens,
+			userBalance,
+		)
+
+		// Record model usage metrics
+		metrics.GlobalRecorder.RecordModelUsage(meta.ActualModelName, channeltype.IdToName(meta.ChannelType), time.Since(meta.StartTime))
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		quota := postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, modelRatio, groupRatio, systemPromptReset)
+		quota := postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, modelRatio, groupRatio, systemPromptReset, channelCompletionRatio)
 
 		// also update user request cost
 		if quota != 0 {

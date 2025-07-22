@@ -5,9 +5,8 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/alibailian"
 	"github.com/songquanpeng/one-api/relay/adaptor/baichuan"
 	"github.com/songquanpeng/one-api/relay/adaptor/baiduv2"
-	"github.com/songquanpeng/one-api/relay/adaptor/deepseek"
 	"github.com/songquanpeng/one-api/relay/adaptor/doubao"
-	"github.com/songquanpeng/one-api/relay/adaptor/geminiv2"
+	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
 	"github.com/songquanpeng/one-api/relay/adaptor/groq"
 	"github.com/songquanpeng/one-api/relay/adaptor/lingyiwanwu"
 	"github.com/songquanpeng/one-api/relay/adaptor/minimax"
@@ -64,7 +63,7 @@ func GetCompatibleChannelMeta(channelType int) (string, []string) {
 	case channeltype.StepFun:
 		return "stepfun", stepfun.ModelList
 	case channeltype.DeepSeek:
-		return "deepseek", deepseek.ModelList
+		return "deepseek", []string{"deepseek-chat", "deepseek-reasoner"}
 	case channeltype.TogetherAI:
 		return "together.ai", togetherai.ModelList
 	case channeltype.Doubao:
@@ -80,11 +79,12 @@ func GetCompatibleChannelMeta(channelType int) (string, []string) {
 	case channeltype.XunfeiV2:
 		return "xunfeiv2", xunfeiv2.ModelList
 	case channeltype.OpenRouter:
-		return "openrouter", openrouter.ModelList
+		adaptor := &openrouter.Adaptor{}
+		return "openrouter", adaptor.GetModelList()
 	case channeltype.AliBailian:
 		return "alibailian", alibailian.ModelList
 	case channeltype.GeminiOpenAICompatible:
-		return "geminiv2", geminiv2.ModelList
+		return "geminiv2", geminiOpenaiCompatible.ModelList
 	default:
 		return "openai", ModelList
 	}

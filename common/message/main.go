@@ -3,7 +3,8 @@ package message
 import (
 	"fmt"
 
-	"github.com/pkg/errors"
+	"github.com/Laisky/errors/v2"
+
 	"github.com/songquanpeng/one-api/common/config"
 )
 
