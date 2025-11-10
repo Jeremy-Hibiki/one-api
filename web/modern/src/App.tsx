@@ -64,7 +64,9 @@ function App() {
     <ThemeProvider defaultTheme="system" storageKey="one-api-theme">
       <QueryClientProvider client={queryClient}>
         <NotificationsProvider>
-          <Router>
+          <Router future={{
+            v7_startTransition: true,
+          }}>
             <div className="bg-background">
               <Routes>
                 {/* Public auth routes */}

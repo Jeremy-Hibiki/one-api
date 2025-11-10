@@ -23,7 +23,11 @@ root.render(
     <ThemeProvider>
       <StatusProvider>
         <UserProvider>
-          <BrowserRouter>
+          <BrowserRouter
+            future={{
+              v7_startTransition: true,
+            }}
+          >
             <Header />
             <Container className={'main-content'}>
               <App />
