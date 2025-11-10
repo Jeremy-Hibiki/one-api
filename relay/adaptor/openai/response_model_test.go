@@ -2,9 +2,19 @@ package openai
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/relay/channeltype"
+	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
 )
 
@@ -54,17 +64,155 @@ func TestConvertChatCompletionToResponseAPI(t *testing.T) {
 		t.Errorf("Expected 1 input item, got %d", len(responseAPI.Input))
 	}
 
-	inputMessage, ok := responseAPI.Input[0].(model.Message)
+	inputMessage, ok := responseAPI.Input[0].(map[string]any)
 	if !ok {
-		t.Error("Expected input item to be model.Message type")
+		t.Error("Expected input item to be map[string]interface{} type")
 	}
 
-	if inputMessage.Role != "user" {
-		t.Errorf("Expected message role 'user', got '%s'", inputMessage.Role)
+	if inputMessage["role"] != "user" {
+		t.Errorf("Expected message role 'user', got '%v'", inputMessage["role"])
 	}
 
-	if inputMessage.StringContent() != "Hello, world!" {
-		t.Errorf("Expected message content 'Hello, world!', got '%s'", inputMessage.StringContent())
+	// Check content structure
+	content, ok := inputMessage["content"].([]map[string]any)
+	if !ok {
+		t.Error("Expected content to be []map[string]interface{}")
+	}
+	if len(content) != 1 {
+		t.Errorf("Expected content length 1, got %d", len(content))
+	}
+	if content[0]["type"] != "input_text" {
+		t.Errorf("Expected content type 'input_text', got '%v'", content[0]["type"])
+	}
+	if content[0]["text"] != "Hello, world!" {
+		t.Errorf("Expected message content 'Hello, world!', got '%v'", content[0]["text"])
+	}
+}
+
+func TestConvertChatCompletionToResponseAPI_PreservesToolHistory(t *testing.T) {
+	callID := "call_weather_history_1"
+	request := &model.GeneralOpenAIRequest{
+		Model: "gpt-4o-mini",
+		Messages: []model.Message{
+			{Role: "system", Content: "You are a weather assistant."},
+			{Role: "user", Content: "Fetch the current weather."},
+			{
+				Role: "assistant",
+				ToolCalls: []model.Tool{
+					{
+						Id:   callID,
+						Type: "function",
+						Function: &model.Function{
+							Name:      "get_weather",
+							Arguments: `{"location":"San Francisco, CA","unit":"celsius"}`,
+						},
+					},
+				},
+			},
+			{Role: "tool", ToolCallId: callID, Content: `{"temperature_c":15,"condition":"Foggy"}`},
+			{Role: "user", Content: "Thanks, please call the tool again for tomorrow morning in Fahrenheit."},
+		},
+		Tools: []model.Tool{
+			{
+				Type: "function",
+				Function: &model.Function{
+					Name:       "get_weather",
+					Parameters: map[string]any{"type": "object"},
+				},
+			},
+		},
+		ToolChoice: map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": "get_weather"},
+		},
+	}
+
+	responseReq := ConvertChatCompletionToResponseAPI(request)
+	require.NotNil(t, responseReq)
+	require.NotNil(t, responseReq.Instructions)
+	require.Equal(t, "You are a weather assistant.", *responseReq.Instructions)
+	require.Len(t, responseReq.Input, 4)
+
+	first, ok := responseReq.Input[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "user", first["role"])
+
+	functionCall, ok := responseReq.Input[1].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call", functionCall["type"])
+	require.Equal(t, "get_weather", functionCall["name"])
+	args, ok := functionCall["arguments"].(string)
+	require.True(t, ok)
+	require.Contains(t, args, "San Francisco")
+	callReference, ok := functionCall["call_id"].(string)
+	require.True(t, ok)
+
+	callOutput, ok := responseReq.Input[2].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call_output", callOutput["type"])
+	require.Equal(t, callReference, callOutput["call_id"])
+	require.Equal(t, `{"temperature_c":15,"condition":"Foggy"}`, callOutput["output"])
+
+	followup, ok := responseReq.Input[3].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "user", followup["role"])
+
+	require.NotEmpty(t, responseReq.Tools)
+	require.NotNil(t, responseReq.ToolChoice)
+}
+
+func TestNormalizeToolChoiceForResponse_Map(t *testing.T) {
+	choice := map[string]any{
+		"type": "tool",
+		"name": "get_weather",
+	}
+
+	result, changed := NormalizeToolChoiceForResponse(choice)
+	if !changed {
+		t.Fatalf("expected normalization to report changes")
+	}
+
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result to be map, got %T", result)
+	}
+
+	typeVal, _ := resultMap["type"].(string)
+	if typeVal != "function" {
+		t.Fatalf("expected type to be 'function', got %q", typeVal)
+	}
+
+	if name := stringFromAny(resultMap["name"]); name != "get_weather" {
+		t.Fatalf("expected top-level name 'get_weather', got %q", name)
+	}
+
+	if _, exists := resultMap["function"]; exists {
+		t.Fatalf("expected function payload to be removed for Response API")
+	}
+}
+
+func TestNormalizeToolChoiceForResponse_String(t *testing.T) {
+	result, changed := NormalizeToolChoiceForResponse(" auto ")
+	if !changed {
+		t.Fatalf("expected whitespace trimming to be considered a change")
+	}
+
+	str, _ := result.(string)
+	if str != "auto" {
+		t.Fatalf("expected trimmed value 'auto', got %q", str)
+	}
+
+	result, changed = NormalizeToolChoiceForResponse("none")
+	if changed {
+		t.Fatalf("expected already normalized value to leave changed=false")
+	}
+	if result.(string) != "none" {
+		t.Fatalf("expected unchanged string 'none', got %q", result)
+	}
+
+	result, changed = NormalizeToolChoiceForResponse("   ")
+	if !changed || result != nil {
+		t.Fatalf("expected blank string to normalize to nil with change=true")
 	}
 }
 
@@ -93,13 +241,13 @@ func TestConvertWithSystemMessage(t *testing.T) {
 		t.Errorf("Expected 1 input item after system message removal, got %d", len(responseAPI.Input))
 	}
 
-	inputMessage, ok := responseAPI.Input[0].(model.Message)
+	inputMessage, ok := responseAPI.Input[0].(map[string]any)
 	if !ok {
-		t.Error("Expected input item to be model.Message type")
+		t.Error("Expected input item to be map[string]interface{} type")
 	}
 
-	if inputMessage.Role != "user" {
-		t.Errorf("Expected remaining message to be user role, got '%s'", inputMessage.Role)
+	if inputMessage["role"] != "user" {
+		t.Errorf("Expected remaining message to be user role, got '%v'", inputMessage["role"])
 	}
 }
 
@@ -113,13 +261,13 @@ func TestConvertWithTools(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_weather",
 					Description: "Get current weather",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"location": map[string]interface{}{
+						"properties": map[string]any{
+							"location": map[string]any{
 								"type": "string",
 							},
 						},
@@ -137,12 +285,479 @@ func TestConvertWithTools(t *testing.T) {
 		t.Errorf("Expected 1 tool, got %d", len(responseAPI.Tools))
 	}
 
-	if responseAPI.Tools[0].Name != "get_weather" {
-		t.Errorf("Expected tool name 'get_weather', got '%s'", responseAPI.Tools[0].Name)
+	if responseAPI.Tools[0].Function == nil {
+		t.Fatalf("Expected function tool definition to be present")
+	}
+	if responseAPI.Tools[0].Function.Name != "get_weather" {
+		t.Errorf("Expected tool name 'get_weather', got '%s'", responseAPI.Tools[0].Function.Name)
 	}
 
 	if responseAPI.ToolChoice != "auto" {
 		t.Errorf("Expected tool_choice 'auto', got '%v'", responseAPI.ToolChoice)
+	}
+}
+
+func TestConvertResponseAPIToChatCompletionRequest(t *testing.T) {
+	reasoningEffort := "medium"
+	stream := false
+	responseReq := &ResponseAPIRequest{
+		Model:  "gpt-4",
+		Stream: &stream,
+		Input: ResponseAPIInput{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "Hello there",
+					},
+				},
+			},
+		},
+		Instructions: func() *string { s := "You are helpful"; return &s }(),
+		Tools: []ResponseAPITool{
+			{
+				Type: "function",
+				Name: "lookup",
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"city": map[string]any{"type": "string"}},
+				},
+			},
+			{
+				Type:              "web_search",
+				SearchContextSize: func() *string { s := "medium"; return &s }(),
+			},
+		},
+		ToolChoice: map[string]any{"type": "auto"},
+		Reasoning:  &model.OpenAIResponseReasoning{Effort: &reasoningEffort},
+	}
+
+	chatReq, err := ConvertResponseAPIToChatCompletionRequest(responseReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if chatReq.Model != "gpt-4" {
+		t.Fatalf("expected model gpt-4, got %s", chatReq.Model)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("expected 2 messages (system + user), got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != "system" {
+		t.Fatalf("expected first message to be system, got %s", chatReq.Messages[0].Role)
+	}
+	if chatReq.Messages[1].StringContent() != "Hello there" {
+		t.Fatalf("expected user message content preserved, got %q", chatReq.Messages[1].StringContent())
+	}
+	if len(chatReq.Tools) != 1 {
+		t.Fatalf("expected 1 tool after filtering, got %d", len(chatReq.Tools))
+	}
+	if chatReq.Tools[0].Function == nil || chatReq.Tools[0].Function.Name != "lookup" {
+		t.Fatalf("function tool not converted correctly: %#v", chatReq.Tools[0])
+	}
+	if chatReq.ToolChoice == nil {
+		t.Fatalf("expected tool choice to be set")
+	}
+	if chatReq.Reasoning == nil || chatReq.Reasoning.Effort == nil || *chatReq.Reasoning.Effort != reasoningEffort {
+		t.Fatalf("reasoning effort not preserved: %#v", chatReq.Reasoning)
+	}
+}
+
+func TestConvertResponseAPIToChatCompletionRequest_ToolHistoryRoundTrip(t *testing.T) {
+	stream := false
+	instructions := "You are a weather assistant."
+	responseReq := &ResponseAPIRequest{
+		Model:        "gpt-4o-mini",
+		Stream:       &stream,
+		Instructions: &instructions,
+		Input: ResponseAPIInput{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "Fetch the current weather for San Francisco, CA.",
+					},
+				},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_weather_history",
+				"call_id":   "call_weather_history",
+				"name":      "get_weather",
+				"arguments": `{"location":"San Francisco, CA","unit":"celsius"}`,
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_weather_history",
+				"output":  `{"temperature_c":15,"condition":"Foggy"}`,
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "Please call the tool again for tomorrow morning's forecast in Fahrenheit.",
+					},
+				},
+			},
+		},
+	}
+
+	chatReq, err := ConvertResponseAPIToChatCompletionRequest(responseReq)
+	require.NoError(t, err)
+	require.NotNil(t, chatReq)
+	require.Len(t, chatReq.Messages, 5)
+
+	require.Equal(t, "system", chatReq.Messages[0].Role)
+	require.Equal(t, instructions, chatReq.Messages[0].StringContent())
+
+	require.Equal(t, "user", chatReq.Messages[1].Role)
+	require.Equal(t, "Fetch the current weather for San Francisco, CA.", chatReq.Messages[1].StringContent())
+
+	assistant := chatReq.Messages[2]
+	require.Equal(t, "assistant", assistant.Role)
+	require.Len(t, assistant.ToolCalls, 1)
+	require.Equal(t, "get_weather", assistant.ToolCalls[0].Function.Name)
+	require.Contains(t, assistant.ToolCalls[0].Function.Arguments, "San Francisco")
+
+	toolMsg := chatReq.Messages[3]
+	require.Equal(t, "tool", toolMsg.Role)
+	require.Equal(t, assistant.ToolCalls[0].Id, toolMsg.ToolCallId)
+	require.Equal(t, `{"temperature_c":15,"condition":"Foggy"}`, toolMsg.StringContent())
+
+	followup := chatReq.Messages[4]
+	require.Equal(t, "user", followup.Role)
+	require.Contains(t, followup.StringContent(), "tomorrow morning")
+}
+
+func TestConvertResponseAPIToChatCompletion_RequiredActionToolCalls(t *testing.T) {
+	response := &ResponseAPIResponse{
+		Id:     "resp_required",
+		Model:  "gpt-5-nano",
+		Status: "incomplete",
+		RequiredAction: &ResponseAPIRequiredAction{
+			Type: "submit_tool_outputs",
+			SubmitToolOutputs: &ResponseAPISubmitToolOutputs{
+				ToolCalls: []ResponseAPIToolCall{
+					{
+						Id:   "call_weather",
+						Type: "function",
+						Function: &ResponseAPIFunctionCall{
+							Name:      "get_weather",
+							Arguments: `{"location":"San Francisco, CA"}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	converted := ConvertResponseAPIToChatCompletion(response)
+	require.NotNil(t, converted)
+	require.Len(t, converted.Choices, 1)
+	choice := converted.Choices[0]
+	require.Len(t, choice.Message.ToolCalls, 1)
+	call := choice.Message.ToolCalls[0]
+	require.Equal(t, "call_weather", call.Id)
+	require.Equal(t, "function", call.Type)
+	require.NotNil(t, call.Function)
+	require.Equal(t, "get_weather", call.Function.Name)
+	require.Equal(t, `{"location":"San Francisco, CA"}`, call.Function.Arguments)
+	require.Equal(t, "tool_calls", choice.FinishReason)
+}
+
+func TestConvertResponseAPIStreamToChatCompletion_RequiredActionToolCalls(t *testing.T) {
+	response := &ResponseAPIResponse{
+		Id:     "resp_required_stream",
+		Model:  "gpt-5-nano",
+		Status: "incomplete",
+		RequiredAction: &ResponseAPIRequiredAction{
+			Type: "submit_tool_outputs",
+			SubmitToolOutputs: &ResponseAPISubmitToolOutputs{
+				ToolCalls: []ResponseAPIToolCall{
+					{
+						Id:   "call_weather",
+						Type: "function",
+						Function: &ResponseAPIFunctionCall{
+							Name:      "get_weather",
+							Arguments: `{"location":"San Francisco, CA"}`,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	chunk := ConvertResponseAPIStreamToChatCompletion(response)
+	require.NotNil(t, chunk)
+	require.Len(t, chunk.Choices, 1)
+	choice := chunk.Choices[0]
+	require.Equal(t, "assistant", choice.Delta.Role)
+	require.Len(t, choice.Delta.ToolCalls, 1)
+	call := choice.Delta.ToolCalls[0]
+	require.Equal(t, "call_weather", call.Id)
+	require.Equal(t, "function", call.Type)
+	require.NotNil(t, call.Function)
+	require.Equal(t, "get_weather", call.Function.Name)
+	require.Equal(t, `{"location":"San Francisco, CA"}`, call.Function.Arguments)
+}
+
+func TestConvertResponseAPIToChatCompletionRequestDropsUnsupportedTools(t *testing.T) {
+	stream := true
+	responseReq := &ResponseAPIRequest{
+		Model:  "deepseek-chat",
+		Stream: &stream,
+		Input: ResponseAPIInput{
+			map[string]any{
+				"role":    "system",
+				"content": "You are AFFiNE AI.",
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "Hello",
+					},
+				},
+			},
+		},
+		Tools: []ResponseAPITool{
+			{Type: "web_search_preview"},
+			{Type: "web_search"},
+			{
+				Type: "function",
+				Function: &model.Function{
+					Name:        "section_edit",
+					Description: "Edit a section",
+					Parameters: map[string]any{
+						"type": "object",
+					},
+				},
+			},
+		},
+		ToolChoice: map[string]any{"type": "tool", "name": "web_search"},
+	}
+
+	chatReq, err := ConvertResponseAPIToChatCompletionRequest(responseReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(chatReq.Tools) != 1 {
+		t.Fatalf("expected only supported tools to remain, got %d", len(chatReq.Tools))
+	}
+	if chatReq.Tools[0].Function == nil || chatReq.Tools[0].Function.Name != "section_edit" {
+		t.Fatalf("expected section_edit function to remain, got %#v", chatReq.Tools[0])
+	}
+
+	choice, ok := chatReq.ToolChoice.(map[string]any)
+	if !ok {
+		t.Fatalf("expected tool choice map, got %T", chatReq.ToolChoice)
+	}
+	if strings.ToLower(choice["type"].(string)) != "auto" {
+		t.Fatalf("expected tool_choice to downgrade to auto, got %#v", chatReq.ToolChoice)
+	}
+}
+
+func TestConvertResponseAPIToChatCompletionRequestSanitizesFunctionParameters(t *testing.T) {
+	stream := false
+	strict := true
+	responseReq := &ResponseAPIRequest{
+		Model:  "gemini-2.5-flash",
+		Stream: &stream,
+		Input: ResponseAPIInput{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "Hello",
+					},
+				},
+			},
+		},
+		Tools: []ResponseAPITool{
+			{
+				Type: "function",
+				Name: "get_weather",
+				Parameters: map[string]any{
+					"$schema":              "http://json-schema.org/draft-07/schema#",
+					"description":          "should be stripped",
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"city": map[string]any{
+							"type":                 "string",
+							"additionalProperties": map[string]any{"oops": true},
+						},
+					},
+					"required": []any{"city"},
+				},
+			},
+		},
+		Text: &ResponseTextConfig{
+			Format: &ResponseTextFormat{
+				Type: "json_schema",
+				Schema: map[string]any{
+					"$schema":              "http://json-schema.org/draft-07/schema#",
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"answer": map[string]any{
+							"type":                 "string",
+							"additionalProperties": false,
+						},
+					},
+				},
+				Strict: &strict,
+			},
+		},
+	}
+
+	chatReq, err := ConvertResponseAPIToChatCompletionRequest(responseReq)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(chatReq.Tools) != 1 {
+		t.Fatalf("expected a single sanitized function tool, got %d", len(chatReq.Tools))
+	}
+
+	fn := chatReq.Tools[0].Function
+	if fn == nil {
+		t.Fatalf("expected function to be present")
+	}
+
+	if fn.Strict != nil {
+		t.Fatalf("expected strict flag to be cleared, got %#v", fn.Strict)
+	}
+
+	params, ok := fn.Parameters.(map[string]any)
+	if !ok {
+		t.Fatalf("expected parameters map, got %T", fn.Parameters)
+	}
+
+	if _, exists := params["$schema"]; exists {
+		t.Fatalf("$schema should be removed from function parameters: %#v", params)
+	}
+	if _, exists := params["description"]; exists {
+		t.Fatalf("description should be removed from top-level parameters: %#v", params)
+	}
+	if _, exists := params["additionalProperties"]; exists {
+		t.Fatalf("additionalProperties should be removed from function parameters: %#v", params)
+	}
+
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties map, got %#v", params["properties"])
+	}
+	city, ok := props["city"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected city property map, got %#v", props["city"])
+	}
+	if _, exists := city["additionalProperties"]; exists {
+		t.Fatalf("nested additionalProperties should be removed: %#v", city)
+	}
+
+	if chatReq.ResponseFormat == nil || chatReq.ResponseFormat.JsonSchema == nil {
+		t.Fatalf("expected response format schema to be preserved")
+	}
+
+	schema := chatReq.ResponseFormat.JsonSchema.Schema
+	if schema == nil {
+		t.Fatalf("expected sanitized schema, got nil")
+	}
+
+	if _, exists := schema["$schema"]; exists {
+		t.Fatalf("$schema should be pruned from response schema: %#v", schema)
+	}
+	if _, exists := schema["additionalProperties"]; exists {
+		t.Fatalf("additionalProperties should be pruned from response schema: %#v", schema)
+	}
+	if chatReq.ResponseFormat.JsonSchema.Strict != nil {
+		t.Fatalf("expected response schema strict flag to be cleared, got %#v", chatReq.ResponseFormat.JsonSchema.Strict)
+	}
+}
+
+func TestConvertChatCompletionToResponseAPISanitizesEncryptedReasoning(t *testing.T) {
+	req := &model.GeneralOpenAIRequest{
+		Model: "gpt-5",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{
+						"type":              "reasoning",
+						"encrypted_content": "gAAAA...",
+						"summary": []any{
+							map[string]any{
+								"type": "summary_text",
+								"text": "Concise reasoning summary",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	converted := ConvertChatCompletionToResponseAPI(req)
+
+	if len(converted.Input) != 1 {
+		toJSON, _ := json.Marshal(converted.Input)
+		t.Fatalf("expected single sanitized message, got %d (payload: %s)", len(converted.Input), string(toJSON))
+	}
+
+	msg, ok := converted.Input[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map message, got %T", converted.Input[0])
+	}
+
+	content, ok := msg["content"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected content slice, got %T", msg["content"])
+	}
+
+	if len(content) != 1 {
+		t.Fatalf("expected single content item, got %d", len(content))
+	}
+
+	item := content[0]
+	if item["type"] != "output_text" {
+		t.Fatalf("expected output_text type, got %v", item["type"])
+	}
+	if item["text"] != "Concise reasoning summary" {
+		t.Fatalf("expected sanitized summary text, got %v", item["text"])
+	}
+	if _, exists := item["encrypted_content"]; exists {
+		t.Fatalf("encrypted_content should be removed, found %v", item["encrypted_content"])
+	}
+}
+
+func TestConvertChatCompletionToResponseAPIDropsUnverifiableReasoning(t *testing.T) {
+	req := &model.GeneralOpenAIRequest{
+		Model: "gpt-5",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{
+						"type":              "reasoning",
+						"encrypted_content": "gAAAA...",
+					},
+				},
+			},
+		},
+	}
+
+	converted := ConvertChatCompletionToResponseAPI(req)
+
+	if len(converted.Input) != 0 {
+		toJSON, _ := json.Marshal(converted.Input)
+		t.Fatalf("expected unverifiable reasoning message to be dropped, got %d items (payload: %s)", len(converted.Input), string(toJSON))
 	}
 }
 
@@ -158,7 +773,7 @@ func TestConvertWithResponseFormat(t *testing.T) {
 			JsonSchema: &model.JSONSchema{
 				Name:        "response_schema",
 				Description: "Test schema",
-				Schema: map[string]interface{}{
+				Schema: map[string]any{
 					"type": "object",
 				},
 			},
@@ -354,8 +969,8 @@ func TestConvertResponseAPIToChatCompletionWithFunctionCall(t *testing.T) {
 		t.Errorf("Expected arguments '%s', got '%s'", expectedArgs, toolCall.Function.Arguments)
 	}
 
-	if choice.FinishReason != "stop" {
-		t.Errorf("Expected finish_reason 'stop', got '%s'", choice.FinishReason)
+	if choice.FinishReason != "tool_calls" {
+		t.Errorf("Expected finish_reason 'tool_calls', got '%s'", choice.FinishReason)
 	}
 
 	// Verify usage
@@ -628,17 +1243,17 @@ func TestFunctionCallWorkflow(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_current_weather",
 					Description: "Get the current weather in a given location",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"location": map[string]interface{}{
+						"properties": map[string]any{
+							"location": map[string]any{
 								"type":        "string",
 								"description": "The city and state, e.g. San Francisco, CA",
 							},
-							"unit": map[string]interface{}{
+							"unit": map[string]any{
 								"type": "string",
 								"enum": []string{"celsius", "fahrenheit"},
 							},
@@ -659,8 +1274,11 @@ func TestFunctionCallWorkflow(t *testing.T) {
 		t.Fatalf("Expected 1 tool in request, got %d", len(responseAPIRequest.Tools))
 	}
 
-	if responseAPIRequest.Tools[0].Name != "get_current_weather" {
-		t.Errorf("Expected tool name 'get_current_weather', got '%s'", responseAPIRequest.Tools[0].Name)
+	if responseAPIRequest.Tools[0].Function == nil {
+		t.Fatalf("Expected function definition on response tool")
+	}
+	if responseAPIRequest.Tools[0].Function.Name != "get_current_weather" {
+		t.Errorf("Expected tool name 'get_current_weather', got '%s'", responseAPIRequest.Tools[0].Function.Name)
 	}
 
 	if responseAPIRequest.ToolChoice != "auto" {
@@ -757,14 +1375,14 @@ func TestConvertWithLegacyFunctions(t *testing.T) {
 			{
 				Name:        "get_current_weather",
 				Description: "Get current weather",
-				Parameters: map[string]interface{}{
+				Parameters: map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"location": map[string]interface{}{
+					"properties": map[string]any{
+						"location": map[string]any{
 							"type":        "string",
 							"description": "The city and state, e.g. San Francisco, CA",
 						},
-						"unit": map[string]interface{}{
+						"unit": map[string]any{
 							"type": "string",
 							"enum": []string{"celsius", "fahrenheit"},
 						},
@@ -787,8 +1405,11 @@ func TestConvertWithLegacyFunctions(t *testing.T) {
 		t.Errorf("Expected tool type 'function', got '%s'", responseAPI.Tools[0].Type)
 	}
 
-	if responseAPI.Tools[0].Name != "get_current_weather" {
-		t.Errorf("Expected function name 'get_current_weather', got '%s'", responseAPI.Tools[0].Name)
+	if responseAPI.Tools[0].Function == nil {
+		t.Fatalf("Expected response tool to include function definition")
+	}
+	if responseAPI.Tools[0].Function.Name != "get_current_weather" {
+		t.Errorf("Expected function name 'get_current_weather', got '%s'", responseAPI.Tools[0].Function.Name)
 	}
 
 	if responseAPI.ToolChoice != "auto" {
@@ -801,8 +1422,8 @@ func TestConvertWithLegacyFunctions(t *testing.T) {
 	}
 
 	// Verify properties are preserved
-	if props, ok := responseAPI.Tools[0].Parameters["properties"].(map[string]interface{}); ok {
-		if location, ok := props["location"].(map[string]interface{}); ok {
+	if props, ok := responseAPI.Tools[0].Parameters["properties"].(map[string]any); ok {
+		if location, ok := props["location"].(map[string]any); ok {
 			if location["type"] != "string" {
 				t.Errorf("Expected location type 'string', got '%v'", location["type"])
 			}
@@ -827,14 +1448,14 @@ func TestLegacyFunctionCallWorkflow(t *testing.T) {
 			{
 				Name:        "get_current_weather",
 				Description: "Get the current weather in a given location",
-				Parameters: map[string]interface{}{
+				Parameters: map[string]any{
 					"type": "object",
-					"properties": map[string]interface{}{
-						"location": map[string]interface{}{
+					"properties": map[string]any{
+						"location": map[string]any{
 							"type":        "string",
 							"description": "The city and state, e.g. San Francisco, CA",
 						},
-						"unit": map[string]interface{}{
+						"unit": map[string]any{
 							"type": "string",
 							"enum": []string{"celsius", "fahrenheit"},
 						},
@@ -854,8 +1475,11 @@ func TestLegacyFunctionCallWorkflow(t *testing.T) {
 		t.Fatalf("Expected 1 tool in request, got %d", len(responseAPIRequest.Tools))
 	}
 
-	if responseAPIRequest.Tools[0].Name != "get_current_weather" {
-		t.Errorf("Expected tool name 'get_current_weather', got '%s'", responseAPIRequest.Tools[0].Name)
+	if responseAPIRequest.Tools[0].Function == nil {
+		t.Fatalf("Expected function definition on response tool")
+	}
+	if responseAPIRequest.Tools[0].Function.Name != "get_current_weather" {
+		t.Errorf("Expected tool name 'get_current_weather', got '%s'", responseAPIRequest.Tools[0].Function.Name)
 	}
 
 	if responseAPIRequest.ToolChoice != "auto" {
@@ -884,17 +1508,17 @@ func TestLegacyFunctionCallWorkflow(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_current_weather",
 					Description: "Get the current weather in a given location",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"location": map[string]interface{}{
+						"properties": map[string]any{
+							"location": map[string]any{
 								"type":        "string",
 								"description": "The city and state, e.g. San Francisco, CA",
 							},
-							"unit": map[string]interface{}{
+							"unit": map[string]any{
 								"type": "string",
 								"enum": []string{"celsius", "fahrenheit"},
 							},
@@ -1022,8 +1646,9 @@ func TestParseResponseAPIStreamEvent(t *testing.T) {
 			t.Errorf("Expected type 'response.output_text.delta', got '%s'", streamEvent.Type)
 		}
 
-		if streamEvent.Delta != "Why" {
-			t.Errorf("Expected delta 'Why', got '%s'", streamEvent.Delta)
+		delta := extractStringFromRaw(streamEvent.Delta, "text", "delta")
+		if delta != "Why" {
+			t.Errorf("Expected delta 'Why', got '%s'", delta)
 		}
 	})
 
@@ -1126,7 +1751,7 @@ func TestConvertStreamEventToResponse(t *testing.T) {
 			ItemId:         "msg_123",
 			OutputIndex:    1,
 			ContentIndex:   0,
-			Delta:          "Hello",
+			Delta:          json.RawMessage(`"Hello"`),
 		}
 
 		response := ConvertStreamEventToResponse(streamEvent)
@@ -1260,6 +1885,84 @@ func TestStreamEventIntegration(t *testing.T) {
 
 // TestConvertChatCompletionToResponseAPIWithToolResults tests that tool result messages
 // are properly converted to function_call_output format for Response API
+func TestContentTypeBasedOnRole(t *testing.T) {
+	// Test that user messages use "input_text" and assistant messages use "output_text"
+	userMessage := model.Message{
+		Role:    "user",
+		Content: "Hello, how are you?",
+	}
+
+	assistantMessage := model.Message{
+		Role:    "assistant",
+		Content: "I'm doing well, thank you!",
+	}
+
+	// Convert user message
+	userResult := convertMessageToResponseAPIFormat(userMessage)
+	userContent := userResult["content"].([]map[string]any)
+	if userContent[0]["type"] != "input_text" {
+		t.Errorf("Expected user message to use 'input_text' type, got '%s'", userContent[0]["type"])
+	}
+	if userContent[0]["text"] != "Hello, how are you?" {
+		t.Errorf("Expected user message text to be preserved, got '%s'", userContent[0]["text"])
+	}
+
+	// Convert assistant message
+	assistantResult := convertMessageToResponseAPIFormat(assistantMessage)
+	assistantContent := assistantResult["content"].([]map[string]any)
+	if assistantContent[0]["type"] != "output_text" {
+		t.Errorf("Expected assistant message to use 'output_text' type, got '%s'", assistantContent[0]["type"])
+	}
+	if assistantContent[0]["text"] != "I'm doing well, thank you!" {
+		t.Errorf("Expected assistant message text to be preserved, got '%s'", assistantContent[0]["text"])
+	}
+}
+
+func TestConversationWithMultipleRoles(t *testing.T) {
+	// Test a conversation similar to the error log scenario
+	chatRequest := &model.GeneralOpenAIRequest{
+		Model: "gpt-4o-mini",
+		Messages: []model.Message{
+			{Role: "system", Content: "you are an experienced english translator"},
+			{Role: "user", Content: "我认为后端为 invalid 返回 200 是很荒谬的"},
+			{Role: "assistant", Content: "I think it's absurd for the backend to return 200 for an invalid response"},
+			{Role: "user", Content: "用户发送的 openai 请求，应该被转换为 ResponseAPI"},
+			{Role: "assistant", Content: "The OpenAI request sent by the user should be converted into a ResponseAPI"},
+			{Role: "user", Content: "halo"},
+		},
+		MaxTokens:   5000,
+		Temperature: floatPtr(1.0),
+		Stream:      true,
+	}
+
+	// Convert to Response API format
+	responseAPIRequest := ConvertChatCompletionToResponseAPI(chatRequest)
+
+	// Verify the conversion
+	if responseAPIRequest.Model != "gpt-4o-mini" {
+		t.Errorf("Expected model to be 'gpt-4o-mini', got '%s'", responseAPIRequest.Model)
+	}
+
+	// Check that input array has correct content types
+	inputArray := []any(responseAPIRequest.Input)
+	for i, item := range inputArray {
+		if itemMap, ok := item.(map[string]any); ok {
+			role := itemMap["role"].(string)
+			content := itemMap["content"].([]map[string]any)
+
+			expectedType := "input_text"
+			if role == "assistant" {
+				expectedType = "output_text"
+			}
+
+			if content[0]["type"] != expectedType {
+				t.Errorf("Message %d with role '%s' should use '%s' type, got '%s'",
+					i, role, expectedType, content[0]["type"])
+			}
+		}
+	}
+}
+
 func TestConvertChatCompletionToResponseAPIWithToolResults(t *testing.T) {
 	chatRequest := &model.GeneralOpenAIRequest{
 		Model: "gpt-4o",
@@ -1273,7 +1976,7 @@ func TestConvertChatCompletionToResponseAPIWithToolResults(t *testing.T) {
 					{
 						Id:   "initial_datetime_call",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "get_current_datetime",
 							Arguments: `{}`,
 						},
@@ -1289,7 +1992,7 @@ func TestConvertChatCompletionToResponseAPIWithToolResults(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_current_datetime",
 					Description: "Get current date and time",
 					Parameters: map[string]any{
@@ -1308,31 +2011,41 @@ func TestConvertChatCompletionToResponseAPIWithToolResults(t *testing.T) {
 		t.Errorf("Expected system message to be moved to instructions, got %v", responseAPI.Instructions)
 	}
 
-	// Verify input array structure
-	expectedInputs := 2 // user message, assistant summary
-	if len(responseAPI.Input) != expectedInputs {
-		t.Fatalf("Expected %d inputs, got %d", expectedInputs, len(responseAPI.Input))
-	}
+	// Verify input array structure preserves tool call history
+	require.Len(t, responseAPI.Input, 3)
 
 	// Verify first message (user)
-	if msg, ok := responseAPI.Input[0].(model.Message); !ok || msg.Role != "user" || msg.StringContent() != "What's the current time?" {
-		t.Errorf("Expected first input to be user message, got %v", responseAPI.Input[0])
+	msg0, ok := responseAPI.Input[0].(map[string]any)
+	require.True(t, ok, "expected first input to be a map")
+	assert.Equal(t, "user", msg0["role"])
+	if content, ok := msg0["content"].([]map[string]any); ok && len(content) > 0 {
+		assert.Equal(t, "input_text", content[0]["type"])
+		assert.Equal(t, "What's the current time?", content[0]["text"])
 	}
 
-	// Verify second message (assistant summary of function calls)
-	if msg, ok := responseAPI.Input[1].(model.Message); !ok || msg.Role != "assistant" {
-		t.Fatalf("Expected second input to be assistant summary message, got %T", responseAPI.Input[1])
-	} else {
-		content := msg.StringContent()
-		if !strings.Contains(content, "Previous function calls") {
-			t.Errorf("Expected assistant message to contain function call summary, got '%s'", content)
-		}
-		if !strings.Contains(content, "get_current_datetime") {
-			t.Errorf("Expected assistant message to mention get_current_datetime, got '%s'", content)
-		}
-		if !strings.Contains(content, "year\":2025") {
-			t.Errorf("Expected assistant message to contain function result, got '%s'", content)
-		}
+	// Verify function call item
+	msg1, ok := responseAPI.Input[1].(map[string]any)
+	require.True(t, ok, "expected function call item to be a map")
+	assert.Equal(t, "function_call", msg1["type"])
+	if role, exists := msg1["role"]; exists {
+		assert.Equal(t, "assistant", role)
+	}
+	assert.Equal(t, "get_current_datetime", msg1["name"])
+	assert.Equal(t, `{}`, msg1["arguments"])
+	assert.Equal(t, "fc_initial_datetime_call", msg1["id"])
+	assert.Equal(t, "call_initial_datetime_call", msg1["call_id"])
+
+	// Verify tool output item
+	msg2, ok := responseAPI.Input[2].(map[string]any)
+	require.True(t, ok, "expected function call output item to be a map")
+	assert.Equal(t, "function_call_output", msg2["type"])
+	if role, exists := msg2["role"]; exists {
+		assert.Equal(t, "tool", role)
+	}
+	assert.Equal(t, "call_initial_datetime_call", msg2["call_id"])
+	assert.NotContains(t, msg2, "name")
+	if output, ok := msg2["output"].(string); ok {
+		assert.Contains(t, output, "\"year\":2025")
 	}
 
 	// Verify tools were converted properly
@@ -1347,6 +2060,81 @@ func TestConvertChatCompletionToResponseAPIWithToolResults(t *testing.T) {
 
 	if tool.Type != "function" {
 		t.Errorf("Expected tool type 'function', got '%s'", tool.Type)
+	}
+}
+
+func TestConvertResponseAPIToChatCompletionRequestWithFunctionHistory(t *testing.T) {
+	callSuffix := "weather_history_1"
+	req := &ResponseAPIRequest{
+		Model: "gpt-4o-mini",
+		Input: ResponseAPIInput{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "What's the weather?",
+					},
+				},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_" + callSuffix,
+				"call_id":   "call_" + callSuffix,
+				"name":      "get_weather",
+				"arguments": map[string]any{"location": "San Francisco"},
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": "call_" + callSuffix,
+				"output":  map[string]any{"temperature_c": 15},
+			},
+		},
+	}
+
+	chatReq, err := ConvertResponseAPIToChatCompletionRequest(req)
+	if err != nil {
+		t.Fatalf("expected conversion without error, got %v", err)
+	}
+
+	if len(chatReq.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(chatReq.Messages))
+	}
+
+	if chatReq.Messages[0].Role != "user" {
+		t.Fatalf("expected first message role user, got %s", chatReq.Messages[0].Role)
+	}
+
+	assistantMsg := chatReq.Messages[1]
+	if assistantMsg.Role != "assistant" {
+		t.Fatalf("expected second message role assistant, got %s", assistantMsg.Role)
+	}
+	if len(assistantMsg.ToolCalls) != 1 {
+		t.Fatalf("expected second message to include 1 tool call, got %d", len(assistantMsg.ToolCalls))
+	}
+	toolCall := assistantMsg.ToolCalls[0]
+	if toolCall.Id != callSuffix {
+		t.Fatalf("expected tool call id %s, got %s", callSuffix, toolCall.Id)
+	}
+	if toolCall.Function == nil {
+		t.Fatalf("expected tool call to include function details")
+	}
+	if toolCall.Function.Name != "get_weather" {
+		t.Fatalf("expected function name get_weather, got %s", toolCall.Function.Name)
+	}
+	if toolCall.Function.Arguments == "" {
+		t.Fatalf("expected function arguments to be populated")
+	}
+
+	toolMsg := chatReq.Messages[2]
+	if toolMsg.Role != "tool" {
+		t.Fatalf("expected third message role tool, got %s", toolMsg.Role)
+	}
+	if toolMsg.ToolCallId != callSuffix {
+		t.Fatalf("expected tool message tool_call_id %s, got %s", callSuffix, toolMsg.ToolCallId)
+	}
+	if toolMsg.Content == "" {
+		t.Fatalf("expected tool message content to be populated")
 	}
 }
 
@@ -1684,5 +2472,491 @@ func TestResponseAPIUsageWithFallback(t *testing.T) {
 	if chatCompletion.Usage.PromptTokens != 0 || chatCompletion.Usage.CompletionTokens != 0 {
 		t.Errorf("Expected zero usage when zero usage provided, got prompt=%d, completion=%d",
 			chatCompletion.Usage.PromptTokens, chatCompletion.Usage.CompletionTokens)
+	}
+}
+
+func TestApplyWebSearchToolCostForCallCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(ctxkey.WebSearchCallCount, 3)
+	metaInfo := &meta.Meta{ActualModelName: "gpt-5"}
+	var usage *model.Usage
+
+	if err := applyWebSearchToolCost(c, &usage, metaInfo); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if usage == nil {
+		t.Fatal("expected usage to be allocated")
+	}
+
+	perCall := webSearchCallQuotaPerInvocation(metaInfo.ActualModelName)
+	expected := int64(3) * perCall
+	if usage.ToolsCost != expected {
+		t.Fatalf("expected tools cost %d, got %d", expected, usage.ToolsCost)
+	}
+}
+
+func TestApplyWebSearchToolCostForSearchPreview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(ctxkey.WebSearchCallCount, 1)
+	metaInfo := &meta.Meta{ActualModelName: "gpt-4o-search-preview"}
+	usage := &model.Usage{}
+
+	if err := applyWebSearchToolCost(c, &usage, metaInfo); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	perCall := webSearchCallQuotaPerInvocation(metaInfo.ActualModelName)
+	if perCall <= 0 {
+		t.Fatalf("expected positive per-call quota for preview model, got %d", perCall)
+	}
+	if usage.ToolsCost != perCall {
+		t.Fatalf("expected tools cost %d, got %d", perCall, usage.ToolsCost)
+	}
+}
+
+func TestEnforceWebSearchTokenPolicyPreviewFreeTokens(t *testing.T) {
+	usage := &model.Usage{
+		PromptTokens:     12000,
+		CompletionTokens: 500,
+		TotalTokens:      0,
+		PromptTokensDetails: &model.UsagePromptTokensDetails{
+			TextTokens: 12000,
+		},
+	}
+
+	enforceWebSearchTokenPolicy(usage, "gpt-4o-search-preview", 2)
+
+	if usage.PromptTokens != 12000 {
+		t.Fatalf("expected prompt tokens unchanged at 12000, got %d", usage.PromptTokens)
+	}
+	if usage.TotalTokens != 12500 {
+		t.Fatalf("expected total tokens recomputed to 12500, got %d", usage.TotalTokens)
+	}
+}
+
+func TestEnforceWebSearchTokenPolicyMiniFixedBlockIncrease(t *testing.T) {
+	usage := &model.Usage{
+		PromptTokens:     5000,
+		CompletionTokens: 1000,
+		TotalTokens:      0,
+		PromptTokensDetails: &model.UsagePromptTokensDetails{
+			TextTokens: 5000,
+		},
+	}
+
+	enforceWebSearchTokenPolicy(usage, "gpt-4o-mini-search-preview", 2)
+
+	if usage.PromptTokens != 5000 {
+		t.Fatalf("expected prompt tokens unchanged at 5000, got %d", usage.PromptTokens)
+	}
+	if usage.TotalTokens != 6000 {
+		t.Fatalf("expected total tokens recomputed to 6000, got %d", usage.TotalTokens)
+	}
+	if usage.PromptTokensDetails.TextTokens != 5000 {
+		t.Fatalf("expected text tokens unchanged at 5000, got %d", usage.PromptTokensDetails.TextTokens)
+	}
+}
+
+func TestEnforceWebSearchTokenPolicyMiniFixedBlockDecrease(t *testing.T) {
+	usage := &model.Usage{
+		PromptTokens:     20000,
+		CompletionTokens: 1000,
+		TotalTokens:      0,
+		PromptTokensDetails: &model.UsagePromptTokensDetails{
+			TextTokens: 20000,
+		},
+	}
+
+	enforceWebSearchTokenPolicy(usage, "gpt-4.1-mini-search-preview", 1)
+
+	if usage.PromptTokens != 20000 {
+		t.Fatalf("expected prompt tokens unchanged at 20000, got %d", usage.PromptTokens)
+	}
+	if usage.TotalTokens != 21000 {
+		t.Fatalf("expected total tokens recomputed to 21000, got %d", usage.TotalTokens)
+	}
+	if usage.PromptTokensDetails.TextTokens != 20000 {
+		t.Fatalf("expected text tokens unchanged at 20000, got %d", usage.PromptTokensDetails.TextTokens)
+	}
+}
+
+func TestWebSearchCallUSDPerThousandPreviewTiers(t *testing.T) {
+	cases := []struct {
+		model string
+		usd   float64
+	}{
+		{"gpt-4o-search-preview", 25.0},
+		{"gpt-4o-mini-search-preview", 25.0},
+		{"gpt-4o-mini-search-preview-2025-01-01", 25.0},
+		{"gpt-5-search-preview", 10.0},
+		{"o1-preview-search", 10.0},
+		{"o3-deep-research", 10.0},
+		{"gpt-4o-web-search", 10.0},
+	}
+
+	for _, tc := range cases {
+		got := webSearchCallUSDPerThousand(tc.model)
+		if got != tc.usd {
+			t.Fatalf("model %s: expected USD %.2f, got %.2f", tc.model, tc.usd, got)
+		}
+	}
+}
+
+func TestWebSearchCallUSDPerThousandTiering(t *testing.T) {
+	cases := []struct {
+		model string
+		usd   float64
+	}{
+		{"gpt-4o-search-preview", 25.0},
+		{"gpt-4o-mini-search-preview-2025-01-01", 25.0},
+		{"gpt-4.1-mini-search-preview", 25.0},
+		{"gpt-5-search", 10.0},
+		{"o1-preview-search", 10.0},
+		{"gpt-4o-search", 10.0},
+		{"o3-deep-research", 10.0},
+	}
+
+	for _, tc := range cases {
+		got := webSearchCallUSDPerThousand(tc.model)
+		if got != tc.usd {
+			t.Fatalf("model %s: expected USD %.2f, got %.2f", tc.model, tc.usd, got)
+		}
+	}
+}
+
+func TestResponseAPIUsageToModelMatchesRealLog(t *testing.T) {
+	payload := []byte(`{"input_tokens":8555,"input_tokens_details":{"cached_tokens":4224},"output_tokens":889,"output_tokens_details":{"reasoning_tokens":640},"total_tokens":9444}`)
+	var usage ResponseAPIUsage
+	if err := json.Unmarshal(payload, &usage); err != nil {
+		t.Fatalf("failed to unmarshal usage: %v", err)
+	}
+
+	modelUsage := usage.ToModelUsage()
+	if modelUsage == nil {
+		t.Fatal("expected model usage, got nil")
+	}
+	if modelUsage.PromptTokens != 8555 {
+		t.Fatalf("expected prompt tokens 8555, got %d", modelUsage.PromptTokens)
+	}
+	if modelUsage.CompletionTokens != 889 {
+		t.Fatalf("expected completion tokens 889, got %d", modelUsage.CompletionTokens)
+	}
+	if modelUsage.TotalTokens != 9444 {
+		t.Fatalf("expected total tokens 9444, got %d", modelUsage.TotalTokens)
+	}
+	if modelUsage.PromptTokensDetails == nil {
+		t.Fatal("expected prompt token details")
+	}
+	if modelUsage.PromptTokensDetails.CachedTokens != 4224 {
+		t.Fatalf("expected cached tokens 4224, got %d", modelUsage.PromptTokensDetails.CachedTokens)
+	}
+	if modelUsage.CompletionTokensDetails == nil {
+		t.Fatal("expected completion token details")
+	}
+	if modelUsage.CompletionTokensDetails.ReasoningTokens != 640 {
+		t.Fatalf("expected reasoning tokens 640, got %d", modelUsage.CompletionTokensDetails.ReasoningTokens)
+	}
+}
+
+func TestResponseAPIUsageRoundTripPreservesKnownDetails(t *testing.T) {
+	modelUsage := &model.Usage{
+		PromptTokens:     12000,
+		CompletionTokens: 900,
+		TotalTokens:      12900,
+		PromptTokensDetails: &model.UsagePromptTokensDetails{
+			CachedTokens: 4224,
+		},
+		CompletionTokensDetails: &model.UsageCompletionTokensDetails{ReasoningTokens: 640},
+	}
+
+	converted := (&ResponseAPIUsage{}).FromModelUsage(modelUsage)
+	if converted == nil {
+		t.Fatal("expected converted usage, got nil")
+	}
+	if converted.InputTokensDetails == nil {
+		t.Fatal("expected input token details in converted usage")
+	}
+	if converted.InputTokensDetails.CachedTokens != 4224 {
+		t.Fatalf("expected cached tokens 4224, got %d", converted.InputTokensDetails.CachedTokens)
+	}
+
+	encoded, err := json.Marshal(converted)
+	if err != nil {
+		t.Fatalf("failed to marshal converted usage: %v", err)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(encoded, &generic); err != nil {
+		t.Fatalf("failed to unmarshal converted usage json: %v", err)
+	}
+	inputAny, exists := generic["input_tokens_details"]
+	if !exists {
+		t.Fatal("expected input_tokens_details key in marshalled usage")
+	}
+	inputMap, ok := inputAny.(map[string]any)
+	if !ok {
+		t.Fatalf("expected input_tokens_details to be object, got %T", inputAny)
+	}
+	if _, exists := inputMap["web_search_content_tokens"]; exists {
+		t.Fatal("did not expect web_search_content_tokens to be present in marshalled usage")
+	}
+}
+
+func TestCountWebSearchSearchActionsFromLog(t *testing.T) {
+	outputs := []OutputItem{
+		{Id: "rs_1", Type: "reasoning"},
+		{Id: "ws_08eb", Type: "web_search_call", Status: "completed", Action: &WebSearchCallAction{Type: "search", Query: "positive news today October 8 2025 good news Oct 8 2025"}},
+		{Id: "msg_1", Type: "message", Role: "assistant", Content: []OutputContent{{Type: "output_text", Text: "Today positive news."}}},
+	}
+
+	if got := countWebSearchSearchActions(outputs); got != 1 {
+		t.Fatalf("expected 1 web search call, got %d", got)
+	}
+
+	seen := map[string]struct{}{"ws_08eb": {}}
+	if got := countNewWebSearchSearchActions(outputs, seen); got != 0 {
+		t.Fatalf("expected duplicate detection to yield 0 new calls, got %d", got)
+	}
+}
+
+func TestConvertChatCompletionToResponseAPIWebSearch(t *testing.T) {
+	req := &model.GeneralOpenAIRequest{
+		Model:  "gpt-4o-search-preview",
+		Stream: true,
+		Messages: []model.Message{
+			{Role: "user", Content: "What was a positive news story from today?"},
+		},
+		WebSearchOptions: &model.WebSearchOptions{},
+	}
+
+	converted := ConvertChatCompletionToResponseAPI(req)
+	if converted == nil {
+		t.Fatal("expected converted request")
+	}
+	if converted.Model != "gpt-4o-search-preview" {
+		t.Fatalf("expected model gpt-4o-search-preview, got %s", converted.Model)
+	}
+	if len(converted.Tools) != 1 {
+		t.Fatalf("expected exactly one tool, got %d", len(converted.Tools))
+	}
+	if !strings.EqualFold(converted.Tools[0].Type, "web_search") {
+		t.Fatalf("expected tool type web_search, got %s", converted.Tools[0].Type)
+	}
+	if converted.Stream == nil || !*converted.Stream {
+		t.Fatal("expected stream flag to be set to true")
+	}
+}
+
+func TestConvertResponseAPIToChatCompletionWebSearch(t *testing.T) {
+	resp := &ResponseAPIResponse{
+		Id:     "resp_08eb",
+		Object: "response",
+		Model:  "gpt-5-mini-2025-08-07",
+		Output: []OutputItem{
+			{Id: "rs_1", Type: "reasoning"},
+			{Id: "ws_08eb", Type: "web_search_call", Status: "completed", Action: &WebSearchCallAction{Type: "search", Query: "positive news today October 8 2025 good news Oct 8 2025"}},
+			{Id: "msg_1", Type: "message", Role: "assistant", Content: []OutputContent{{Type: "output_text", Text: "Today (October 8, 2025) one clear positive story was..."}}},
+		},
+		Usage: &ResponseAPIUsage{
+			InputTokens:         8555,
+			OutputTokens:        889,
+			TotalTokens:         9444,
+			InputTokensDetails:  &ResponseAPIInputTokensDetails{CachedTokens: 4224},
+			OutputTokensDetails: &ResponseAPIOutputTokensDetails{ReasoningTokens: 640},
+		},
+	}
+
+	chat := ConvertResponseAPIToChatCompletion(resp)
+	if len(chat.Choices) == 0 {
+		t.Fatal("expected chat choices")
+	}
+	choice := chat.Choices[0]
+	content, ok := choice.Message.Content.(string)
+	if !ok {
+		t.Fatalf("expected message content string, got %T", choice.Message.Content)
+	}
+	if !strings.Contains(content, "positive story") {
+		t.Fatalf("expected converted content to include summary text, got: %s", content)
+	}
+	if chat.Usage.PromptTokens != 8555 {
+		t.Fatalf("expected prompt tokens 8555, got %d", chat.Usage.PromptTokens)
+	}
+	if chat.Usage.PromptTokensDetails == nil {
+		t.Fatal("expected prompt token details in converted chat response")
+	}
+	if chat.Usage.PromptTokensDetails.CachedTokens != 4224 {
+		t.Fatalf("expected cached tokens 4224, got %d", chat.Usage.PromptTokensDetails.CachedTokens)
+	}
+	if chat.Usage.CompletionTokensDetails == nil || chat.Usage.CompletionTokensDetails.ReasoningTokens != 640 {
+		t.Fatal("expected reasoning tokens 640 in completion details")
+	}
+	if count := countWebSearchSearchActions(resp.Output); count != 1 {
+		t.Fatalf("expected web search action count 1, got %d", count)
+	}
+}
+
+func TestConvertResponseAPIToClaudeResponseWebSearch(t *testing.T) {
+	resp := &ResponseAPIResponse{
+		Id:     "resp_08eb",
+		Object: "response",
+		Model:  "gpt-5-mini-2025-08-07",
+		Output: []OutputItem{
+			{Id: "rs_1", Type: "reasoning", Summary: []OutputContent{{Type: "summary_text", Text: "analysis"}}},
+			{Id: "msg_1", Type: "message", Role: "assistant", Content: []OutputContent{{Type: "output_text", Text: "Today positive developments."}}},
+		},
+		Usage: &ResponseAPIUsage{
+			InputTokens:         8555,
+			OutputTokens:        889,
+			TotalTokens:         9444,
+			InputTokensDetails:  &ResponseAPIInputTokensDetails{CachedTokens: 4224},
+			OutputTokensDetails: &ResponseAPIOutputTokensDetails{ReasoningTokens: 640},
+		},
+	}
+
+	upstream := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	converted, errResp := (&Adaptor{}).ConvertResponseAPIToClaudeResponse(nil, upstream, resp)
+	if errResp != nil {
+		t.Fatalf("unexpected error from conversion: %v", errResp)
+	}
+	if converted.StatusCode != http.StatusOK {
+		t.Fatalf("expected status code %d, got %d", http.StatusOK, converted.StatusCode)
+	}
+	body, err := io.ReadAll(converted.Body)
+	if err != nil {
+		t.Fatalf("failed to read converted body: %v", err)
+	}
+	if err := converted.Body.Close(); err != nil {
+		t.Fatalf("failed to close response body: %v", err)
+	}
+	var claude model.ClaudeResponse
+	if err := json.Unmarshal(body, &claude); err != nil {
+		t.Fatalf("failed to unmarshal claude response: %v", err)
+	}
+	if claude.Usage.InputTokens != 8555 || claude.Usage.OutputTokens != 889 {
+		t.Fatalf("expected usage tokens 8555/889, got %d/%d", claude.Usage.InputTokens, claude.Usage.OutputTokens)
+	}
+	if len(claude.Content) == 0 {
+		t.Fatal("expected claude content")
+	}
+	foundText := false
+	for _, content := range claude.Content {
+		if content.Type == "text" && strings.Contains(content.Text, "positive") {
+			foundText = true
+			break
+		}
+	}
+	if !foundText {
+		t.Fatalf("expected claude content to include assistant text, body: %s", string(body))
+	}
+}
+
+func TestConvertResponseAPIToClaudeResponseAddsToolUse(t *testing.T) {
+	resp := &ResponseAPIResponse{
+		Id:     "resp_tool",
+		Object: "response",
+		Model:  "gpt-4o-mini-2024-07-18",
+		Output: []OutputItem{
+			{Type: "function_call", Id: "fc_tool", CallId: "call_weather", Name: "get_weather", Arguments: "{\"location\":\"San Francisco, CA\"}"},
+		},
+	}
+
+	upstream := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	converted, errResp := (&Adaptor{}).ConvertResponseAPIToClaudeResponse(nil, upstream, resp)
+	if errResp != nil {
+		t.Fatalf("unexpected error from conversion: %v", errResp)
+	}
+
+	body, err := io.ReadAll(converted.Body)
+	if err != nil {
+		t.Fatalf("failed to read converted body: %v", err)
+	}
+	if err := converted.Body.Close(); err != nil {
+		t.Fatalf("failed to close response body: %v", err)
+	}
+
+	var claude model.ClaudeResponse
+	if err := json.Unmarshal(body, &claude); err != nil {
+		t.Fatalf("failed to unmarshal claude response: %v", err)
+	}
+
+	if claude.StopReason != "tool_use" {
+		t.Fatalf("expected stop reason tool_use, got %s", claude.StopReason)
+	}
+
+	foundToolUse := false
+	for _, content := range claude.Content {
+		if content.Type == "tool_use" {
+			foundToolUse = true
+			if content.ID != "call_weather" {
+				t.Fatalf("expected tool_use id call_weather, got %s", content.ID)
+			}
+			if content.Name != "get_weather" {
+				t.Fatalf("expected tool_use name get_weather, got %s", content.Name)
+			}
+			if len(content.Input) == 0 {
+				t.Fatal("expected tool_use input to be populated")
+			}
+		}
+	}
+
+	if !foundToolUse {
+		t.Fatalf("expected tool_use content block in claude response, body: %s", string(body))
+	}
+}
+
+func TestDeepResearchConversionIncludesWebSearchTool(t *testing.T) {
+	req := &model.GeneralOpenAIRequest{
+		Model: "o3-deep-research",
+		Messages: []model.Message{
+			{Role: "user", Content: "Research topic"},
+		},
+	}
+
+	adaptor := &Adaptor{}
+	metaInfo := &meta.Meta{ChannelType: channeltype.OpenAI, ActualModelName: "o3-deep-research"}
+
+	if err := adaptor.applyRequestTransformations(metaInfo, req); err != nil {
+		t.Fatalf("applyRequestTransformations returned error: %v", err)
+	}
+
+	converted := ConvertChatCompletionToResponseAPI(req)
+	if len(converted.Tools) == 0 {
+		t.Fatal("expected tools to include web_search for deep research model")
+	}
+
+	found := false
+	for _, tool := range converted.Tools {
+		if strings.EqualFold(tool.Type, "web_search") {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatal("web_search tool not found in converted Response API request")
+	}
+}
+
+func TestApplyWebSearchToolCostForDeepResearch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Set(ctxkey.WebSearchCallCount, 2)
+
+	metaInfo := &meta.Meta{ActualModelName: "o3-deep-research"}
+	usage := &model.Usage{}
+
+	if err := applyWebSearchToolCost(c, &usage, metaInfo); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	perCall := webSearchCallQuotaPerInvocation(metaInfo.ActualModelName)
+	expected := int64(2) * perCall
+	if usage.ToolsCost != expected {
+		t.Fatalf("expected tools cost %d, got %d", expected, usage.ToolsCost)
 	}
 }

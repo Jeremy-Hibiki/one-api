@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -13,12 +14,12 @@ import (
 	"github.com/songquanpeng/one-api/relay"
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// func min(a, b int) int {
+// 	if a < b {
+// 		return a
+// 	}
+// 	return b
+// }
 
 func TestDashboardListModels(t *testing.T) {
 	// Initialize the database for testing
@@ -158,8 +159,8 @@ func TestModelEndpointsDifference(t *testing.T) {
 		Data    map[int][]string `json:"data"`
 	}
 	var allModelsResponse struct {
-		Object string        `json:"object"`
-		Data   []interface{} `json:"data"`
+		Object string `json:"object"`
+		Data   []any  `json:"data"`
 	}
 
 	err1 := json.Unmarshal(w1.Body.Bytes(), &dashboardResponse)
@@ -176,7 +177,7 @@ func TestModelEndpointsDifference(t *testing.T) {
 	assert.IsType(t, map[int][]string{}, dashboardResponse.Data)
 
 	// ListAllModels should return a list of model objects
-	assert.IsType(t, []interface{}{}, allModelsResponse.Data)
+	assert.IsType(t, []any{}, allModelsResponse.Data)
 
 	t.Logf("✓ Confirmed that /api/models and /api/channel/models return different data structures")
 	t.Logf("  - /api/models returns channel-type-to-models mapping with %d channel types", len(dashboardResponse.Data))
@@ -215,13 +216,7 @@ func TestDeepSeekModelsInDashboard(t *testing.T) {
 	// Verify that DeepSeek models are included
 	expectedModels := []string{"deepseek-chat", "deepseek-reasoner"}
 	for _, expectedModel := range expectedModels {
-		found := false
-		for _, model := range deepSeekModels {
-			if model == expectedModel {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(deepSeekModels, expectedModel)
 		assert.True(t, found, "Expected DeepSeek model %s should be present", expectedModel)
 	}
 
@@ -240,8 +235,8 @@ func TestChannelDefaultPricing(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/channel/default-pricing", GetChannelDefaultPricing)
 
-	// Test Custom channel (should return global pricing from all adapters)
-	req1, _ := http.NewRequest("GET", "/api/channel/default-pricing?type=8", nil) // Custom = 8
+	// Test OpenAI-compatible channel (should return global pricing from all adapters)
+	req1, _ := http.NewRequest("GET", "/api/channel/default-pricing?type=50", nil) // OpenAICompatible = 50
 	w1 := httptest.NewRecorder()
 	router.ServeHTTP(w1, req1)
 
@@ -259,10 +254,10 @@ func TestChannelDefaultPricing(t *testing.T) {
 	assert.True(t, customResponse.Success)
 
 	// Parse the JSON strings to verify they contain models from multiple adapters
-	var customModelRatios map[string]float64
-	err1 = json.Unmarshal([]byte(customResponse.Data.ModelRatio), &customModelRatios)
+	var compatibleModelRatios map[string]float64
+	err1 = json.Unmarshal([]byte(customResponse.Data.ModelRatio), &compatibleModelRatios)
 	assert.NoError(t, err1)
-	assert.NotEmpty(t, customModelRatios, "Custom channel should have model ratios")
+	assert.NotEmpty(t, compatibleModelRatios, "OpenAI-compatible channel should have model ratios")
 
 	// Test specific channel type (should return only that adapter's pricing)
 	req2, _ := http.NewRequest("GET", "/api/channel/default-pricing?type=40", nil) // DeepSeek = 40
@@ -288,9 +283,9 @@ func TestChannelDefaultPricing(t *testing.T) {
 	assert.NotEmpty(t, deepseekModelRatios, "DeepSeek channel should have model ratios")
 
 	// Custom should have significantly more models since it includes all adapters
-	assert.Greater(t, len(customModelRatios), len(deepseekModelRatios),
-		"Custom channel should have more models than specific channel")
+	assert.Greater(t, len(compatibleModelRatios), len(deepseekModelRatios),
+		"OpenAI-compatible channel should have more models than specific channel")
 
-	t.Logf("✓ Custom channel has %d models from global pricing", len(customModelRatios))
+	t.Logf("✓ OpenAI-compatible channel has %d models from global pricing", len(compatibleModelRatios))
 	t.Logf("✓ Specific channel has %d models from its adapter", len(deepseekModelRatios))
 }

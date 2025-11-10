@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/image/webp"
 	"golang.org/x/sync/errgroup"
@@ -49,7 +51,7 @@ func ImageHandler(c *gin.Context, resp *http.Response) (
 	for {
 		err = func() error {
 			// get task
-			taskReq, err := http.NewRequestWithContext(c.Request.Context(),
+			taskReq, err := http.NewRequestWithContext(gmw.Ctx(c),
 				http.MethodGet, respData.URLs.Get, nil)
 			if err != nil {
 				return errors.Wrap(err, "new request")
@@ -103,10 +105,9 @@ func ImageHandler(c *gin.Context, resp *http.Response) (
 			}
 
 			for _, imgOut := range output {
-				imgOut := imgOut
 				pool.Go(func() error {
 					// download image
-					downloadReq, err := http.NewRequestWithContext(c.Request.Context(),
+					downloadReq, err := http.NewRequestWithContext(gmw.Ctx(c),
 						http.MethodGet, imgOut, nil)
 					if err != nil {
 						return errors.Wrap(err, "new request")
@@ -150,7 +151,7 @@ func ImageHandler(c *gin.Context, resp *http.Response) (
 					return errors.WithStack(err)
 				}
 
-				logger.Error(c, fmt.Sprintf("some images failed to download: %+v", err))
+				logger.Logger.Error("some images failed to download", zap.Error(err))
 			}
 
 			c.JSON(http.StatusOK, respBody)

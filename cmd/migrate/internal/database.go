@@ -10,6 +10,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"github.com/Laisky/errors/v2"
+	"github.com/Laisky/zap"
+
 	"github.com/songquanpeng/one-api/common"
 	oneapilogger "github.com/songquanpeng/one-api/common/logger"
 )
@@ -30,11 +33,11 @@ func ConnectDatabase(dbType, dsn string) (*DatabaseConnection, error) {
 
 	// Clean up DSN by removing scheme prefix for actual connection
 	cleanDSN := dsn
-	if strings.HasPrefix(dsn, "sqlite://") {
-		cleanDSN = strings.TrimPrefix(dsn, "sqlite://")
-	} else if strings.HasPrefix(dsn, "mysql://") {
+	if after, ok := strings.CutPrefix(dsn, "sqlite://"); ok {
+		cleanDSN = after
+	} else if after, ok := strings.CutPrefix(dsn, "mysql://"); ok {
 		// Convert mysql://user:pass@host:port/db to user:pass@tcp(host:port)/db
-		cleanDSN = strings.TrimPrefix(dsn, "mysql://")
+		cleanDSN = after
 		if strings.Contains(cleanDSN, "@") && strings.Contains(cleanDSN, "/") {
 			parts := strings.Split(cleanDSN, "@")
 			if len(parts) == 2 {
@@ -54,7 +57,7 @@ func ConnectDatabase(dbType, dsn string) (*DatabaseConnection, error) {
 	switch strings.ToLower(dbType) {
 	case "sqlite":
 		driver = "sqlite"
-		oneapilogger.SysLog("Connecting to SQLite database")
+		oneapilogger.Logger.Info("Connecting to SQLite database")
 		// Add busy timeout for SQLite
 		if !strings.Contains(cleanDSN, "?") {
 			cleanDSN += fmt.Sprintf("?_busy_timeout=%d", common.SQLiteBusyTimeout)
@@ -67,14 +70,19 @@ func ConnectDatabase(dbType, dsn string) (*DatabaseConnection, error) {
 		})
 	case "mysql":
 		driver = "mysql"
-		oneapilogger.SysLog("Connecting to MySQL database")
-		db, err = gorm.Open(mysql.Open(cleanDSN), &gorm.Config{
+		oneapilogger.Logger.Info("Connecting to MySQL database")
+		normalized, normErr := common.NormalizeMySQLDSN(cleanDSN)
+		if normErr != nil {
+			return nil, errors.Wrap(normErr, "normalize MySQL DSN")
+		}
+
+		db, err = gorm.Open(mysql.Open(normalized), &gorm.Config{
 			PrepareStmt: true,
 			Logger:      logger.Default.LogMode(logger.Silent),
 		})
 	case "postgres", "postgresql":
 		driver = "postgres"
-		oneapilogger.SysLog("Connecting to PostgreSQL database")
+		oneapilogger.Logger.Info("Connecting to PostgreSQL database")
 		db, err = gorm.Open(postgres.New(postgres.Config{
 			DSN:                  cleanDSN,
 			PreferSimpleProtocol: true,
@@ -83,24 +91,24 @@ func ConnectDatabase(dbType, dsn string) (*DatabaseConnection, error) {
 			Logger:      logger.Default.LogMode(logger.Silent),
 		})
 	default:
-		return nil, fmt.Errorf("unsupported database type: %s", dbType)
+		return nil, errors.Wrapf(nil, "unsupported database type: %s", dbType)
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s database: %w", dbType, err)
+		return nil, errors.Wrapf(err, "failed to connect to %s database", dbType)
 	}
 
 	// Test the connection
 	sqlDB, err := db.DB()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
+		return nil, errors.Wrapf(err, "failed to get underlying sql.DB")
 	}
 
 	if err := sqlDB.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping %s database: %w", dbType, err)
+		return nil, errors.Wrapf(err, "failed to ping %s database", dbType)
 	}
 
-	oneapilogger.SysLog(fmt.Sprintf("Successfully connected to %s database", dbType))
+	oneapilogger.Logger.Info("Successfully connected to database", zap.String("type", dbType))
 
 	return &DatabaseConnection{
 		DB:     db,
@@ -114,7 +122,7 @@ func ConnectDatabase(dbType, dsn string) (*DatabaseConnection, error) {
 func ConnectDatabaseFromDSN(dsn string) (*DatabaseConnection, error) {
 	dbType, err := ExtractDatabaseTypeFromDSN(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine database type from DSN: %w", err)
+		return nil, errors.Wrapf(err, "failed to determine database type from DSN")
 	}
 
 	return ConnectDatabase(dbType, dsn)
@@ -128,14 +136,14 @@ func (dc *DatabaseConnection) Close() error {
 
 	sqlDB, err := dc.DB.DB()
 	if err != nil {
-		return fmt.Errorf("failed to get underlying sql.DB: %w", err)
+		return errors.Wrapf(err, "failed to get underlying sql.DB")
 	}
 
 	if err := sqlDB.Close(); err != nil {
-		return fmt.Errorf("failed to close %s database connection: %w", dc.Type, err)
+		return errors.Wrapf(err, "failed to close %s database connection", dc.Type)
 	}
 
-	oneapilogger.SysLog(fmt.Sprintf("Closed %s database connection", dc.Type))
+	oneapilogger.Logger.Info("Closed database connection", zap.String("type", dc.Type))
 	return nil
 }
 
@@ -152,11 +160,11 @@ func (dc *DatabaseConnection) GetTableNames() ([]string, error) {
 	case "postgres":
 		err = dc.DB.Raw("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename").Scan(&tables).Error
 	default:
-		return nil, fmt.Errorf("unsupported database type for table listing: %s", dc.Type)
+		return nil, errors.Wrapf(nil, "unsupported database type for table listing: %s", dc.Type)
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to get table names from %s database: %w", dc.Type, err)
+		return nil, errors.Wrapf(err, "failed to get table names from %s database", dc.Type)
 	}
 
 	return tables, nil
@@ -167,7 +175,7 @@ func (dc *DatabaseConnection) GetRowCount(tableName string) (int64, error) {
 	var count int64
 	err := dc.DB.Table(tableName).Count(&count).Error
 	if err != nil {
-		return 0, fmt.Errorf("failed to count rows in table %s: %w", tableName, err)
+		return 0, errors.Wrapf(err, "failed to count rows in table %s", tableName)
 	}
 	return count, nil
 }
@@ -185,11 +193,11 @@ func (dc *DatabaseConnection) TableExists(tableName string) (bool, error) {
 	case "postgres":
 		err = dc.DB.Raw("SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?", tableName).Scan(&exists).Error
 	default:
-		return false, fmt.Errorf("unsupported database type for table existence check: %s", dc.Type)
+		return false, errors.Wrapf(nil, "unsupported database type for table existence check: %s", dc.Type)
 	}
 
 	if err != nil {
-		return false, fmt.Errorf("failed to check if table %s exists: %w", tableName, err)
+		return false, errors.Wrapf(err, "failed to check if table %s exists", tableName)
 	}
 
 	return exists, nil
@@ -200,13 +208,13 @@ func (dc *DatabaseConnection) ValidateConnection() error {
 	// Test basic query
 	var result int
 	if err := dc.DB.Raw("SELECT 1").Scan(&result).Error; err != nil {
-		return fmt.Errorf("failed to execute test query: %w", err)
+		return errors.Wrapf(err, "failed to execute test query")
 	}
 
 	if result != 1 {
-		return fmt.Errorf("unexpected result from test query: got %d, expected 1", result)
+		return errors.Wrapf(nil, "unexpected result from test query: got %d, expected 1", result)
 	}
 
-	oneapilogger.SysLog(fmt.Sprintf("%s database connection validated successfully", dc.Type))
+	oneapilogger.Logger.Info("Database connection validated successfully", zap.String("type", dc.Type))
 	return nil
 }

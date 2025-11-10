@@ -21,6 +21,13 @@ type Adaptor struct {
 func (a *Adaptor) Init(meta *meta.Meta) {}
 
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
+	// Handle Claude Messages requests - convert to OpenAI Chat Completions endpoint
+	if meta.RequestURLPath == "/v1/messages" {
+		// Claude Messages requests should use OpenAI's chat completions endpoint
+		chatCompletionsPath := "/v1/chat/completions"
+		return openai_compatible.GetFullRequestURL(meta.BaseURL, chatCompletionsPath, meta.ChannelType), nil
+	}
+
 	// SiliconFlow uses OpenAI-compatible API endpoints
 	return openai_compatible.GetFullRequestURL(meta.BaseURL, meta.RequestURLPath, meta.ChannelType), nil
 }
@@ -54,13 +61,12 @@ func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Read
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (usage *model.Usage, err *model.ErrorWithStatusCode) {
-	// Use the shared OpenAI-compatible response handling
-	if meta.IsStream {
-		err, usage = openai_compatible.StreamHandler(c, resp, meta.PromptTokens, meta.ActualModelName)
-	} else {
-		err, usage = openai_compatible.Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
-	}
-	return
+	return openai_compatible.HandleClaudeMessagesResponse(c, resp, meta, func(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
+		if meta.IsStream {
+			return openai_compatible.StreamHandler(c, resp, promptTokens, modelName)
+		}
+		return openai_compatible.Handler(c, resp, promptTokens, modelName)
+	})
 }
 
 func (a *Adaptor) GetModelList() []string {
@@ -74,8 +80,7 @@ func (a *Adaptor) GetChannelName() string {
 // GetDefaultModelPricing returns the pricing information for SiliconFlow models
 // Based on SiliconFlow pricing: https://siliconflow.cn/pricing
 func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
-	const MilliTokensUsd = 0.5 // 0.000001 * 500000 = 0.5 quota per milli-token
-
+	// Use the constants.go ModelRatios which already use ratio.MilliTokensUsd correctly
 	return ModelRatios
 }
 

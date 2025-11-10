@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"strings"
 
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
+
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/render"
 
@@ -15,7 +18,6 @@ import (
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/model"
 )
@@ -34,12 +36,13 @@ func ConvertCompletionsRequest(textRequest model.GeneralOpenAIRequest) *Request 
 }
 
 func StreamHandler(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
+	lg := gmw.GetLogger(c)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
 
 	common.SetEventStreamHeaders(c)
 	id := helper.GetResponseID(c)
-	responseModel := c.GetString(ctxkey.OriginalModel)
+	responseModel := c.GetString(ctxkey.RequestModel)
 	var responseText string
 
 	for scanner.Scan() {
@@ -57,7 +60,7 @@ func StreamHandler(c *gin.Context, resp *http.Response, promptTokens int, modelN
 		var response openai.ChatCompletionsStreamResponse
 		err := json.Unmarshal([]byte(data), &response)
 		if err != nil {
-			logger.SysError("error unmarshalling stream response: " + err.Error())
+			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
 		}
 		for _, v := range response.Choices {
@@ -68,12 +71,12 @@ func StreamHandler(c *gin.Context, resp *http.Response, promptTokens int, modelN
 		response.Model = modelName
 		err = render.ObjectData(c, response)
 		if err != nil {
-			logger.SysError(err.Error())
+			lg.Error("error rendering stream response", zap.Error(err))
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
 	render.Done(c)

@@ -9,13 +9,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
 	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
 	"github.com/songquanpeng/one-api/relay/model"
@@ -46,7 +48,7 @@ func aiProxyDocuments2Markdown(documents []LibraryDocument) string {
 	return content
 }
 
-func responseAIProxyLibrary2OpenAI(response *LibraryResponse) *openai.TextResponse {
+func responseAIProxyLibrary2OpenAI(c *gin.Context, response *LibraryResponse) *openai.TextResponse {
 	content := response.Answer + aiProxyDocuments2Markdown(response.Documents)
 	choice := openai.TextResponseChoice{
 		Index: 0,
@@ -57,7 +59,7 @@ func responseAIProxyLibrary2OpenAI(response *LibraryResponse) *openai.TextRespon
 		FinishReason: "stop",
 	}
 	fullTextResponse := openai.TextResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion",
 		Created: helper.GetTimestamp(),
 		Choices: []openai.TextResponseChoice{choice},
@@ -65,12 +67,12 @@ func responseAIProxyLibrary2OpenAI(response *LibraryResponse) *openai.TextRespon
 	return &fullTextResponse
 }
 
-func documentsAIProxyLibrary(documents []LibraryDocument) *openai.ChatCompletionsStreamResponse {
+func documentsAIProxyLibrary(c *gin.Context, documents []LibraryDocument) *openai.ChatCompletionsStreamResponse {
 	var choice openai.ChatCompletionsStreamResponseChoice
 	choice.Delta.Content = aiProxyDocuments2Markdown(documents)
 	choice.FinishReason = &constant.StopFinishReason
 	return &openai.ChatCompletionsStreamResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion.chunk",
 		Created: helper.GetTimestamp(),
 		Model:   "",
@@ -78,11 +80,11 @@ func documentsAIProxyLibrary(documents []LibraryDocument) *openai.ChatCompletion
 	}
 }
 
-func streamResponseAIProxyLibrary2OpenAI(response *LibraryStreamResponse) *openai.ChatCompletionsStreamResponse {
+func streamResponseAIProxyLibrary2OpenAI(c *gin.Context, response *LibraryStreamResponse) *openai.ChatCompletionsStreamResponse {
 	var choice openai.ChatCompletionsStreamResponseChoice
 	choice.Delta.Content = response.Content
 	return &openai.ChatCompletionsStreamResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion.chunk",
 		Created: helper.GetTimestamp(),
 		Model:   response.Model,
@@ -109,6 +111,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 	common.SetEventStreamHeaders(c)
 
+	lg := gmw.GetLogger(c)
 	for scanner.Scan() {
 		data := scanner.Text()
 		if len(data) < 5 || data[:5] != "data:" {
@@ -119,27 +122,27 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		var AIProxyLibraryResponse LibraryStreamResponse
 		err := json.Unmarshal([]byte(data), &AIProxyLibraryResponse)
 		if err != nil {
-			logger.SysError("error unmarshalling stream response: " + err.Error())
+			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
 		}
 		if len(AIProxyLibraryResponse.Documents) != 0 {
 			documents = AIProxyLibraryResponse.Documents
 		}
-		response := streamResponseAIProxyLibrary2OpenAI(&AIProxyLibraryResponse)
+		response := streamResponseAIProxyLibrary2OpenAI(c, &AIProxyLibraryResponse)
 		err = render.ObjectData(c, response)
 		if err != nil {
-			logger.SysError(err.Error())
+			lg.Error("render object data error", zap.Error(err))
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
-	response := documentsAIProxyLibrary(documents)
+	response := documentsAIProxyLibrary(c, documents)
 	err := render.ObjectData(c, response)
 	if err != nil {
-		logger.SysError(err.Error())
+		lg.Error("render object data error", zap.Error(err))
 	}
 	render.Done(c)
 
@@ -168,14 +171,15 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 	if AIProxyLibraryResponse.ErrCode != 0 {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: AIProxyLibraryResponse.Message,
-				Type:    strconv.Itoa(AIProxyLibraryResponse.ErrCode),
-				Code:    AIProxyLibraryResponse.ErrCode,
+				Message:  AIProxyLibraryResponse.Message,
+				Type:     strconv.Itoa(AIProxyLibraryResponse.ErrCode),
+				Code:     AIProxyLibraryResponse.ErrCode,
+				RawError: errors.New(AIProxyLibraryResponse.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
-	fullTextResponse := responseAIProxyLibrary2OpenAI(&AIProxyLibraryResponse)
+	fullTextResponse := responseAIProxyLibrary2OpenAI(c, &AIProxyLibraryResponse)
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
 		return openai.ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil

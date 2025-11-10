@@ -15,7 +15,7 @@
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.3.8",
     "react-i18next": "^15.4.1",
-    "react-router-dom": "^7.3.0",
+    "react-router-dom": "7.3.0",
     "react-scripts": "5.0.1",
     "react-toastify": "^11.0.5",
     "react-turnstile": "^1.1.4",
@@ -25,8 +25,12 @@
     "typescript": "5.8.2"
   },
   "scripts": {
-    "start": "react-scripts start",
+    "start": "FAST_REFRESH=true react-scripts start",
+    "dev": "FAST_REFRESH=true GENERATE_SOURCEMAP=true react-scripts start",
+    "dev:backend": "FAST_REFRESH=true GENERATE_SOURCEMAP=true REACT_APP_VERSION=$(node -e 'process.stdout.write(Math.floor(Date.now()/1000).toString())') react-scripts start",
     "build": "react-scripts build && rm -rf ../build/default && mv -f build ../build/default",
+    "build:dev": "GENERATE_SOURCEMAP=true react-scripts build && rm -rf ../build/default && mv -f build ../build/default",
+    "build:prod": "DISABLE_ESLINT_PLUGIN='true' REACT_APP_VERSION=$(node -e 'process.stdout.write(Math.floor(Date.now()/1000).toString())') react-scripts build && rm -rf ../build/default && mv -f build ../build/default",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },
@@ -49,11 +53,14 @@
     ]
   },
   "devDependencies": {
+    "http-proxy-middleware": "^3.0.5",
     "prettier": "^3.5.3"
   },
   "prettier": {
     "singleQuote": true,
     "jsxSingleQuote": true
   },
-  "proxy": "http://localhost:3000"
+  "resolutions": {
+    "webpack-dev-server": "^4.15.1"
+  }
 }

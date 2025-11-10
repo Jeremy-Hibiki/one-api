@@ -1,37 +1,75 @@
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Button,
   Form,
+  Icon,
   Label,
-  Pagination,
   Popup,
   Table,
   Dropdown,
 } from 'semantic-ui-react';
 import { Link } from 'react-router-dom';
-import { API, showError, showSuccess } from '../helpers';
-import { useTranslation } from 'react-i18next';
+import {
+  API,
+  showError,
+  showSuccess,
+  renderQuota,
+} from '../helpers';
 
 import { ITEMS_PER_PAGE } from '../constants';
-import {
-  renderGroup,
-  renderNumber,
-  renderQuota,
-  renderText,
-} from '../helpers/render';
+import { cleanDisplay } from './shared/tableUtils';
+import BaseTable from './shared/BaseTable';
 
-function renderRole(role, t) {
+function renderUserRole(role, t) {
   switch (role) {
     case 1:
-      return <Label>{t('user.table.role_types.normal')}</Label>;
+      return (
+        <Label basic color='blue'>
+          Normal
+        </Label>
+      );
     case 10:
-      return <Label color='yellow'>{t('user.table.role_types.admin')}</Label>;
+      return (
+        <Label basic color='yellow'>
+          Admin
+        </Label>
+      );
     case 100:
       return (
-        <Label color='orange'>{t('user.table.role_types.super_admin')}</Label>
+        <Label basic color='orange'>
+          Super Admin
+        </Label>
       );
     default:
-      return <Label color='red'>{t('user.table.role_types.unknown')}</Label>;
+      return (
+        <Label basic color='red'>
+          Unknown
+        </Label>
+      );
+  }
+}
+
+function renderUserStatus(status, t) {
+  switch (status) {
+    case 1:
+      return (
+        <Label basic color='green'>
+          Enabled
+        </Label>
+      );
+    case 2:
+      return (
+        <Label basic color='red'>
+          Disabled
+        </Label>
+      );
+    default:
+      return (
+        <Label basic color='black'>
+          Unknown
+        </Label>
+      );
   }
 }
 
@@ -40,21 +78,33 @@ const UsersTable = () => {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [searchKeyword, setSearchKeyword] = useState('');
-  const [searching, setSearching] = useState(false);
-  const [orderBy, setOrderBy] = useState('');
+  const [sortBy, setSortBy] = useState('');
+  const [sortOrder, setSortOrder] = useState('desc');
+  const [userOptions, setUserOptions] = useState([]);
+  const [userSearchLoading, setUserSearchLoading] = useState(false);
 
-  const loadUsers = async (startIdx) => {
-    const res = await API.get(`/api/user/?p=${startIdx}&order=${orderBy}`);
-    const { success, message, data } = res.data;
+  const SORT_OPTIONS = [
+    { key: '', text: t('users.sort.default', 'Default'), value: '' },
+    { key: 'quota', text: t('users.sort.remaining_quota', 'Remaining Quota'), value: 'quota' },
+    { key: 'used_quota', text: t('users.sort.used_quota', 'Used Quota'), value: 'used_quota' },
+    { key: 'username', text: t('users.sort.username', 'Username'), value: 'username' },
+    { key: 'id', text: t('users.sort.id', 'ID'), value: 'id' },
+    { key: 'created_time', text: t('users.sort.created_time', 'Created Time'), value: 'created_time' },
+  ];
+
+  const loadUsers = async (page = 0, sortBy = '', sortOrder = 'desc') => {
+    setLoading(true);
+    let url = `/api/user/?p=${page}`;
+    if (sortBy) {
+      url += `&sort=${sortBy}&order=${sortOrder}`;
+    }
+    const res = await API.get(url);
+    const { success, message, data, total } = res.data;
     if (success) {
-      if (startIdx === 0) {
-        setUsers(data);
-      } else {
-        let newUsers = users;
-        newUsers.push(...data);
-        setUsers(newUsers);
-      }
+      setUsers(data);
+      setTotalPages(Math.ceil(total / ITEMS_PER_PAGE));
     } else {
       showError(message);
     }
@@ -62,77 +112,99 @@ const UsersTable = () => {
   };
 
   const onPaginationChange = (e, { activePage }) => {
-    (async () => {
-      if (activePage === Math.ceil(users.length / ITEMS_PER_PAGE) + 1) {
-        // In this case we have to load more data and then append them.
-        await loadUsers(activePage - 1, orderBy);
-      }
-      setActivePage(activePage);
-    })();
+    setActivePage(activePage);
+    loadUsers(activePage - 1, sortBy, sortOrder);
   };
 
   useEffect(() => {
-    loadUsers(0, orderBy)
+    loadUsers(0, sortBy, sortOrder)
       .then()
       .catch((reason) => {
         showError(reason);
       });
-  }, [orderBy]);
+  }, [sortBy, sortOrder]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const manageUser = (username, action, idx) => {
-    (async () => {
-      const res = await API.post('/api/user/manage', {
-        username,
-        action,
-      });
-      const { success, message } = res.data;
-      if (success) {
-        showSuccess(t('user.messages.operation_success'));
-        let user = res.data.data;
-        let newUsers = [...users];
-        let realIdx = (activePage - 1) * ITEMS_PER_PAGE + idx;
-        if (action === 'delete') {
-          newUsers[realIdx].deleted = true;
-        } else {
-          newUsers[realIdx].status = user.status;
-          newUsers[realIdx].role = user.role;
-        }
-        setUsers(newUsers);
-      } else {
-        showError(message);
-      }
-    })();
-  };
-
-  const renderStatus = (status) => {
-    switch (status) {
-      case 1:
-        return <Label basic>{t('user.table.status_types.activated')}</Label>;
-      case 2:
-        return (
-          <Label basic color='red'>
-            {t('user.table.status_types.banned')}
-          </Label>
-        );
+  const manageUser = async (id, action, idx) => {
+    let data = { id };
+    let res;
+    switch (action) {
+      case 'delete':
+        res = await API.delete(`/api/user/${id}`);
+        break;
+      case 'enable':
+        data.status = 1;
+        res = await API.put('/api/user/?status_only=true', data);
+        break;
+      case 'disable':
+        data.status = 2;
+        res = await API.put('/api/user/?status_only=true', data);
+        break;
       default:
-        return (
-          <Label basic color='grey'>
-            {t('user.table.status_types.unknown')}
-          </Label>
-        );
+        return;
+    }
+    const { success, message } = res.data;
+    if (success) {
+      showSuccess('Operation successful');
+      let user = res.data.data;
+      let newUsers = [...users];
+      if (action === 'delete') {
+        newUsers[idx].deleted = true;
+      } else {
+        newUsers[idx].status = user.status;
+      }
+      setUsers(newUsers);
+    } else {
+      showError(message);
     }
   };
 
-  const searchUsers = async () => {
-    if (searchKeyword === '') {
-      // if keyword is blank, load files instead.
-      await loadUsers(0);
-      setActivePage(1);
-      setOrderBy('');
+  const searchUsers = async (searchQuery) => {
+    if (!searchQuery.trim()) {
+      setUserOptions([]);
       return;
     }
-    setSearching(true);
-    const res = await API.get(`/api/user/search?keyword=${searchKeyword}`);
+
+    setUserSearchLoading(true);
+    try {
+      const res = await API.get(`/api/user/search?keyword=${searchQuery}`);
+      const { success, data } = res.data;
+      if (success) {
+        const options = data.map(user => ({
+          key: user.id,
+          value: user.username,
+          text: `${user.display_name || user.username} (@${user.username})`,
+          content: (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ fontWeight: 'bold' }}>
+                {user.display_name || user.username}
+              </div>
+              <div style={{ fontSize: '0.9em', color: '#666' }}>
+                @{user.username} • ID: {user.id}
+              </div>
+            </div>
+          )
+        }));
+        setUserOptions(options);
+      }
+    } catch (error) {
+      console.error('Failed to search users:', error);
+    } finally {
+      setUserSearchLoading(false);
+    }
+  };
+
+  const searchUsersByKeyword = async () => {
+    if (searchKeyword === '') {
+      // if keyword is blank, load users instead.
+      await loadUsers(0, sortBy, sortOrder);
+      setActivePage(1);
+      return;
+    }
+    let url = `/api/user/search?keyword=${searchKeyword}`;
+    if (sortBy) {
+      url += `&sort=${sortBy}&order=${sortOrder}`;
+    }
+    const res = await API.get(url);
     const { success, message, data } = res.data;
     if (success) {
       setUsers(data);
@@ -140,276 +212,242 @@ const UsersTable = () => {
     } else {
       showError(message);
     }
-    setSearching(false);
   };
 
-  const handleKeywordChange = async (e, { value }) => {
-    setSearchKeyword(value.trim());
+  const sortUser = async (key) => {
+    const newSortOrder = sortBy === key && sortOrder === 'desc' ? 'asc' : 'desc';
+    setSortBy(key);
+    setSortOrder(newSortOrder);
+    await loadUsers(activePage - 1, key, newSortOrder);
   };
 
-  const sortUser = (key) => {
-    if (users.length === 0) return;
-    setLoading(true);
-    let sortedUsers = [...users];
-    sortedUsers.sort((a, b) => {
-      if (!isNaN(a[key])) {
-        // If the value is numeric, subtract to sort
-        return a[key] - b[key];
-      } else {
-        // If the value is not numeric, sort as strings
-        return ('' + a[key]).localeCompare(b[key]);
-      }
-    });
-    if (sortedUsers[0].id === users[0].id) {
-      sortedUsers.reverse();
+  const handleSortChange = async (e, { value }) => {
+    setSortBy(value);
+    setSortOrder('desc');
+    setActivePage(1);
+    await loadUsers(0, value, 'desc');
+  };
+
+  const getSortIcon = (columnKey) => {
+    if (sortBy !== columnKey) {
+      return <Icon name="sort" style={{ opacity: 0.5 }} />;
     }
-    setUsers(sortedUsers);
-    setLoading(false);
+    return <Icon name={sortOrder === 'asc' ? 'sort up' : 'sort down'} />;
   };
 
-  const handleOrderByChange = (e, { value }) => {
-    setOrderBy(value);
+  const refresh = async () => {
+    setLoading(true);
+    await loadUsers(0, sortBy, sortOrder);
     setActivePage(1);
   };
 
+  const headerCells = [
+    {
+      content: (
+        <>
+          ID {getSortIcon('id')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('id'),
+    },
+    {
+      content: (
+        <>
+          {t('users.table.username', 'Username')} {getSortIcon('username')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('username'),
+    },
+    {
+      content: (
+        <>
+          {t('users.table.role', 'Role')} {getSortIcon('role')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('role'),
+    },
+    {
+      content: (
+        <>
+          {t('users.table.status', 'Status')} {getSortIcon('status')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('status'),
+    },
+    {
+      content: (
+        <>
+          {t('users.table.remaining_quota', 'Remaining Quota')} {getSortIcon('quota')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('quota'),
+    },
+    {
+      content: (
+        <>
+          {t('users.table.used_quota', 'Used Quota')} {getSortIcon('used_quota')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('used_quota'),
+    },
+    {
+      content: (
+        <>
+          {t('users.table.group', 'Group')} {getSortIcon('group')}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortUser('group'),
+    },
+    {
+      content: t('users.table.actions', 'Actions'),
+      sortable: false,
+    },
+  ];
+
+  const footerButtons = [
+    {
+      content: t('add'),
+      as: Link,
+      to: '/user/add',
+      loading: loading,
+    },
+    {
+      content: t('refresh'),
+      onClick: refresh,
+      loading: loading,
+    },
+  ];
+
   return (
     <>
-      <Form onSubmit={searchUsers}>
-        <Form.Input
-          icon='search'
-          fluid
-          iconPosition='left'
-          placeholder={t('user.search')}
-          value={searchKeyword}
-          loading={searching}
-          onChange={handleKeywordChange}
-        />
+      <Form onSubmit={searchUsersByKeyword}>
+        <Form.Group>
+          <Form.Field width={12}>
+            <Dropdown
+              fluid
+              selection
+              search
+              clearable
+              allowAdditions
+              placeholder={t('users.search.placeholder', 'Search by username...')}
+              value={searchKeyword}
+              options={userOptions}
+              onSearchChange={(_, { searchQuery }) => searchUsers(searchQuery)}
+              onChange={(_, { value }) => setSearchKeyword(value)}
+              loading={userSearchLoading}
+              noResultsMessage={t('users.no_users_found', 'No users found')}
+              additionLabel={t('users.use_username', 'Use username: ')}
+              onAddItem={(_, { value }) => {
+                const newOption = {
+                  key: value,
+                  value: value,
+                  text: value
+                };
+                setUserOptions([...userOptions, newOption]);
+              }}
+            />
+          </Form.Field>
+          <Form.Dropdown
+            width={4}
+            selection
+            placeholder={t('users.sort.placeholder', 'Sort by...')}
+            options={SORT_OPTIONS}
+            value={sortBy}
+            onChange={handleSortChange}
+          />
+        </Form.Group>
       </Form>
 
-      <Table basic={'very'} compact size='small'>
-        <Table.Header>
-          <Table.Row>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('id');
-              }}
-            >
-              {t('user.table.id')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('username');
-              }}
-            >
-              {t('user.table.username')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('group');
-              }}
-            >
-              {t('user.table.group')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('quota');
-              }}
-            >
-              {t('user.table.quota')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('role');
-              }}
-            >
-              {t('user.table.role_text')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortUser('status');
-              }}
-            >
-              {t('user.table.status_text')}
-            </Table.HeaderCell>
-            <Table.HeaderCell>{t('user.table.actions')}</Table.HeaderCell>
-          </Table.Row>
-        </Table.Header>
-
-        <Table.Body>
-          {users
-            .slice(
-              (activePage - 1) * ITEMS_PER_PAGE,
-              activePage * ITEMS_PER_PAGE
-            )
-            .map((user, idx) => {
-              if (user.deleted) return <></>;
-              return (
-                <Table.Row key={user.id}>
-                  <Table.Cell>{user.id}</Table.Cell>
-                  <Table.Cell>
-                    <Popup
-                      content={user.email ? user.email : 'Email not bound'}
-                      key={user.username}
-                      header={
-                        user.display_name ? user.display_name : user.username
-                      }
-                      trigger={<span>{renderText(user.username, 15)}</span>}
-                      hoverable
-                    />
-                  </Table.Cell>
-                  <Table.Cell>{renderGroup(user.group)}</Table.Cell>
-                  {/*<Table.Cell>*/}
-                  {/*  {user.email ? <Popup hoverable content={user.email} trigger={<span>{renderText(user.email, 24)}</span>} /> : 'None'}*/}
-                  {/*</Table.Cell>*/}
-                  <Table.Cell>
-                    <Popup
-                      content={t('user.table.remaining_quota')}
-                      trigger={
-                        <Label basic>{renderQuota(user.quota, t)}</Label>
-                      }
-                    />
-                    <Popup
-                      content={t('user.table.used_quota')}
-                      trigger={
-                        <Label basic>{renderQuota(user.used_quota, t)}</Label>
-                      }
-                    />
-                    <Popup
-                      content={t('user.table.request_count')}
-                      trigger={
-                        <Label basic>{renderNumber(user.request_count)}</Label>
-                      }
-                    />
-                  </Table.Cell>
-                  <Table.Cell>{renderRole(user.role, t)}</Table.Cell>
-                  <Table.Cell>{renderStatus(user.status)}</Table.Cell>
-                  <Table.Cell>
-                    <div>
-                      <Button
-                        size={'tiny'}
-                        positive
-                        onClick={() => {
-                          manageUser(user.username, 'promote', idx);
-                        }}
-                        disabled={user.role === 100}
-                      >
-                        {t('user.buttons.promote')}
+      <BaseTable
+        loading={loading}
+        activePage={activePage}
+        totalPages={totalPages}
+        onPageChange={onPaginationChange}
+        headerCells={headerCells}
+        footerButtons={footerButtons}
+        colSpan={8}
+      >
+        {users.map((user, idx) => {
+          if (user.deleted) return null;
+          return (
+            <Table.Row key={user.id}>
+              <Table.Cell data-label="ID">{user.id}</Table.Cell>
+              <Table.Cell data-label="Username">
+                {cleanDisplay(user.username)}
+              </Table.Cell>
+              <Table.Cell data-label="Role">{renderUserRole(user.role, t)}</Table.Cell>
+              <Table.Cell data-label="Status">{renderUserStatus(user.status, t)}</Table.Cell>
+              <Table.Cell data-label="Remaining Quota">
+                {user.quota === -1 ? (
+                  <Label basic color="green">
+                    {t('unlimited')}
+                  </Label>
+                ) : (
+                  renderQuota(user.quota, t)
+                )}
+              </Table.Cell>
+              <Table.Cell data-label="Used Quota">
+                {user.used_quota ? renderQuota(user.used_quota, t) : '0'}
+              </Table.Cell>
+              <Table.Cell data-label="Group">
+                {cleanDisplay(user.group, 'default')}
+              </Table.Cell>
+              <Table.Cell data-label="Actions">
+                <div>
+                  <Button
+                    size={'tiny'}
+                    color="blue"
+                    as={Link}
+                    to={'/user/edit/' + user.id}
+                  >
+                    {t('edit')}
+                  </Button>
+                  <Button
+                    size={'tiny'}
+                    onClick={() => {
+                      manageUser(
+                        user.id,
+                        user.status === 1 ? 'disable' : 'enable',
+                        idx
+                      );
+                    }}
+                  >
+                    {user.status === 1
+                      ? t('disable')
+                      : t('enable')}
+                  </Button>
+                  <Popup
+                    trigger={
+                      <Button size='tiny' negative>
+                        {t('delete')}
                       </Button>
-                      <Button
-                        size={'tiny'}
-                        color={'yellow'}
-                        onClick={() => {
-                          manageUser(user.username, 'demote', idx);
-                        }}
-                        disabled={user.role === 100}
-                      >
-                        {t('user.buttons.demote')}
-                      </Button>
-                      <Popup
-                        trigger={
-                          <Button
-                            size='tiny'
-                            negative
-                            disabled={user.role === 100}
-                          >
-                            {t('user.buttons.delete')}
-                          </Button>
-                        }
-                        on='click'
-                        flowing
-                        hoverable
-                      >
-                        <Button
-                          negative
-                          size={'tiny'}
-                          onClick={() => {
-                            manageUser(user.username, 'delete', idx);
-                          }}
-                        >
-                          {t('user.buttons.delete_user')} {user.username}
-                        </Button>
-                      </Popup>
-                      <Button
-                        size={'tiny'}
-                        onClick={() => {
-                          manageUser(
-                            user.username,
-                            user.status === 1 ? 'disable' : 'enable',
-                            idx
-                          );
-                        }}
-                        disabled={user.role === 100}
-                      >
-                        {user.status === 1
-                          ? t('user.buttons.disable')
-                          : t('user.buttons.enable')}
-                      </Button>
-                      <Button
-                        size={'tiny'}
-                        as={Link}
-                        to={'/user/edit/' + user.id}
-                      >
-                        {t('user.buttons.edit')}
-                      </Button>
-                    </div>
-                  </Table.Cell>
-                </Table.Row>
-              );
-            })}
-        </Table.Body>
-
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan='7'>
-              <Button size='small' as={Link} to='/user/add' loading={loading}>
-                {t('user.buttons.add')}
-              </Button>
-              <Dropdown
-                placeholder={t('user.table.sort_by')}
-                selection
-                options={[
-                  { key: '', text: t('user.table.sort.default'), value: '' },
-                  {
-                    key: 'quota',
-                    text: t('user.table.sort.by_quota'),
-                    value: 'quota',
-                  },
-                  {
-                    key: 'used_quota',
-                    text: t('user.table.sort.by_used_quota'),
-                    value: 'used_quota',
-                  },
-                  {
-                    key: 'request_count',
-                    text: t('user.table.sort.by_request_count'),
-                    value: 'request_count',
-                  },
-                ]}
-                value={orderBy}
-                onChange={handleOrderByChange}
-                style={{ marginLeft: '10px' }}
-              />
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='small'
-                siblingRange={1}
-                totalPages={
-                  Math.ceil(users.length / ITEMS_PER_PAGE) +
-                  (users.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                }
-              />
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
-      </Table>
+                    }
+                    on='click'
+                    flowing
+                    hoverable
+                  >
+                    <Button
+                      negative
+                      onClick={() => {
+                        manageUser(user.id, 'delete', idx);
+                      }}
+                    >
+                      {t('confirm_delete')}
+                    </Button>
+                  </Popup>
+                </div>
+              </Table.Cell>
+            </Table.Row>
+          );
+        })}
+      </BaseTable>
     </>
   );
 };

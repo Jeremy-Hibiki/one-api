@@ -2,29 +2,37 @@ package common
 
 import (
 	"flag"
-	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/Laisky/zap"
 
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 )
 
 var (
-	Port         = flag.Int("port", 3000, "the listening port")
+	// Port holds the CLI flag indicating which port the HTTP server listens on.
+	Port = flag.Int("port", 3000, "the listening port")
+
+	// PrintVersion toggles a CLI mode that prints the binary version and exits.
 	PrintVersion = flag.Bool("version", false, "print version and exit")
-	PrintHelp    = flag.Bool("help", false, "print help and exit")
-	LogDir       = flag.String("log-dir", "./logs", "specify the log directory")
+
+	// PrintHelp toggles a CLI mode that prints usage information and exits.
+	PrintHelp = flag.Bool("help", false, "print help and exit")
+
+	// LogDir captures the CLI flag that points to the directory storing log files.
+	LogDir = flag.String("log-dir", "./logs", "specify the log directory")
 )
 
-func printHelp() {
-	fmt.Println("One API " + Version + " - All in one API service for OpenAI API.")
-	fmt.Println("Copyright (C) 2025 JustSong. All rights reserved.")
-	fmt.Println("GitHub: https://github.com/Laisky/one-api")
-	fmt.Println("Usage: one-api [--port <port>] [--log-dir <log directory>] [--version] [--help]")
-}
+// func printHelp() {
+// 	fmt.Println("One API " + Version + " - All in one API service for OpenAI API.")
+// 	fmt.Println("Copyright (C) 2025 JustSong. All rights reserved.")
+// 	fmt.Println("GitHub: https://github.com/Laisky/one-api")
+// 	fmt.Println("Usage: one-api [--port <port>] [--log-dir <log directory>] [--version] [--help]")
+// }
 
+// Init parses CLI flags, normalizes configuration defaults, and prepares logging destinations.
 func Init() {
 	flag.Parse()
 
@@ -38,28 +46,31 @@ func Init() {
 	// 	os.Exit(0)
 	// }
 
-	if os.Getenv("SESSION_SECRET") != "" {
-		if os.Getenv("SESSION_SECRET") == "random_string" {
-			logger.SysError("SESSION_SECRET is set to an example value, please change it to a random string.")
+	if config.SessionSecretEnvValue != "" {
+		if config.SessionSecretEnvValue == "random_string" {
+			logger.Logger.Error("SESSION_SECRET is set to an example value, please change it to a random string.")
 		} else {
-			config.SessionSecret = os.Getenv("SESSION_SECRET")
+			config.SessionSecret = config.SessionSecretEnvValue
 		}
 	}
-	if os.Getenv("SQLITE_PATH") != "" {
-		SQLitePath = os.Getenv("SQLITE_PATH")
-	}
+	SQLitePath = config.SQLitePath
 	if *LogDir != "" {
+		expanded := expandLogDirPath(*LogDir)
+		lg := logger.Logger.With(zap.String("log_dir", expanded))
+		lg.Debug("starting to set log dir")
+
 		var err error
-		*LogDir, err = filepath.Abs(*LogDir)
+		expanded, err = filepath.Abs(expanded)
 		if err != nil {
-			log.Fatal(err)
+			lg.Fatal("failed to get absolute log dir", zap.Error(err))
 		}
-		if _, err := os.Stat(*LogDir); os.IsNotExist(err) {
-			err = os.Mkdir(*LogDir, 0777)
-			if err != nil {
-				log.Fatal(err)
-			}
+
+		if err = os.MkdirAll(expanded, 0o777); err != nil {
+			lg.Fatal("failed to create log dir", zap.Error(err))
 		}
-		logger.LogDir = *LogDir
+
+		lg.Info("set log dir", zap.String("log_dir", expanded))
+		logger.LogDir = expanded
+		*LogDir = expanded
 	}
 }

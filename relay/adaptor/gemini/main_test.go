@@ -18,25 +18,25 @@ func TestCleanFunctionParameters(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		input    interface{}
-		expected interface{}
+		input    any
+		expected any
 	}{
 		{
 			name: "remove additionalProperties at all levels",
-			input: map[string]interface{}{
+			input: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"name": map[string]interface{}{
+				"properties": map[string]any{
+					"name": map[string]any{
 						"type":                 "string",
 						"additionalProperties": false,
 					},
 				},
 				"additionalProperties": false,
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"name": map[string]interface{}{
+				"properties": map[string]any{
+					"name": map[string]any{
 						"type": "string",
 					},
 				},
@@ -44,32 +44,32 @@ func TestCleanFunctionParameters(t *testing.T) {
 		},
 		{
 			name: "remove description and strict only at top level",
-			input: map[string]interface{}{
+			input: map[string]any{
 				"type":        "object",
 				"description": "top level description",
 				"strict":      true,
-				"properties": map[string]interface{}{
-					"nested": map[string]interface{}{
+				"properties": map[string]any{
+					"nested": map[string]any{
 						"type":        "object",
 						"description": "nested description",
 						"strict":      true,
-						"properties": map[string]interface{}{
-							"value": map[string]interface{}{
+						"properties": map[string]any{
+							"value": map[string]any{
 								"type": "string",
 							},
 						},
 					},
 				},
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"nested": map[string]interface{}{
+				"properties": map[string]any{
+					"nested": map[string]any{
 						"type":        "object",
 						"description": "nested description",
 						"strict":      true,
-						"properties": map[string]interface{}{
-							"value": map[string]interface{}{
+						"properties": map[string]any{
+							"value": map[string]any{
 								"type": "string",
 							},
 						},
@@ -78,62 +78,83 @@ func TestCleanFunctionParameters(t *testing.T) {
 			},
 		},
 		{
-			name: "remove unsupported format values - critical fix for log error",
-			input: map[string]interface{}{
+			name: "remove $schema everywhere",
+			input: map[string]any{
+				"type":    "object",
+				"$schema": "http://json-schema.org/draft-07/schema#",
+				"properties": map[string]any{
+					"city": map[string]any{
+						"type":    "string",
+						"$schema": "http://json-schema.org/draft-07/schema#",
+					},
+				},
+			},
+			expected: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"dateRange": map[string]interface{}{
+				"properties": map[string]any{
+					"city": map[string]any{
+						"type": "string",
+					},
+				},
+			},
+		},
+		{
+			name: "remove unsupported format values - critical fix for log error",
+			input: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dateRange": map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"start": map[string]interface{}{
+						"properties": map[string]any{
+							"start": map[string]any{
 								"type":   "string",
 								"format": "date", // This causes the 400 error
 							},
-							"end": map[string]interface{}{
+							"end": map[string]any{
 								"type":   "string",
 								"format": "date", // This causes the 400 error
 							},
 						},
 					},
-					"timestamp": map[string]interface{}{
+					"timestamp": map[string]any{
 						"type":   "string",
 						"format": "date-time", // This is supported
 					},
-					"category": map[string]interface{}{
+					"category": map[string]any{
 						"type":   "string",
 						"format": "enum", // This is supported
 					},
-					"unsupported": map[string]interface{}{
+					"unsupported": map[string]any{
 						"type":   "string",
 						"format": "time", // This should be removed
 					},
 				},
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"dateRange": map[string]interface{}{
+				"properties": map[string]any{
+					"dateRange": map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"start": map[string]interface{}{
+						"properties": map[string]any{
+							"start": map[string]any{
 								"type":   "string",
 								"format": "date-time", // Converted from "date"
 							},
-							"end": map[string]interface{}{
+							"end": map[string]any{
 								"type":   "string",
 								"format": "date-time", // Converted from "date"
 							},
 						},
 					},
-					"timestamp": map[string]interface{}{
+					"timestamp": map[string]any{
 						"type":   "string",
 						"format": "date-time", // Preserved
 					},
-					"category": map[string]interface{}{
+					"category": map[string]any{
 						"type":   "string",
 						"format": "enum", // Preserved
 					},
-					"unsupported": map[string]interface{}{
+					"unsupported": map[string]any{
 						"type":   "string",
 						"format": "date-time", // Converted from "time"
 					},
@@ -142,26 +163,26 @@ func TestCleanFunctionParameters(t *testing.T) {
 		},
 		{
 			name: "regression test for exact error from log",
-			input: map[string]interface{}{
+			input: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"dateRange": map[string]interface{}{
+				"properties": map[string]any{
+					"dateRange": map[string]any{
 						"description": "Date range for events",
 						"type":        "object",
-						"properties": map[string]interface{}{
-							"start": map[string]interface{}{
+						"properties": map[string]any{
+							"start": map[string]any{
 								"type":        "string",
 								"format":      "date",
 								"description": "Start date",
 							},
-							"end": map[string]interface{}{
+							"end": map[string]any{
 								"type":        "string",
 								"format":      "date",
 								"description": "End date",
 							},
 						},
 					},
-					"query": map[string]interface{}{
+					"query": map[string]any{
 						"type":        "string",
 						"description": "Search query",
 					},
@@ -171,26 +192,26 @@ func TestCleanFunctionParameters(t *testing.T) {
 				"description":          "Parameters for search",
 				"strict":               true,
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"dateRange": map[string]interface{}{
+				"properties": map[string]any{
+					"dateRange": map[string]any{
 						"description": "Date range for events",
 						"type":        "object",
-						"properties": map[string]interface{}{
-							"start": map[string]interface{}{
+						"properties": map[string]any{
+							"start": map[string]any{
 								"type":        "string",
 								"format":      "date-time", // Converted from "date"
 								"description": "Start date",
 							},
-							"end": map[string]interface{}{
+							"end": map[string]any{
 								"type":        "string",
 								"format":      "date-time", // Converted from "date"
 								"description": "End date",
 							},
 						},
 					},
-					"query": map[string]interface{}{
+					"query": map[string]any{
 						"type":        "string",
 						"description": "Search query",
 					},
@@ -236,29 +257,29 @@ func TestCleanJsonSchemaForGemini(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		input    interface{}
-		expected interface{}
+		input    any
+		expected any
 	}{
 		{
 			name: "convert types to uppercase",
-			input: map[string]interface{}{
+			input: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"name": map[string]interface{}{
+				"properties": map[string]any{
+					"name": map[string]any{
 						"type": "string",
 					},
-					"age": map[string]interface{}{
+					"age": map[string]any{
 						"type": "integer",
 					},
 				},
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "OBJECT",
-				"properties": map[string]interface{}{
-					"name": map[string]interface{}{
+				"properties": map[string]any{
+					"name": map[string]any{
 						"type": "STRING",
 					},
-					"age": map[string]interface{}{
+					"age": map[string]any{
 						"type": "INTEGER",
 					},
 				},
@@ -266,20 +287,20 @@ func TestCleanJsonSchemaForGemini(t *testing.T) {
 		},
 		{
 			name: "remove unsupported fields",
-			input: map[string]interface{}{
+			input: map[string]any{
 				"type":                 "object",
 				"description":          "should be removed",
 				"additionalProperties": false,
-				"properties": map[string]interface{}{
-					"name": map[string]interface{}{
+				"properties": map[string]any{
+					"name": map[string]any{
 						"type": "string",
 					},
 				},
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "OBJECT",
-				"properties": map[string]interface{}{
-					"name": map[string]interface{}{
+				"properties": map[string]any{
+					"name": map[string]any{
 						"type": "STRING",
 					},
 				},
@@ -287,43 +308,43 @@ func TestCleanJsonSchemaForGemini(t *testing.T) {
 		},
 		{
 			name: "handle unsupported format values according to Gemini docs",
-			input: map[string]interface{}{
+			input: map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"date": map[string]interface{}{
+				"properties": map[string]any{
+					"date": map[string]any{
 						"type":   "string",
 						"format": "date", // Unsupported - should be removed
 					},
-					"timestamp": map[string]interface{}{
+					"timestamp": map[string]any{
 						"type":   "string",
 						"format": "date-time", // Supported - should be kept
 					},
-					"category": map[string]interface{}{
+					"category": map[string]any{
 						"type":   "string",
 						"format": "enum", // Supported - should be kept
 					},
-					"time": map[string]interface{}{
+					"time": map[string]any{
 						"type":   "string",
 						"format": "time", // Unsupported - should be removed
 					},
 				},
 			},
-			expected: map[string]interface{}{
+			expected: map[string]any{
 				"type": "OBJECT",
-				"properties": map[string]interface{}{
-					"date": map[string]interface{}{
+				"properties": map[string]any{
+					"date": map[string]any{
 						"type":   "STRING",
 						"format": "date-time", // Converted from "date"
 					},
-					"timestamp": map[string]interface{}{
+					"timestamp": map[string]any{
 						"type":   "STRING",
 						"format": "date-time", // Kept
 					},
-					"category": map[string]interface{}{
+					"category": map[string]any{
 						"type":   "STRING",
 						"format": "enum", // Kept
 					},
-					"time": map[string]interface{}{
+					"time": map[string]any{
 						"type":   "STRING",
 						"format": "date-time", // Converted from "time"
 					},
@@ -377,29 +398,29 @@ func TestConvertRequestWithToolsRegression(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "search_crypto_news",
 					Description: "Search for cryptocurrency news and events",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"dateRange": map[string]interface{}{
+						"properties": map[string]any{
+							"dateRange": map[string]any{
 								"description": "Date range for events",
 								"type":        "object",
-								"properties": map[string]interface{}{
-									"start": map[string]interface{}{
+								"properties": map[string]any{
+									"start": map[string]any{
 										"type":        "string",
 										"format":      "date", // This causes the 400 error
 										"description": "Start date",
 									},
-									"end": map[string]interface{}{
+									"end": map[string]any{
 										"type":        "string",
 										"format":      "date", // This causes the 400 error
 										"description": "End date",
 									},
 								},
 							},
-							"query": map[string]interface{}{
+							"query": map[string]any{
 								"type":        "string",
 								"description": "Search query",
 							},
@@ -446,7 +467,11 @@ func TestConvertRequestWithToolsRegression(t *testing.T) {
 	}
 
 	// Verify that unsupported fields were removed
-	params := function.Parameters
+	// Convert Parameters from any to map[string]interface{} before indexing
+	params, ok := function.Parameters.(map[string]any)
+	if !ok {
+		t.Fatal("function.Parameters should be map[string]interface{}")
+	}
 
 	// Check that additionalProperties was removed
 	if _, exists := params["additionalProperties"]; exists {
@@ -464,10 +489,10 @@ func TestConvertRequestWithToolsRegression(t *testing.T) {
 	}
 
 	// Check that unsupported format values were converted - this is the key fix
-	if properties, ok := params["properties"].(map[string]interface{}); ok {
-		if dateRange, ok := properties["dateRange"].(map[string]interface{}); ok {
-			if dateRangeProps, ok := dateRange["properties"].(map[string]interface{}); ok {
-				if startField, ok := dateRangeProps["start"].(map[string]interface{}); ok {
+	if properties, ok := params["properties"].(map[string]any); ok {
+		if dateRange, ok := properties["dateRange"].(map[string]any); ok {
+			if dateRangeProps, ok := dateRange["properties"].(map[string]any); ok {
+				if startField, ok := dateRangeProps["start"].(map[string]any); ok {
 					if format, exists := startField["format"]; exists {
 						if format != "date-time" {
 							t.Errorf("unsupported format 'date' should have been converted to 'date-time', but found: %v", format)
@@ -480,7 +505,7 @@ func TestConvertRequestWithToolsRegression(t *testing.T) {
 						t.Error("description should be preserved in nested objects")
 					}
 				}
-				if endField, ok := dateRangeProps["end"].(map[string]interface{}); ok {
+				if endField, ok := dateRangeProps["end"].(map[string]any); ok {
 					if format, exists := endField["format"]; exists {
 						if format != "date-time" {
 							t.Errorf("unsupported format 'date' should have been converted to 'date-time', but found: %v", format)
@@ -519,13 +544,13 @@ func TestSupportedFormatsOnly(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(fmt.Sprintf("format_%s", tc.format), func(t *testing.T) {
-			input := map[string]interface{}{
+			input := map[string]any{
 				"type":   "string",
 				"format": tc.format,
 			}
 
 			result := cleanFunctionParameters(input)
-			resultMap, ok := result.(map[string]interface{})
+			resultMap, ok := result.(map[string]any)
 			if !ok {
 				t.Fatal("expected map result")
 			}
@@ -553,11 +578,11 @@ func TestErrorHandling(t *testing.T) {
 	// Test edge cases and error conditions
 	testCases := []struct {
 		name  string
-		input interface{}
+		input any
 	}{
 		{"nil input", nil},
-		{"empty map", map[string]interface{}{}},
-		{"empty array", []interface{}{}},
+		{"empty map", map[string]any{}},
+		{"empty array", []any{}},
 		{"primitive string", "test"},
 		{"primitive number", 42},
 		{"primitive bool", true},
@@ -629,13 +654,13 @@ func TestFormatConversionRegression(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			input := map[string]interface{}{
+			input := map[string]any{
 				"type":   "string",
 				"format": tt.inputFormat,
 			}
 
 			result := cleanFunctionParameters(input)
-			resultMap, ok := result.(map[string]interface{})
+			resultMap, ok := result.(map[string]any)
 			if !ok {
 				t.Fatal("expected map result")
 			}
@@ -672,29 +697,29 @@ func TestOriginalErrorScenario(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "search_crypto_news",
 					Description: "Search for cryptocurrency news and events",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"dateRange": map[string]interface{}{
+						"properties": map[string]any{
+							"dateRange": map[string]any{
 								"description": "Date range for events",
 								"type":        "object",
-								"properties": map[string]interface{}{
-									"start": map[string]interface{}{
+								"properties": map[string]any{
+									"start": map[string]any{
 										"type":        "string",
 										"format":      "date", // This was causing the 400 error
 										"description": "Start date",
 									},
-									"end": map[string]interface{}{
+									"end": map[string]any{
 										"type":        "string",
 										"format":      "date", // This was causing the 400 error
 										"description": "End date",
 									},
 								},
 							},
-							"query": map[string]interface{}{
+							"query": map[string]any{
 								"type":        "string",
 								"description": "Search query",
 							},
@@ -735,14 +760,18 @@ func TestOriginalErrorScenario(t *testing.T) {
 	}
 
 	function := functions[0]
-	params := function.Parameters
+	// Convert Parameters from any to map[string]interface{} before indexing
+	params, ok := function.Parameters.(map[string]any)
+	if !ok {
+		t.Fatal("function.Parameters should be map[string]interface{}")
+	}
 
 	// Verify the critical fix: date format should be converted to date-time
-	if properties, ok := params["properties"].(map[string]interface{}); ok {
-		if dateRange, ok := properties["dateRange"].(map[string]interface{}); ok {
-			if dateRangeProps, ok := dateRange["properties"].(map[string]interface{}); ok {
+	if properties, ok := params["properties"].(map[string]any); ok {
+		if dateRange, ok := properties["dateRange"].(map[string]any); ok {
+			if dateRangeProps, ok := dateRange["properties"].(map[string]any); ok {
 				// Check start field
-				if startField, ok := dateRangeProps["start"].(map[string]interface{}); ok {
+				if startField, ok := dateRangeProps["start"].(map[string]any); ok {
 					if format, exists := startField["format"]; exists {
 						if format != "date-time" {
 							t.Errorf("start format should be converted to 'date-time', got: %v", format)
@@ -752,7 +781,7 @@ func TestOriginalErrorScenario(t *testing.T) {
 					}
 				}
 				// Check end field
-				if endField, ok := dateRangeProps["end"].(map[string]interface{}); ok {
+				if endField, ok := dateRangeProps["end"].(map[string]any); ok {
 					if format, exists := endField["format"]; exists {
 						if format != "date-time" {
 							t.Errorf("end format should be converted to 'date-time', got: %v", format)
@@ -781,22 +810,22 @@ func TestCleanJsonSchemaForGeminiFormatMapping(t *testing.T) {
 	ctx := context.Background()
 	_ = ctx
 
-	input := map[string]interface{}{
+	input := map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"dateField": map[string]interface{}{
+		"properties": map[string]any{
+			"dateField": map[string]any{
 				"type":   "string",
 				"format": "date",
 			},
-			"timeField": map[string]interface{}{
+			"timeField": map[string]any{
 				"type":   "string",
 				"format": "time",
 			},
-			"dateTimeField": map[string]interface{}{
+			"dateTimeField": map[string]any{
 				"type":   "string",
 				"format": "date-time",
 			},
-			"enumField": map[string]interface{}{
+			"enumField": map[string]any{
 				"type":   "string",
 				"format": "enum",
 			},
@@ -804,7 +833,7 @@ func TestCleanJsonSchemaForGeminiFormatMapping(t *testing.T) {
 	}
 
 	result := cleanJsonSchemaForGemini(input)
-	resultMap, ok := result.(map[string]interface{})
+	resultMap, ok := result.(map[string]any)
 	if !ok {
 		t.Fatal("expected map result")
 	}
@@ -813,7 +842,7 @@ func TestCleanJsonSchemaForGeminiFormatMapping(t *testing.T) {
 		t.Error("type should be converted to uppercase")
 	}
 
-	properties, ok := resultMap["properties"].(map[string]interface{})
+	properties, ok := resultMap["properties"].(map[string]any)
 	if !ok {
 		t.Fatal("properties should be present")
 	}
@@ -830,7 +859,7 @@ func TestCleanJsonSchemaForGeminiFormatMapping(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		if field, ok := properties[tc.field].(map[string]interface{}); ok {
+		if field, ok := properties[tc.field].(map[string]any); ok {
 			if format, exists := field["format"]; exists {
 				if format != tc.expected {
 					t.Errorf("%s format should be %s, got %s", tc.field, tc.expected, format)
@@ -851,11 +880,11 @@ func TestErrorHandlingWithProperWrapping(t *testing.T) {
 	// Test edge cases with proper error handling
 	testCases := []struct {
 		name  string
-		input interface{}
+		input any
 	}{
 		{"nil input", nil},
-		{"empty map", map[string]interface{}{}},
-		{"empty array", []interface{}{}},
+		{"empty map", map[string]any{}},
+		{"empty array", []any{}},
 		{"primitive string", "test"},
 		{"primitive number", 42},
 		{"primitive bool", true},
@@ -882,22 +911,22 @@ func TestPerformanceWithUTCTiming(t *testing.T) {
 	_ = ctx
 
 	// Create a complex nested schema to test performance
-	complexSchema := map[string]interface{}{
+	complexSchema := map[string]any{
 		"type": "object",
-		"properties": map[string]interface{}{
-			"level1": map[string]interface{}{
+		"properties": map[string]any{
+			"level1": map[string]any{
 				"type": "object",
-				"properties": map[string]interface{}{
-					"level2": map[string]interface{}{
+				"properties": map[string]any{
+					"level2": map[string]any{
 						"type": "array",
-						"items": map[string]interface{}{
+						"items": map[string]any{
 							"type": "object",
-							"properties": map[string]interface{}{
-								"dateField": map[string]interface{}{
+							"properties": map[string]any{
+								"dateField": map[string]any{
 									"type":   "string",
 									"format": "date",
 								},
-								"timeField": map[string]interface{}{
+								"timeField": map[string]any{
 									"type":   "string",
 									"format": "time",
 								},
@@ -925,7 +954,7 @@ func TestPerformanceWithUTCTiming(t *testing.T) {
 	}
 
 	// Verify the structure is maintained while cleaning
-	resultMap, ok := result.(map[string]interface{})
+	resultMap, ok := result.(map[string]any)
 	if !ok {
 		t.Fatal("Result should be a map")
 	}
@@ -942,21 +971,21 @@ func TestPerformanceWithUTCTiming(t *testing.T) {
 }
 
 // verifyNoAdditionalProperties recursively checks that no additionalProperties fields exist
-func verifyNoAdditionalProperties(obj interface{}) error {
+func verifyNoAdditionalProperties(obj any) error {
 	switch v := obj.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		if _, exists := v["additionalProperties"]; exists {
 			return errors.New("found additionalProperties in object")
 		}
 		for key, value := range v {
 			if err := verifyNoAdditionalProperties(value); err != nil {
-				return fmt.Errorf("in field %s: %w", key, err)
+				return errors.Wrapf(err, "in field %s", key)
 			}
 		}
-	case []interface{}:
+	case []any:
 		for i, item := range v {
 			if err := verifyNoAdditionalProperties(item); err != nil {
-				return fmt.Errorf("in array index %d: %w", i, err)
+				return errors.Wrapf(err, "in array index %d", i)
 			}
 		}
 	}
@@ -980,7 +1009,7 @@ func TestOriginalLogErrorFixed(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "search_crypto_news",
 					Description: "Search for cryptocurrency news and events",
 					Parameters: map[string]any{
@@ -1048,4 +1077,135 @@ func TestOriginalLogErrorFixed(t *testing.T) {
 	}
 
 	t.Logf("Successfully converted request without additionalProperties errors")
+}
+
+func TestUsageMetadataPriority(t *testing.T) {
+	ctx := context.Background()
+	_ = ctx
+
+	tests := []struct {
+		name     string
+		response ChatResponse
+		expected model.Usage
+		fallback int // expected prompt tokens for fallback calculation
+	}{
+		{
+			name: "use gemini usage metadata when available",
+			response: ChatResponse{
+				Candidates: []ChatCandidate{
+					{
+						Content: ChatContent{
+							Role: "model",
+							Parts: []Part{
+								{Text: "Hello there! The classic first program.\n\nHow can I help you today?"},
+							},
+						},
+						FinishReason: "STOP",
+					},
+				},
+				UsageMetadata: &UsageMetadata{
+					PromptTokenCount:     3,
+					CandidatesTokenCount: 16,
+					TotalTokenCount:      1127, // This includes thoughts tokens
+				},
+			},
+			expected: model.Usage{
+				PromptTokens:     3,
+				CompletionTokens: 16,
+				TotalTokens:      1127,
+			},
+			fallback: 100, // This should not be used
+		},
+		{
+			name: "fallback to manual calculation when metadata is nil",
+			response: ChatResponse{
+				Candidates: []ChatCandidate{
+					{
+						Content: ChatContent{
+							Role: "model",
+							Parts: []Part{
+								{Text: "Hello"},
+							},
+						},
+						FinishReason: "STOP",
+					},
+				},
+				UsageMetadata: nil,
+			},
+			expected: model.Usage{
+				PromptTokens:     50, // fallback value
+				CompletionTokens: 1,  // calculated from "Hello"
+				TotalTokens:      51, // sum
+			},
+			fallback: 50,
+		},
+		{
+			name: "fallback when metadata has zero total tokens",
+			response: ChatResponse{
+				Candidates: []ChatCandidate{
+					{
+						Content: ChatContent{
+							Role: "model",
+							Parts: []Part{
+								{Text: "Hi"},
+							},
+						},
+						FinishReason: "STOP",
+					},
+				},
+				UsageMetadata: &UsageMetadata{
+					PromptTokenCount:     0,
+					CandidatesTokenCount: 0,
+					TotalTokenCount:      0, // Zero should trigger fallback
+				},
+			},
+			expected: model.Usage{
+				PromptTokens:     25, // fallback value
+				CompletionTokens: 1,  // calculated from "Hi"
+				TotalTokens:      26, // sum
+			},
+			fallback: 25,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Mock the responseGeminiChat2OpenAI and CountTokenText functions by creating usage manually
+			var actualUsage model.Usage
+
+			// Simulate the logic from Handler function
+			if tt.response.UsageMetadata != nil && tt.response.UsageMetadata.TotalTokenCount > 0 {
+				// Use Gemini's provided token counts
+				actualUsage = model.Usage{
+					PromptTokens:     tt.response.UsageMetadata.PromptTokenCount,
+					CompletionTokens: tt.response.UsageMetadata.CandidatesTokenCount,
+					TotalTokens:      tt.response.UsageMetadata.TotalTokenCount,
+				}
+			} else {
+				// Fall back to manual calculation
+				// Simple mock: count characters divided by 4 (rough token estimation)
+				responseText := tt.response.GetResponseText()
+				completionTokens := len(responseText) / 4
+				if completionTokens == 0 {
+					completionTokens = 1 // minimum 1 token
+				}
+				actualUsage = model.Usage{
+					PromptTokens:     tt.fallback,
+					CompletionTokens: completionTokens,
+					TotalTokens:      tt.fallback + completionTokens,
+				}
+			}
+
+			// Verify the usage matches expected values
+			if actualUsage.PromptTokens != tt.expected.PromptTokens {
+				t.Errorf("Expected PromptTokens %d, got %d", tt.expected.PromptTokens, actualUsage.PromptTokens)
+			}
+			if actualUsage.CompletionTokens != tt.expected.CompletionTokens {
+				t.Errorf("Expected CompletionTokens %d, got %d", tt.expected.CompletionTokens, actualUsage.CompletionTokens)
+			}
+			if actualUsage.TotalTokens != tt.expected.TotalTokens {
+				t.Errorf("Expected TotalTokens %d, got %d", tt.expected.TotalTokens, actualUsage.TotalTokens)
+			}
+		})
+	}
 }

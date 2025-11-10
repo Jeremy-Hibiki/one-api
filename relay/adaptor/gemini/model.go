@@ -3,7 +3,7 @@ package gemini
 type ChatRequest struct {
 	Contents          []ChatContent        `json:"contents"`
 	SafetySettings    []ChatSafetySettings `json:"safety_settings,omitempty"`
-	GenerationConfig  ChatGenerationConfig `json:"generation_config,omitempty"`
+	GenerationConfig  ChatGenerationConfig `json:"generation_config"`
 	Tools             []ChatTools          `json:"tools,omitempty"`
 	SystemInstruction *ChatContent         `json:"system_instruction,omitempty"`
 	ModelVersion      string               `json:"model_version,omitempty"`
@@ -11,9 +11,12 @@ type ChatRequest struct {
 }
 
 type UsageMetadata struct {
-	PromptTokenCount    int                   `json:"promptTokenCount,omitempty"`
-	TotalTokenCount     int                   `json:"totalTokenCount,omitempty"`
-	PromptTokensDetails []PromptTokensDetails `json:"promptTokensDetails,omitempty"`
+	PromptTokenCount        int                   `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount    int                   `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount         int                   `json:"totalTokenCount,omitempty"`
+	ThoughtsTokenCount      int                   `json:"thoughtsTokenCount,omitempty"`
+	PromptTokensDetails     []PromptTokensDetails `json:"promptTokensDetails,omitempty"`
+	CandidatesTokensDetails []PromptTokensDetails `json:"candidatesTokensDetails,omitempty"`
 }
 
 type PromptTokensDetails struct {

@@ -17,10 +17,50 @@ import (
 type ModelConfig struct {
 	Ratio float64 `json:"ratio"`
 	// CompletionRatio represents the output rate / input rate
+	//
+	// The upstream channel applies distinct pricing for cache‑hit and cache‑miss inputs,
+	// while the output price remains the same, equal to Ratio * CompletionRatio.
 	CompletionRatio float64 `json:"completion_ratio,omitempty"`
+	// ImagePriceUsd is the USD cost per generated image for image models.
+	// Text models should leave this as zero.
+	ImagePriceUsd float64 `json:"image_price_usd,omitempty"`
+	// CachedInputRatio specifies price per cached input token.
+	// If non-zero, it overrides Ratio for cached input tokens. Negative means free.
+	CachedInputRatio float64 `json:"cached_input_ratio,omitempty"`
+	// CacheWrite5mRatio specifies price per input token written to a 5-minute cache window.
+	// If zero, falls back to normal input Ratio. Negative means free (not expected in production).
+	CacheWrite5mRatio float64 `json:"cache_write_5m_ratio,omitempty"`
+	// CacheWrite1hRatio specifies price per input token written to a 1-hour cache window.
+	// If zero, falls back to normal input Ratio. Negative means free (not expected in production).
+	CacheWrite1hRatio float64 `json:"cache_write_1h_ratio,omitempty"`
+	// Tiers contains tiered pricing data. If present, the first tier is the base
+	// Ratio/CompletionRatio/Cached* fields in this struct. Elements must be sorted
+	// ascending by InputTokenThreshold and represent the 2nd+ tiers.
+	Tiers []ModelRatioTier `json:"tiers,omitempty"`
 	// MaxTokens represents the maximum token limit for this model on this channel
 	// 0 means no limit (infinity)
 	MaxTokens int32 `json:"max_tokens,omitempty"`
+}
+
+// ModelRatioTier describes pricing for a specific input token tier. It overrides
+// the base ModelConfig starting at InputTokenThreshold. Zero values for optional
+// fields mean "inherit from base"; negative cached ratios mean free tokens.
+type ModelRatioTier struct {
+	// Base price for this tier (per input token)
+	Ratio float64 `json:"ratio"`
+
+	// Output‑to‑input multiplier for this tier (optional)
+	CompletionRatio float64 `json:"completion_ratio,omitempty"`
+
+	// Discount for cached input (optional)
+	CachedInputRatio float64 `json:"cached_input_ratio,omitempty"`
+
+	// Cache-write prices for this tier (optional)
+	CacheWrite5mRatio float64 `json:"cache_write_5m_ratio,omitempty"`
+	CacheWrite1hRatio float64 `json:"cache_write_1h_ratio,omitempty"`
+
+	// The minimum input‑token count at which this tier becomes applicable
+	InputTokenThreshold int `json:"input_token_threshold"`
 }
 
 type Adaptor interface {
@@ -39,6 +79,13 @@ type Adaptor interface {
 	GetDefaultModelPricing() map[string]ModelConfig
 	GetModelRatio(modelName string) float64
 	GetCompletionRatio(modelName string) float64
+}
+
+// RerankAdaptor represents adaptors that can natively consume the dedicated rerank DTO.
+// Adaptors must implement this interface to accept /v1/rerank requests; otherwise the
+// controller will reject the call as unsupported.
+type RerankAdaptor interface {
+	ConvertRerankRequest(c *gin.Context, request *model.RerankRequest) (any, error)
 }
 
 // DefaultPricingMethods provides default implementations for adapters without specific pricing

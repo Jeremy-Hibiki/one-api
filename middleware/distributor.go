@@ -6,11 +6,12 @@ import (
 	"strings"
 
 	"github.com/Laisky/errors/v2"
-	gutils "github.com/Laisky/go-utils/v5"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	gutils "github.com/Laisky/go-utils/v6"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
@@ -22,9 +23,10 @@ type ModelRequest struct {
 
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		ctx := c.Request.Context()
+		lg := gmw.GetLogger(c)
 		userId := c.GetInt(ctxkey.Id)
-		userGroup, _ := model.CacheGetUserGroup(userId)
+		ctx := gmw.Ctx(c)
+		userGroup, _ := model.CacheGetUserGroup(ctx, userId)
 		c.Set(ctxkey.Group, userGroup)
 		var requestModel string
 		var channel *model.Channel
@@ -40,44 +42,63 @@ func Distribute() func(c *gin.Context) {
 				AbortWithError(c, http.StatusForbidden, errors.New("The channel has been disabled"))
 				return
 			}
+			requestModel = c.GetString(ctxkey.RequestModel)
+			if requestModel != "" && !channel.SupportsModel(requestModel) {
+				AbortWithError(c, http.StatusBadRequest,
+					errors.Errorf("Channel #%d does not support the requested model: %s", channelId, requestModel))
+				return
+			}
 		} else {
 			requestModel = c.GetString(ctxkey.RequestModel)
+			selectChannel := func(ignoreFirstPriority bool, exclude map[int]bool) (*model.Channel, error) {
+				for {
+					candidate, err := model.CacheGetRandomSatisfiedChannelExcluding(userGroup, requestModel, ignoreFirstPriority, exclude, false)
+					if err != nil {
+						return nil, errors.Wrap(err, "select channel from cache")
+					}
+					if requestModel == "" || candidate.SupportsModel(requestModel) {
+						return candidate, nil
+					}
+					exclude[candidate.Id] = true
+					lg.Warn("channel skipped - does not support requested model",
+						zap.Int("channel_id", candidate.Id),
+						zap.String("channel_name", candidate.Name),
+						zap.String("requested_model", requestModel))
+				}
+			}
+
+			exclude := make(map[int]bool)
 			var err error
-			// First try to get highest priority channels
-			channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, requestModel, false)
+			channel, err = selectChannel(false, exclude)
 			if err != nil {
-				// If no highest priority channels available, try lower priority channels as fallback
-				logger.Infof(ctx, "No highest priority channels available for model %s in group %s, trying lower priority channels", requestModel, userGroup)
-				channel, err = model.CacheGetRandomSatisfiedChannel(userGroup, requestModel, true)
+				lg.Info(fmt.Sprintf("No highest priority channels available for model %s in group %s, trying lower priority channels", requestModel, userGroup))
+				channel, err = selectChannel(true, exclude)
 				if err != nil {
 					message := fmt.Sprintf("No available channels for Model %s under Group %s", requestModel, userGroup)
-					if channel != nil {
-						logger.SysError(fmt.Sprintf("Channel does not exist: %d", channel.Id))
-						message = "Database consistency has been broken, please contact the administrator"
-					}
 					AbortWithError(c, http.StatusServiceUnavailable, errors.New(message))
 					return
 				}
 			}
 		}
-		logger.Debugf(ctx, "user id %d, user group: %s, request model: %s, using channel #%d", userId, userGroup, requestModel, channel.Id)
+		lg.Debug(fmt.Sprintf("user id %d, user group: %s, request model: %s, using channel #%d", userId, userGroup, requestModel, channel.Id))
 		SetupContextForSelectedChannel(c, channel, requestModel)
 		c.Next()
 	}
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) {
+	lg := gmw.GetLogger(c)
 	// one channel could relates to multiple groups,
 	// and each groud has individual ratio,
 	// set minimal group ratio as channel_ratio
 	var minimalRatio float64 = -1
-	for _, grp := range strings.Split(channel.Group, ",") {
+	for grp := range strings.SplitSeq(channel.Group, ",") {
 		v := ratio.GetGroupRatio(grp)
 		if minimalRatio < 0 || v < minimalRatio {
 			minimalRatio = v
 		}
 	}
-	logger.Info(c.Request.Context(), fmt.Sprintf("set channel %s ratio to %f", channel.Name, minimalRatio))
+	lg.Info(fmt.Sprintf("set channel %s ratio to %f", channel.Name, minimalRatio))
 	c.Set(ctxkey.ChannelRatio, minimalRatio)
 	c.Set(ctxkey.ChannelModel, channel)
 
@@ -94,7 +115,6 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		c.Set(ctxkey.SystemPrompt, *channel.SystemPrompt)
 	}
 	c.Set(ctxkey.ModelMapping, channel.GetModelMapping())
-	c.Set(ctxkey.OriginalModel, modelName) // for retry
 	c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", channel.Key))
 	c.Set(ctxkey.BaseURL, channel.GetBaseURL())
 	if channel.RateLimit != nil {

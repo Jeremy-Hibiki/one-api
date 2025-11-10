@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/controller"
 	"github.com/songquanpeng/one-api/model"
 )
@@ -49,7 +49,7 @@ func getOidcUserInfoByCode(code string) (*OidcUser, error) {
 	formData := values.Encode()
 	req, err := http.NewRequest("POST", config.OidcTokenEndpoint, strings.NewReader(formData))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "build OIDC token request")
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
@@ -58,35 +58,31 @@ func getOidcUserInfoByCode(code string) (*OidcUser, error) {
 	}
 	res, err := client.Do(req)
 	if err != nil {
-		logger.SysLog(err.Error())
-		return nil, errors.New("Unable to connect to the OIDC server, please try again later!")
+		return nil, errors.Wrap(err, "unable to connect to the OIDC server")
 	}
 	defer res.Body.Close()
 	var oidcResponse OidcResponse
-	err = json.NewDecoder(res.Body).Decode(&oidcResponse)
-	if err != nil {
-		return nil, err
+	if err = json.NewDecoder(res.Body).Decode(&oidcResponse); err != nil {
+		return nil, errors.Wrap(err, "decode OIDC token response")
 	}
 	req, err = http.NewRequest("GET", config.OidcUserinfoEndpoint, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "build OIDC userinfo request")
 	}
 	req.Header.Set("Authorization", "Bearer "+oidcResponse.AccessToken)
 	res2, err := client.Do(req)
 	if err != nil {
-		logger.SysLog(err.Error())
-		return nil, errors.New("Unable to connect to the OIDC server, please try again later!")
+		return nil, errors.Wrap(err, "unable to connect to the OIDC server for user info")
 	}
 	var oidcUser OidcUser
-	err = json.NewDecoder(res2.Body).Decode(&oidcUser)
-	if err != nil {
-		return nil, err
+	if err = json.NewDecoder(res2.Body).Decode(&oidcUser); err != nil {
+		return nil, errors.Wrap(err, "decode OIDC user info")
 	}
 	return &oidcUser, nil
 }
 
 func OidcAuth(c *gin.Context) {
-	ctx := c.Request.Context()
+	ctx := gmw.Ctx(c)
 	session := sessions.Default(c)
 	state := c.Query("state")
 	if state == "" || session.Get("oauth_state") == nil || state != session.Get("oauth_state").(string) {

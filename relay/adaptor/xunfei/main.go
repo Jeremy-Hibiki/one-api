@@ -13,14 +13,16 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/random"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
 	"github.com/songquanpeng/one-api/relay/meta"
@@ -57,11 +59,11 @@ func requestOpenAI2Xunfei(request model.GeneralOpenAIRequest, xunfeiAppId string
 	if strings.HasPrefix(domain, "generalv3") || domain == "4.0Ultra" {
 		functions := make([]model.Function, len(request.Tools))
 		for i, tool := range request.Tools {
-			functions[i] = tool.Function
+			if tool.Function != nil {
+				functions[i] = *tool.Function
+			}
 		}
-		xunfeiRequest.Payload.Functions = &Functions{
-			Text: functions,
-		}
+		xunfeiRequest.Payload.Functions = &Functions{Text: functions}
 	}
 
 	return &xunfeiRequest
@@ -79,13 +81,13 @@ func getToolCalls(response *ChatResponse) []model.Tool {
 	toolCall := model.Tool{
 		Id:       fmt.Sprintf("call_%s", random.GetUUID()),
 		Type:     "function",
-		Function: *item.FunctionCall,
+		Function: item.FunctionCall,
 	}
 	toolCalls = append(toolCalls, toolCall)
 	return toolCalls
 }
 
-func responseXunfei2OpenAI(response *ChatResponse) *openai.TextResponse {
+func responseXunfei2OpenAI(c *gin.Context, response *ChatResponse) *openai.TextResponse {
 	if len(response.Payload.Choices.Text) == 0 {
 		response.Payload.Choices.Text = []ChatResponseTextItem{
 			{
@@ -103,7 +105,7 @@ func responseXunfei2OpenAI(response *ChatResponse) *openai.TextResponse {
 		FinishReason: constant.StopFinishReason,
 	}
 	fullTextResponse := openai.TextResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion",
 		Created: helper.GetTimestamp(),
 		Choices: []openai.TextResponseChoice{choice},
@@ -112,22 +114,17 @@ func responseXunfei2OpenAI(response *ChatResponse) *openai.TextResponse {
 	return &fullTextResponse
 }
 
-func streamResponseXunfei2OpenAI(xunfeiResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
+func streamResponseXunfei2OpenAI(c *gin.Context, xunfeiResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
 	if len(xunfeiResponse.Payload.Choices.Text) == 0 {
-		xunfeiResponse.Payload.Choices.Text = []ChatResponseTextItem{
-			{
-				Content: "",
-			},
-		}
+		xunfeiResponse.Payload.Choices.Text = []ChatResponseTextItem{{Content: ""}}
 	}
 	var choice openai.ChatCompletionsStreamResponseChoice
 	choice.Delta.Content = xunfeiResponse.Payload.Choices.Text[0].Content
-	choice.Delta.ToolCalls = getToolCalls(xunfeiResponse)
 	if xunfeiResponse.Payload.Choices.Status == 2 {
 		choice.FinishReason = &constant.StopFinishReason
 	}
 	response := openai.ChatCompletionsStreamResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion.chunk",
 		Created: helper.GetTimestamp(),
 		Model:   "SparkDesk",
@@ -163,6 +160,7 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 }
 
 func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*model.ErrorWithStatusCode, *model.Usage) {
+	lg := gmw.GetLogger(c)
 	domain, authUrl := getXunfeiAuthUrl(meta.Config.APIVersion, apiKey, apiSecret)
 	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
 	if err != nil {
@@ -176,10 +174,10 @@ func StreamHandler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpe
 			usage.PromptTokens += xunfeiResponse.Payload.Usage.Text.PromptTokens
 			usage.CompletionTokens += xunfeiResponse.Payload.Usage.Text.CompletionTokens
 			usage.TotalTokens += xunfeiResponse.Payload.Usage.Text.TotalTokens
-			response := streamResponseXunfei2OpenAI(&xunfeiResponse)
+			response := streamResponseXunfei2OpenAI(c, &xunfeiResponse)
 			jsonResponse, err := json.Marshal(response)
 			if err != nil {
-				logger.SysError("error marshalling stream response: " + err.Error())
+				lg.Error("error marshalling stream response", zap.Error(err))
 				return true
 			}
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonResponse)})
@@ -220,7 +218,7 @@ func Handler(c *gin.Context, meta *meta.Meta, textRequest model.GeneralOpenAIReq
 	}
 	xunfeiResponse.Payload.Choices.Text[0].Content = content
 
-	response := responseXunfei2OpenAI(&xunfeiResponse)
+	response := responseXunfei2OpenAI(c, &xunfeiResponse)
 	jsonResponse, err := json.Marshal(response)
 	if err != nil {
 		return openai.ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
@@ -235,7 +233,7 @@ func xunfeiMakeRequest(textRequest model.GeneralOpenAIRequest, domain, authUrl, 
 		HandshakeTimeout: 5 * time.Second,
 	}
 	conn, resp, err := d.Dial(authUrl, nil)
-	if err != nil || resp.StatusCode != 101 {
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		return nil, nil, err
 	}
 	data := requestOpenAI2Xunfei(textRequest, appId, domain)
@@ -255,14 +253,14 @@ func xunfeiMakeRequest(textRequest model.GeneralOpenAIRequest, domain, authUrl, 
 			if msg == nil {
 				_, msg, err = conn.ReadMessage()
 				if err != nil {
-					logger.SysError("error reading stream response: " + err.Error())
+					// cannot use request-scoped logger in this helper without context
 					break
 				}
 			}
 			var response ChatResponse
 			err = json.Unmarshal(msg, &response)
 			if err != nil {
-				logger.SysError("error unmarshalling stream response: " + err.Error())
+				// cannot use request-scoped logger in this helper without context
 				break
 			}
 			msg = nil
@@ -270,7 +268,7 @@ func xunfeiMakeRequest(textRequest model.GeneralOpenAIRequest, domain, authUrl, 
 			if response.Payload.Choices.Status == 2 {
 				err := conn.Close()
 				if err != nil {
-					logger.SysError("error closing websocket connection: " + err.Error())
+					// cannot use request-scoped logger in this helper without context
 				}
 				break
 			}

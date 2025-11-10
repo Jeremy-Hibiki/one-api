@@ -32,10 +32,10 @@ type ResponseFormat struct {
 }
 
 type JSONSchema struct {
-	Description string                 `json:"description,omitempty"`
-	Name        string                 `json:"name"`
-	Schema      map[string]interface{} `json:"schema,omitempty"`
-	Strict      *bool                  `json:"strict,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Name        string         `json:"name"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Strict      *bool          `json:"strict,omitempty"`
 }
 
 type Audio struct {
@@ -57,12 +57,15 @@ type GeneralOpenAIRequest struct {
 	// FrequencyPenalty is a number between -2.0 and 2.0 that penalizes
 	// new tokens based on their existing frequency in the text so far,
 	// default is 0.
-	FrequencyPenalty    *float64 `json:"frequency_penalty,omitempty" binding:"omitempty,min=-2,max=2"`
-	LogitBias           any      `json:"logit_bias,omitempty"`
-	Logprobs            *bool    `json:"logprobs,omitempty"`
-	TopLogprobs         *int     `json:"top_logprobs,omitempty"`
-	MaxTokens           int      `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int     `json:"max_completion_tokens,omitempty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty" binding:"omitempty,min=-2,max=2"`
+	LogitBias        any      `json:"logit_bias,omitempty"`
+	Logprobs         *bool    `json:"logprobs,omitempty"`
+	TopLogprobs      *int     `json:"top_logprobs,omitempty"`
+	// MaxTokens is the maximum number of tokens to generate in the chat completion.
+	//
+	// MaxTokens is not deprecated; most open-source models use max_tokens, not max_completion_tokens.
+	MaxTokens           int  `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int `json:"max_completion_tokens,omitempty"`
 	// N is how many chat completion choices to generate for each input message,
 	// default to 1.
 	N *int `json:"n,omitempty" binding:"omitempty,min=0"`
@@ -83,7 +86,7 @@ type GeneralOpenAIRequest struct {
 	StreamOptions    *StreamOptions  `json:"stream_options,omitempty"`
 	Temperature      *float64        `json:"temperature,omitempty"`
 	TopP             *float64        `json:"top_p,omitempty"`
-	TopK             int             `json:"top_k,omitempty"`
+	TopK             *int            `json:"top_k,omitempty"`
 	Tools            []Tool          `json:"tools,omitempty"`
 	ToolChoice       any             `json:"tool_choice,omitempty"`
 	ParallelTooCalls *bool           `json:"parallel_tool_calls,omitempty"`
@@ -162,16 +165,28 @@ type OpenAIResponseReasoning struct {
 type WebSearchOptions struct {
 	// SearchContextSize is the high level guidance for the amount of context window space to use for the search,
 	// default is "medium".
-	SearchContextSize *string       `json:"search_context_size,omitempty" binding:"omitempty,oneof=low medium high"`
-	UserLocation      *UserLocation `json:"user_location,omitempty"`
+	SearchContextSize *string           `json:"search_context_size,omitempty" binding:"omitempty,oneof=low medium high"`
+	UserLocation      *UserLocation     `json:"user_location,omitempty"`
+	Filters           *WebSearchFilters `json:"filters,omitempty"`
+}
+
+// WebSearchFilters constrains the domains consulted by the OpenAI web search tool.
+type WebSearchFilters struct {
+	AllowedDomains    []string `json:"allowed_domains,omitempty"`
+	DisallowedDomains []string `json:"disallowed_domains,omitempty"`
 }
 
 // UserLocation is a struct that contains the location of the user.
 type UserLocation struct {
 	// Approximate is the approximate location parameters for the search.
-	Approximate UserLocationApproximate `json:"approximate" binding:"required"`
+	Approximate *UserLocationApproximate `json:"approximate,omitempty"`
 	// Type is the type of location approximation.
-	Type string `json:"type" binding:"required,oneof=approximate"`
+	Type string `json:"type,omitempty" binding:"omitempty,oneof=approximate"`
+	// Optional flattened fields accepted directly by the Responses API web_search tool.
+	Country  *string `json:"country,omitempty"`
+	City     *string `json:"city,omitempty"`
+	Region   *string `json:"region,omitempty"`
+	Timezone *string `json:"timezone,omitempty"`
 }
 
 // UserLocationApproximate is a struct that contains the approximate location of the user.
@@ -271,11 +286,12 @@ type ClaudeResponse struct {
 }
 
 type ClaudeContent struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text,omitempty"`
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ID       string          `json:"id,omitempty"`
+	Name     string          `json:"name,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Thinking string          `json:"thinking,omitempty"`
 }
 
 type ClaudeUsage struct {

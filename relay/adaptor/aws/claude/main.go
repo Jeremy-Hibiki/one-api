@@ -10,18 +10,19 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/copier"
 
-	"github.com/songquanpeng/one-api/common/config"
-
 	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
 	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
@@ -31,22 +32,32 @@ import (
 
 // https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html
 var AwsModelIDMap = map[string]string{
-	"claude-instant-1.2":           "anthropic.claude-instant-v1",
-	"claude-2.0":                   "anthropic.claude-v2",
-	"claude-2.1":                   "anthropic.claude-v2:1",
-	"claude-3-haiku-20240307":      "anthropic.claude-3-haiku-20240307-v1:0",
-	"claude-3-sonnet-20240229":     "anthropic.claude-3-sonnet-20240229-v1:0",
-	"claude-3-opus-20240229":       "anthropic.claude-3-opus-20240229-v1:0",
-	"claude-opus-4-20250514":       "anthropic.claude-opus-4-20250514-v1:0",
-	"claude-3-5-sonnet-20240620":   "anthropic.claude-3-5-sonnet-20240620-v1:0",
-	"claude-3-5-sonnet-20241022":   "anthropic.claude-3-5-sonnet-20241022-v2:0",
-	"claude-3-5-sonnet-latest":     "anthropic.claude-3-5-sonnet-20241022-v2:0",
-	"claude-3-5-haiku-20241022":    "anthropic.claude-3-5-haiku-20241022-v1:0",
-	"claude-3-7-sonnet-latest":     "anthropic.claude-3-7-sonnet-20250219-v1:0",
-	"claude-3-7-sonnet-20250219":   "anthropic.claude-3-7-sonnet-20250219-v1:0",
-	"claude-sonnet-4-20250514":     "anthropic.claude-sonnet-4-20250514-v1:0",
-	"claude-3-7-sonnet-latest-tag": "claude-3-7-sonnet-latest-tag",
-	"claude-4-sonnet-latest-tag":   "claude-4-sonnet-latest-tag",
+	"claude-instant-1.2": "anthropic.claude-instant-v1",
+	"claude-2.0":         "anthropic.claude-v2",
+	"claude-2.1":         "anthropic.claude-v2:1",
+	// haiku
+	"claude-3-haiku-20240307":   "anthropic.claude-3-haiku-20240307-v1:0",
+	"claude-3-5-haiku-latest":   "anthropic.claude-3-5-haiku-20241022-v1:0",
+	"claude-3-5-haiku-20241022": "anthropic.claude-3-5-haiku-20241022-v1:0",
+	"claude-haiku-4-5":          "anthropic.claude-haiku-4-5-20251001-v1:0",
+	"claude-haiku-4-5-20251001": "anthropic.claude-haiku-4-5-20251001-v1:0",
+	// sonnet
+	"claude-3-sonnet-20240229":   "anthropic.claude-3-sonnet-20240229-v1:0",
+	"claude-3-5-sonnet-latest":   "anthropic.claude-3-5-sonnet-20241022-v2:0",
+	"claude-3-5-sonnet-20240620": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+	"claude-3-5-sonnet-20241022": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+	"claude-3-7-sonnet-latest":   "anthropic.claude-3-7-sonnet-20250219-v1:0",
+	"claude-3-7-sonnet-20250219": "anthropic.claude-3-7-sonnet-20250219-v1:0",
+	"claude-sonnet-4-0":          "anthropic.claude-sonnet-4-20250514-v1:0",
+	"claude-sonnet-4-20250514":   "anthropic.claude-sonnet-4-20250514-v1:0",
+	"claude-sonnet-4-5":          "anthropic.claude-sonnet-4-5-20250929-v1:0",
+	"claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+	// opus
+	"claude-3-opus-20240229":   "anthropic.claude-3-opus-20240229-v1:0",
+	"claude-opus-4-0":          "anthropic.claude-opus-4-20250514-v1:0",
+	"claude-opus-4-20250514":   "anthropic.claude-opus-4-20250514-v1:0",
+	"claude-opus-4-1":          "anthropic.claude-opus-4-1-20250805-v1:0",
+	"claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 }
 
 func AwsModelID(requestModel string) (string, error) {
@@ -65,7 +76,10 @@ func AwsClaudeModelTransArn(c *gin.Context, awsCli *bedrockruntime.Client) strin
 			arnMap := channel.GetInferenceProfileArnMap()
 			if arnMap != nil {
 				if arn, exists := arnMap[reqModelID]; exists && arn != "" {
-					logger.Debugf(c, "Using channel inference profile ARN for model %s: %s", reqModelID, arn)
+					gmw.GetLogger(c).Debug("using channel inference profile ARN",
+						zap.String("request_model", reqModelID),
+						zap.String("arn", arn),
+					)
 					return arn
 				}
 			}
@@ -80,13 +94,17 @@ func AwsClaudeModelTransArn(c *gin.Context, awsCli *bedrockruntime.Client) strin
 // ARN mapping is now handled through channel configuration
 
 func Handler(c *gin.Context, awsCli *bedrockruntime.Client, modelName string) (*relaymodel.ErrorWithStatusCode, *relaymodel.Usage) {
+	logger := gmw.GetLogger(c).With(
+		zap.String("model", modelName),
+	)
+
 	awsModelID, err := AwsModelID(c.GetString(ctxkey.RequestModel))
 	if err != nil {
 		return utils.WrapErr(errors.Wrap(err, "AwsModelID")), nil
 	}
 
 	// Use the enhanced cross-region profile conversion with fallback testing
-	awsModelID = utils.ConvertModelID2CrossRegionProfileWithFallback(c.Request.Context(), awsModelID, awsCli.Options().Region, awsCli)
+	awsModelID = utils.ConvertModelID2CrossRegionProfileWithFallback(gmw.Ctx(c), awsModelID, awsCli.Options().Region, awsCli)
 	awsReq := &bedrockruntime.InvokeModelInput{
 		ModelId:     aws.String(awsModelID),
 		Accept:      aws.String("application/json"),
@@ -95,7 +113,7 @@ func Handler(c *gin.Context, awsCli *bedrockruntime.Client, modelName string) (*
 
 	if arn := AwsClaudeModelTransArn(c, awsCli); arn != "" {
 		awsReq.ModelId = aws.String(arn)
-		logger.Debugf(c, "final use modelID [%s]", arn)
+		logger.Debug("final modelId override applied", zap.String("model_id", arn))
 	}
 
 	claudeReq_, ok := c.Get(ctxkey.ConvertedRequest)
@@ -119,29 +137,43 @@ func Handler(c *gin.Context, awsCli *bedrockruntime.Client, modelName string) (*
 
 	// Track metrics for the operation
 	startTime := time.Now()
-	awsResp, err := awsCli.InvokeModel(c.Request.Context(), awsReq)
-	latency := time.Since(startTime)
+	awsResp, err := awsCli.InvokeModel(gmw.Ctx(c), awsReq)
 
 	// Update region health metrics
+	latency := time.Since(startTime)
 	utils.UpdateRegionHealthMetrics(awsCli.Options().Region, err == nil, latency, err)
 
 	if err != nil {
 		return utils.WrapErr(errors.Wrap(err, "InvokeModel")), nil
 	}
 
+	logger.Debug("received response from AWS Bedrock", zap.ByteString("response_body", awsResp.Body))
 	claudeResponse := new(anthropic.Response)
 	err = json.Unmarshal(awsResp.Body, claudeResponse)
 	if err != nil {
 		return utils.WrapErr(errors.Wrap(err, "unmarshal response")), nil
 	}
 
-	openaiResp := anthropic.ResponseClaude2OpenAI(c, claudeResponse)
-	openaiResp.Model = modelName
 	usage := relaymodel.Usage{
 		PromptTokens:     claudeResponse.Usage.InputTokens,
 		CompletionTokens: claudeResponse.Usage.OutputTokens,
 		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
 	}
+
+	if native, ok := c.Get(ctxkey.ClaudeMessagesNative); ok {
+		if useNative, _ := native.(bool); useNative {
+			claudeResponse.Model = modelName
+			respBody, merr := json.Marshal(claudeResponse)
+			if merr != nil {
+				return utils.WrapErr(errors.Wrap(merr, "marshal claude response")), nil
+			}
+			c.Data(http.StatusOK, "application/json", respBody)
+			return nil, &usage
+		}
+	}
+
+	openaiResp := anthropic.ResponseClaude2OpenAI(c, claudeResponse)
+	openaiResp.Model = modelName
 	openaiResp.Usage = usage
 
 	c.JSON(http.StatusOK, openaiResp)
@@ -156,7 +188,7 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 	}
 
 	// Use the enhanced cross-region profile conversion with fallback testing
-	awsModelID = utils.ConvertModelID2CrossRegionProfileWithFallback(c.Request.Context(), awsModelID, awsCli.Options().Region, awsCli)
+	awsModelID = utils.ConvertModelID2CrossRegionProfileWithFallback(gmw.Ctx(c), awsModelID, awsCli.Options().Region, awsCli)
 	awsReq := &bedrockruntime.InvokeModelWithResponseStreamInput{
 		ModelId:     aws.String(awsModelID),
 		Accept:      aws.String("application/json"),
@@ -165,7 +197,7 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 
 	if arn := AwsClaudeModelTransArn(c, awsCli); arn != "" {
 		awsReq.ModelId = aws.String(arn)
-		logger.Debugf(c, "final use modelID [%s]", arn)
+		gmw.GetLogger(c).Debug("final modelId override applied", zap.String("model_id", arn))
 	}
 
 	claudeReq_, ok := c.Get(ctxkey.ConvertedRequest)
@@ -190,7 +222,7 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 
 	// Track metrics for the operation
 	startTime := time.Now()
-	awsResp, err := awsCli.InvokeModelWithResponseStream(c.Request.Context(), awsReq)
+	awsResp, err := awsCli.InvokeModelWithResponseStream(gmw.Ctx(c), awsReq)
 	latency := time.Since(startTime)
 
 	// Update region health metrics
@@ -219,7 +251,7 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 			claudeResp := new(anthropic.StreamResponse)
 			err := json.NewDecoder(bytes.NewReader(v.Value.Bytes)).Decode(claudeResp)
 			if err != nil {
-				logger.SysError("error unmarshalling stream response: " + err.Error())
+				gmw.GetLogger(c).Error("error unmarshalling stream response", zap.Error(err))
 				return false
 			}
 
@@ -228,12 +260,13 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 				usage.PromptTokens += meta.Usage.InputTokens
 				usage.CompletionTokens += meta.Usage.OutputTokens
 				if len(meta.Id) > 0 { // only message_start has an id, otherwise it's a finish_reason event.
-					id = fmt.Sprintf("chatcmpl-%s", meta.Id)
+					id = tracing.GenerateChatCompletionID(c)
 					return true
 				} else { // finish_reason case
 					if len(lastToolCallChoice.Delta.ToolCalls) > 0 {
-						lastArgs := &lastToolCallChoice.Delta.ToolCalls[len(lastToolCallChoice.Delta.ToolCalls)-1].Function
-						if len(lastArgs.Arguments.(string)) == 0 { // compatible with OpenAI sending an empty object `{}` when no arguments.
+						lastArgs := lastToolCallChoice.Delta.ToolCalls[len(lastToolCallChoice.Delta.ToolCalls)-1].Function
+						// Safe type assertion for Arguments
+						if argsStr, ok := lastArgs.Arguments.(string); ok && len(argsStr) == 0 { // compatible with OpenAI sending an empty object `{}` when no arguments.
 							lastArgs.Arguments = "{}"
 							response.Choices[len(response.Choices)-1].Delta.Content = nil
 							response.Choices[len(response.Choices)-1].Delta.ToolCalls = lastToolCallChoice.Delta.ToolCalls
@@ -245,7 +278,7 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 				return true
 			}
 			response.Id = id
-			response.Model = c.GetString(ctxkey.OriginalModel)
+			response.Model = c.GetString(ctxkey.RequestModel)
 			response.Created = createdTime
 
 			for _, choice := range response.Choices {
@@ -255,7 +288,7 @@ func StreamHandler(c *gin.Context, awsCli *bedrockruntime.Client) (*relaymodel.E
 			}
 			jsonStr, err := json.Marshal(response)
 			if err != nil {
-				logger.SysError("error marshalling stream response: " + err.Error())
+				gmw.GetLogger(c).Error("error marshalling stream response", zap.Error(err))
 				return true
 			}
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})

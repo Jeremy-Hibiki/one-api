@@ -2,12 +2,13 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	gcrypto "github.com/Laisky/go-utils/v5/crypto"
+	gcrypto "github.com/Laisky/go-utils/v6/crypto"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/model"
 )
 
@@ -54,12 +56,12 @@ func setupTestEnvironment(t *testing.T) (*gorm.DB, func()) {
 	model.LOG_DB = testDB // Use same DB for logging in tests
 
 	// Set SQLite flag for proper query handling
-	originalUsingSQLite := common.UsingSQLite
-	common.UsingSQLite = true
+	originalUsingSQLite := common.UsingSQLite.Load()
+	common.UsingSQLite.Store(true)
 
 	// Disable Redis for testing to use memory-based rate limiting
-	originalRedisEnabled := common.RedisEnabled
-	common.RedisEnabled = false
+	originalRedisEnabled := common.IsRedisEnabled()
+	common.SetRedisEnabled(false)
 
 	// Create a test user for TOTP tests
 	testUser := &model.User{
@@ -81,8 +83,8 @@ func setupTestEnvironment(t *testing.T) (*gorm.DB, func()) {
 	cleanup := func() {
 		model.DB = originalDB
 		model.LOG_DB = originalLogDB
-		common.UsingSQLite = originalUsingSQLite
-		common.RedisEnabled = originalRedisEnabled
+		common.UsingSQLite.Store(originalUsingSQLite)
+		common.SetRedisEnabled(originalRedisEnabled)
 	}
 
 	return testDB, cleanup
@@ -119,7 +121,7 @@ func TestSetupTotp(t *testing.T) {
 	router := setupTestRouter()
 	router.GET("/totp/setup", func(c *gin.Context) {
 		// Mock user ID in context
-		c.Set("id", 1)
+		c.Set(ctxkey.Id, 1)
 		SetupTotp(c)
 	})
 
@@ -130,14 +132,44 @@ func TestSetupTotp(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Parse response to verify TOTP setup data
-	var response map[string]interface{}
+	var response map[string]any
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	assert.NoError(t, err)
 	assert.True(t, response["success"].(bool))
 
-	data := response["data"].(map[string]interface{})
-	assert.NotEmpty(t, data["secret"])
-	assert.NotEmpty(t, data["qr_code"])
+	data := response["data"].(map[string]any)
+	secret := data["secret"].(string)
+	qrCode := data["qr_code"].(string)
+
+	// Verify secret is not empty and is valid base32
+	assert.NotEmpty(t, secret)
+	assert.Regexp(t, "^[A-Z2-7]+=*$", secret, "Secret should be valid base32")
+
+	// Verify QR code URI format and proper encoding
+	assert.NotEmpty(t, qrCode)
+	assert.Contains(t, qrCode, "otpauth://totp/", "QR code should start with otpauth://totp/")
+	assert.Contains(t, qrCode, secret, "QR code should contain the secret")
+	assert.Contains(t, qrCode, "testuser", "QR code should contain the username")
+
+	// Verify proper URI encoding - spaces should be %20, not double-encoded
+	// The issuer name should be properly encoded
+	assert.Contains(t, qrCode, "issuer=", "QR code should contain issuer parameter")
+
+	// Test that the URI can be parsed correctly
+	assert.NotContains(t, qrCode, "%%", "QR code should not contain double-encoded characters")
+	assert.NotContains(t, qrCode, "%2520", "QR code should not contain double-encoded spaces")
+
+	// Verify the secret can be used to create a valid TOTP instance
+	totp, err := gcrypto.NewTOTP(gcrypto.OTPArgs{
+		Base32Secret: secret,
+	})
+	assert.NoError(t, err, "Secret from setup should be valid for TOTP creation")
+	assert.NotNil(t, totp)
+
+	// Verify that a code can be generated
+	code := totp.Key()
+	assert.Len(t, code, 6, "Generated TOTP code should be 6 digits")
+	assert.Regexp(t, "^[0-9]{6}$", code, "TOTP code should be 6 digits")
 }
 
 func TestTotpSetupRequest(t *testing.T) {
@@ -148,12 +180,12 @@ func TestTotpSetupRequest(t *testing.T) {
 
 	// First, set up TOTP to get a secret in session
 	router.GET("/totp/setup", func(c *gin.Context) {
-		c.Set("id", 1)
+		c.Set(ctxkey.Id, 1)
 		SetupTotp(c)
 	})
 
 	router.POST("/totp/confirm", func(c *gin.Context) {
-		c.Set("id", 1)
+		c.Set(ctxkey.Id, 1)
 		ConfirmTotp(c)
 	})
 
@@ -165,12 +197,12 @@ func TestTotpSetupRequest(t *testing.T) {
 	assert.Equal(t, http.StatusOK, setupW.Code)
 
 	// Parse setup response to get the secret
-	var setupResponse map[string]interface{}
+	var setupResponse map[string]any
 	err := json.Unmarshal(setupW.Body.Bytes(), &setupResponse)
 	assert.NoError(t, err)
 	assert.True(t, setupResponse["success"].(bool))
 
-	data := setupResponse["data"].(map[string]interface{})
+	data := setupResponse["data"].(map[string]any)
 	secret := data["secret"].(string)
 
 	// Step 2: Generate a valid TOTP code using the secret from setup
@@ -201,7 +233,7 @@ func TestTotpSetupRequest(t *testing.T) {
 	assert.Equal(t, http.StatusOK, confirmW.Code)
 
 	// Parse response to verify success
-	var confirmResponse map[string]interface{}
+	var confirmResponse map[string]any
 	err = json.Unmarshal(confirmW.Body.Bytes(), &confirmResponse)
 	assert.NoError(t, err)
 	assert.True(t, confirmResponse["success"].(bool))
@@ -273,6 +305,8 @@ func TestTotpReplayProtection(t *testing.T) {
 	secret := "JBSWY3DPEHPK3PXP"
 	userId := 123
 
+	ctx := context.Background()
+
 	totp, err := gcrypto.NewTOTP(gcrypto.OTPArgs{
 		Base32Secret: secret,
 	})
@@ -281,13 +315,13 @@ func TestTotpReplayProtection(t *testing.T) {
 	code := totp.Key()
 
 	// First verification should succeed
-	assert.True(t, verifyTotpCode(userId, secret, code))
+	assert.True(t, verifyTotpCode(ctx, userId, secret, code))
 
 	// Second verification with same code should fail (replay protection)
-	assert.False(t, verifyTotpCode(userId, secret, code))
+	assert.False(t, verifyTotpCode(ctx, userId, secret, code))
 
 	// Different user should still be able to use the same code
-	assert.True(t, verifyTotpCode(userId+1, secret, code))
+	assert.True(t, verifyTotpCode(ctx, userId+1, secret, code))
 }
 
 func TestTotpSecurityFunctions(t *testing.T) {
@@ -297,21 +331,23 @@ func TestTotpSecurityFunctions(t *testing.T) {
 	userId := 456
 	code := "123456"
 
+	ctx := context.Background()
+
 	// Initially, code should not be marked as used
-	assert.False(t, common.IsTotpCodeUsed(userId, code))
+	assert.False(t, common.IsTotpCodeUsed(ctx, userId, code))
 
 	// Mark code as used
-	err := common.MarkTotpCodeAsUsed(userId, code)
+	err := common.MarkTotpCodeAsUsed(ctx, userId, code)
 	assert.NoError(t, err)
 
 	// Now code should be marked as used
-	assert.True(t, common.IsTotpCodeUsed(userId, code))
+	assert.True(t, common.IsTotpCodeUsed(ctx, userId, code))
 
 	// Different user should not be affected
-	assert.False(t, common.IsTotpCodeUsed(userId+1, code))
+	assert.False(t, common.IsTotpCodeUsed(ctx, userId+1, code))
 
 	// Different code should not be affected
-	assert.False(t, common.IsTotpCodeUsed(userId, "654321"))
+	assert.False(t, common.IsTotpCodeUsed(ctx, userId, "654321"))
 }
 
 func TestAdminDisableUserTotp(t *testing.T) {
@@ -352,8 +388,8 @@ func TestAdminDisableUserTotp(t *testing.T) {
 	router := setupTestRouter()
 	router.POST("/admin/totp/disable/:id", func(c *gin.Context) {
 		// Mock admin user context
-		c.Set("id", 2)                     // Admin user ID
-		c.Set("role", model.RoleAdminUser) // Admin role
+		c.Set(ctxkey.Id, 2)                     // Admin user ID
+		c.Set(ctxkey.Role, model.RoleAdminUser) // Admin role
 		AdminDisableUserTotp(c)
 	})
 
@@ -364,7 +400,7 @@ func TestAdminDisableUserTotp(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Parse response to verify success
-	var response map[string]interface{}
+	var response map[string]any
 	err = json.Unmarshal(w.Body.Bytes(), &response)
 	assert.NoError(t, err)
 	assert.True(t, response["success"].(bool))

@@ -101,7 +101,7 @@ type UsageOrResponseText struct {
 type SlimTextResponse struct {
 	Choices     []TextResponseChoice `json:"choices"`
 	model.Usage `json:"usage"`
-	Error       model.Error `json:"error"`
+	Error       *model.Error `json:"error,omitempty"`
 }
 
 type TextResponseChoice struct {
@@ -177,6 +177,10 @@ type CompletionsStreamResponse struct {
 // ImageUsage is the usage info for image request
 //
 // https://platform.openai.com/docs/api-reference/images/object
+//
+// TODO: To ensure compatibility with other providers that use the OpenAI format,
+// we may need to explicitly add 'omitempty' and potentially 'omitzero' JSON tags,
+// as the current implementation always returns zero values in JSON.
 type ImageUsage struct {
 	TotalTokens        int                          `json:"total_tokens"`
 	InputTokens        int                          `json:"input_tokens"`

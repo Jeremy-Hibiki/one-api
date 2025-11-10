@@ -1,0 +1,227 @@
+/* Import mobile responsive styles */
+@import './styles/mobile.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	:root {
+		--background: 0 0% 100%;
+		--foreground: 222.2 84% 4.9%;
+		--card: 0 0% 100%;
+		--card-foreground: 222.2 84% 4.9%;
+		--popover: 0 0% 100%;
+		--popover-foreground: 222.2 84% 4.9%;
+		--primary: 222.2 47.4% 11.2%;
+		--primary-foreground: 210 40% 98%;
+		--secondary: 210 40% 96.1%;
+		--secondary-foreground: 222.2 47.4% 11.2%;
+		--muted: 210 40% 96.1%;
+		--muted-foreground: 215.4 16.3% 46.9%;
+		--accent: 210 40% 96.1%;
+		--accent-foreground: 222.2 47.4% 11.2%;
+		--destructive: 0 84.2% 60.2%;
+		--destructive-foreground: 210 40% 98%;
+		--border: 214.3 31.8% 91.4%;
+		--input: 214.3 31.8% 91.4%;
+		--ring: 222.2 84% 4.9%;
+		--chart-1: 12 76% 61%;
+		--chart-2: 173 58% 39%;
+		--chart-3: 197 37% 24%;
+		--chart-4: 43 74% 66%;
+		--chart-5: 27 87% 67%;
+		--radius: 0.5rem;
+	}
+
+	.dark {
+		--background: 222.2 84% 4.9%;
+		--foreground: 210 40% 98%;
+		--card: 222.2 84% 4.9%;
+		--card-foreground: 210 40% 98%;
+		--popover: 222.2 84% 4.9%;
+		--popover-foreground: 210 40% 98%;
+		--primary: 210 40% 98%;
+		--primary-foreground: 222.2 47.4% 11.2%;
+		--secondary: 217.2 32.6% 17.5%;
+		--secondary-foreground: 210 40% 98%;
+		--muted: 217.2 32.6% 17.5%;
+		--muted-foreground: 215 20.2% 65.1%;
+		--accent: 217.2 32.6% 17.5%;
+		--accent-foreground: 210 40% 98%;
+		--destructive: 0 62.8% 30.6%;
+		--destructive-foreground: 210 40% 98%;
+		--border: 217.2 32.6% 17.5%;
+		--input: 217.2 32.6% 17.5%;
+		--ring: 212.7 26.8% 83.9%;
+		--chart-1: 220 70% 50%;
+		--chart-2: 160 60% 45%;
+		--chart-3: 30 80% 55%;
+		--chart-4: 280 65% 60%;
+		--chart-5: 340 75% 55%;
+	}
+}
+
+@layer base {
+
+	html,
+	body,
+	#root {
+		/* Ensure the app uses dynamic viewport height on mobile to prevent extra blank space */
+		min-height: 100dvh;
+		/* Fallback for older browsers */
+		min-height: 100vh;
+		height: auto;
+		margin: 0;
+	}
+
+	* {
+		@apply border-border;
+	}
+
+	body {
+		@apply bg-background text-foreground;
+		/* Do not force overflow-x hidden globally; allow tables and toolbars to scroll when needed */
+
+		text-autospace: normal;
+	}
+
+	input,
+	select,
+	textarea {
+		font-size: 1rem;
+		line-height: 1.5;
+	}
+
+	@media (min-width: 640px) {
+		input,
+		select,
+		textarea {
+			font-size: 0.875rem;
+		}
+	}
+
+	input[type='date'],
+	input[type='time'],
+	input[type='datetime-local'] {
+		font-size: 1rem;
+	}
+
+	input[type='date']::-webkit-date-and-time-value,
+	input[type='time']::-webkit-date-and-time-value,
+	input[type='datetime-local']::-webkit-date-and-time-value {
+		min-height: 2.75rem;
+		line-height: 1.5;
+		font-size: 1rem;
+	}
+
+	input[type='date']::-webkit-datetime-edit,
+	input[type='date']::-webkit-datetime-edit-fields-wrapper,
+	input[type='date']::-webkit-datetime-edit-text,
+	input[type='date']::-webkit-datetime-edit-month-field,
+	input[type='date']::-webkit-datetime-edit-day-field,
+	input[type='date']::-webkit-datetime-edit-year-field,
+	input[type='time']::-webkit-datetime-edit,
+	input[type='time']::-webkit-datetime-edit-fields-wrapper,
+	input[type='time']::-webkit-datetime-edit-text,
+	input[type='time']::-webkit-datetime-edit-hour-field,
+	input[type='time']::-webkit-datetime-edit-minute-field,
+	input[type='datetime-local']::-webkit-datetime-edit,
+	input[type='datetime-local']::-webkit-datetime-edit-fields-wrapper,
+	input[type='datetime-local']::-webkit-datetime-edit-text,
+	input[type='datetime-local']::-webkit-datetime-edit-month-field,
+	input[type='datetime-local']::-webkit-datetime-edit-day-field,
+	input[type='datetime-local']::-webkit-datetime-edit-year-field,
+	input[type='datetime-local']::-webkit-datetime-edit-hour-field,
+	input[type='datetime-local']::-webkit-datetime-edit-minute-field {
+		font-size: 1rem;
+		line-height: 1.5;
+	}
+}
+
+/* Enhanced data table styles */
+@layer components {
+	.data-table {
+		@apply w-full border-collapse;
+	}
+
+	.data-table th {
+		@apply bg-muted/50 font-medium text-left px-4 py-3 border-b;
+	}
+
+	.data-table td {
+		@apply px-4 py-3 border-b;
+	}
+
+	.data-table tbody tr:hover {
+		@apply bg-muted/30;
+	}
+
+	/* Mobile table enhancements */
+	@media (max-width: 768px) {
+		.data-table {
+			@apply mobile-table;
+		}
+	}
+}
+
+/* Form enhancements */
+@layer components {
+	.form-grid {
+		@apply grid grid-cols-1 md: grid-cols-2 lg:grid-cols-3 gap-4;
+	}
+
+	.form-row {
+		@apply flex flex-col md: flex-row gap-4;
+	}
+
+	.form-actions {
+		@apply flex flex-col md: flex-row gap-2 pt-4;
+	}
+
+	.json-editor {
+		@apply font-mono text-sm bg-muted/20 border rounded-md p-3;
+	}
+
+	.json-valid {
+		@apply border-green-300 bg-green-50;
+	}
+
+	.json-invalid {
+		@apply border-red-300 bg-red-50;
+	}
+
+	/* Date picker icon fixes for dark theme */
+	.dark input[type="date"]::-webkit-calendar-picker-indicator {
+		filter: invert(1);
+		opacity: 0.8;
+	}
+
+	.dark input[type="time"]::-webkit-calendar-picker-indicator {
+		filter: invert(1);
+		opacity: 0.8;
+	}
+
+	.dark input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+		filter: invert(1);
+		opacity: 0.8;
+	}
+
+	/* Firefox date picker icon fix for dark theme */
+	@supports (-moz-appearance: none) {
+
+		.dark input[type="date"],
+		.dark input[type="time"],
+		.dark input[type="datetime-local"] {
+			color-scheme: dark;
+		}
+	}
+
+	/* Prevent absolutely-positioned descendants (e.g., injected inputs) from stretching document height */
+	.bounded-abs *[style*="position: absolute"],
+	.bounded-abs input[type="checkbox"][style*="position: absolute"] {
+		position: absolute !important;
+		inset: auto auto auto auto;
+		/* do not push layout */
+	}
+}

@@ -9,6 +9,7 @@ import (
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
 
+// GetSubscription returns the user's subscription-style quota summary in the OpenAI billing format.
 func GetSubscription(c *gin.Context) {
 	var remainQuota int64
 	var usedQuota int64
@@ -34,10 +35,7 @@ func GetSubscription(c *gin.Context) {
 		expiredTime = 0
 	}
 	if err != nil {
-		Error := relaymodel.Error{
-			Message: err.Error(),
-			Type:    "upstream_error",
-		}
+		Error := relaymodel.Error{Message: err.Error(), Type: "upstream_error", RawError: err}
 		c.JSON(200, gin.H{
 			"error": Error,
 		})
@@ -60,9 +58,9 @@ func GetSubscription(c *gin.Context) {
 		AccessUntil:        expiredTime,
 	}
 	c.JSON(200, subscription)
-	return
 }
 
+// GetUsage returns the user's quota consumption wrapped in the OpenAI usage response shape.
 func GetUsage(c *gin.Context) {
 	var quota int64
 	var err error
@@ -76,10 +74,7 @@ func GetUsage(c *gin.Context) {
 		quota, err = model.GetUserUsedQuota(userId)
 	}
 	if err != nil {
-		Error := relaymodel.Error{
-			Message: err.Error(),
-			Type:    "one_api_error",
-		}
+		Error := relaymodel.Error{Message: err.Error(), Type: "one_api_error", RawError: err}
 		c.JSON(200, gin.H{
 			"error": Error,
 		})
@@ -94,5 +89,4 @@ func GetUsage(c *gin.Context) {
 		TotalUsage: amount * 100,
 	}
 	c.JSON(200, usage)
-	return
 }

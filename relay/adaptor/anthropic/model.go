@@ -56,7 +56,7 @@ type Request struct {
 	Stream        bool      `json:"stream,omitempty"`
 	Temperature   *float64  `json:"temperature,omitempty"`
 	TopP          *float64  `json:"top_p,omitempty"`
-	TopK          int       `json:"top_k,omitempty"`
+	TopK          *int      `json:"top_k,omitempty"`
 	Tools         []Tool    `json:"tools,omitempty"`
 	ToolChoice    any       `json:"tool_choice,omitempty"`
 	//Metadata    `json:"metadata,omitempty"`
@@ -64,9 +64,22 @@ type Request struct {
 	AnthropicVersion string          `json:"anthropic_version,omitempty"`
 }
 
+// Usage is the token usage information in the response
+//
+// - https://docs.anthropic.com/en/api/messages#response-usage
+// - https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int            `json:"input_tokens"`
+	CacheReadInputTokens     int            `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int            `json:"cache_creation_input_tokens,omitempty"`
+	OutputTokens             int            `json:"output_tokens"`
+	CacheCreation            *CacheCreation `json:"cache_creation,omitempty"`
+	ServiceTier              string         `json:"service_tier,omitempty"`
+}
+
+type CacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
 type Error struct {
@@ -117,4 +130,7 @@ type StreamResponse struct {
 	ContentBlock *Content  `json:"content_block"`
 	Delta        *Delta    `json:"delta"`
 	Usage        *Usage    `json:"usage"`
+	// Error events are sent over SSE as {"type":"error","error":{...},"request_id":"..."}
+	Error     Error  `json:"error"`
+	RequestId string `json:"request_id,omitempty"`
 }

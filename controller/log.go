@@ -11,6 +11,7 @@ import (
 	"github.com/songquanpeng/one-api/model"
 )
 
+// GetAllLogs lists logs across all users with pagination, filtering, and sorting options.
 func GetAllLogs(c *gin.Context) {
 	p, _ := strconv.Atoi(c.Query("p"))
 	if p < 0 {
@@ -23,15 +24,41 @@ func GetAllLogs(c *gin.Context) {
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
 	channel, _ := strconv.Atoi(c.Query("channel"))
-	itemsPerPage, err := strconv.Atoi(c.Query("items_per_page"))
-	if err != nil {
+	sortBy := c.DefaultQuery("sort_by", "")
+	if sortBy == "" { // frontend sends 'sort'
+		sortBy = c.Query("sort")
+	}
+	sortOrder := c.DefaultQuery("sort_order", "desc")
+	if c.Query("order") != "" { // frontend sends 'order'
+		sortOrder = c.Query("order")
+	}
+
+	// Validate date range for sorting requests (max 30 days)
+	if sortBy != "" && startTimestamp > 0 && endTimestamp > 0 {
+		maxRange := int64(30 * 24 * 60 * 60) // 30 days in seconds
+		if endTimestamp-startTimestamp > maxRange {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "Date range for sorting cannot exceed 30 days",
+			})
+			return
+		}
+	}
+
+	// Support both legacy 'items_per_page' and preferred 'size' param
+	pageSizeStr := c.Query("size")
+	if pageSizeStr == "" {
+		pageSizeStr = c.Query("items_per_page")
+	}
+	itemsPerPage, err := strconv.Atoi(pageSizeStr)
+	if err != nil || itemsPerPage <= 0 {
 		itemsPerPage = config.DefaultItemsPerPage
 	}
 	if itemsPerPage > config.MaxItemsPerPage {
 		itemsPerPage = config.MaxItemsPerPage
 	}
 
-	logs, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, p*itemsPerPage, itemsPerPage, channel)
+	logs, err := model.GetAllLogs(logType, startTimestamp, endTimestamp, modelName, username, tokenName, p*itemsPerPage, itemsPerPage, channel, sortBy, sortOrder)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -39,14 +66,26 @@ func GetAllLogs(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get total count for pagination
+	totalCount, err := model.GetAllLogsCount(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    logs,
+		"total":   totalCount,
 	})
-	return
 }
 
+// GetUserLogs lists logs scoped to the current user, honoring filter and sorting options.
 func GetUserLogs(c *gin.Context) {
 	p, _ := strconv.Atoi(c.Query("p"))
 	if p < 0 {
@@ -58,7 +97,37 @@ func GetUserLogs(c *gin.Context) {
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	tokenName := c.Query("token_name")
 	modelName := c.Query("model_name")
-	logs, err := model.GetUserLogs(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, p*config.MaxItemsPerPage, config.MaxItemsPerPage)
+	sortBy := c.DefaultQuery("sort_by", "")
+	if sortBy == "" { // frontend fallback
+		sortBy = c.Query("sort")
+	}
+	sortOrder := c.DefaultQuery("sort_order", "desc")
+	if c.Query("order") != "" {
+		sortOrder = c.Query("order")
+	}
+
+	// Validate date range for sorting requests (max 30 days)
+	if sortBy != "" && startTimestamp > 0 && endTimestamp > 0 {
+		maxRange := int64(30 * 24 * 60 * 60) // 30 days in seconds
+		if endTimestamp-startTimestamp > maxRange {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "Date range for sorting cannot exceed 30 days",
+			})
+			return
+		}
+	}
+
+	// Get page size from query parameter, default to config value
+	size, err := strconv.Atoi(c.Query("size"))
+	if err != nil || size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+
+	logs, err := model.GetUserLogs(userId, logType, startTimestamp, endTimestamp, modelName, tokenName, p*size, size, sortBy, sortOrder)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -66,17 +135,45 @@ func GetUserLogs(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get total count for pagination
+	totalCount, err := model.GetUserLogsCount(userId, logType, startTimestamp, endTimestamp, modelName, tokenName)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    logs,
+		"total":   totalCount,
 	})
-	return
 }
 
+// SearchAllLogs performs full-text search across all logs and returns paginated results.
 func SearchAllLogs(c *gin.Context) {
 	keyword := c.Query("keyword")
-	logs, err := model.SearchAllLogs(keyword)
+	p, _ := strconv.Atoi(c.Query("p"))
+	if p < 0 {
+		p = 0
+	}
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+	sortBy := c.Query("sort")
+	sortOrder := c.Query("order")
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+	logs, total, err := model.SearchAllLogs(keyword, p*size, size, sortBy, sortOrder)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -84,18 +181,36 @@ func SearchAllLogs(c *gin.Context) {
 		})
 		return
 	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    logs,
+		"total":   total,
 	})
-	return
 }
 
+// SearchUserLogs searches logs belonging to the current user and returns paginated results.
 func SearchUserLogs(c *gin.Context) {
 	keyword := c.Query("keyword")
 	userId := c.GetInt(ctxkey.Id)
-	logs, err := model.SearchUserLogs(userId, keyword)
+	p, _ := strconv.Atoi(c.Query("p"))
+	if p < 0 {
+		p = 0
+	}
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+	sortBy := c.Query("sort")
+	sortOrder := c.Query("order")
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+	logs, total, err := model.SearchUserLogs(userId, keyword, p*size, size, sortBy, sortOrder)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -103,14 +218,16 @@ func SearchUserLogs(c *gin.Context) {
 		})
 		return
 	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    logs,
+		"total":   total,
 	})
-	return
 }
 
+// GetLogsStat summarizes quota usage metrics across logs matching the provided filters.
 func GetLogsStat(c *gin.Context) {
 	logType, _ := strconv.Atoi(c.Query("type"))
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
@@ -129,9 +246,9 @@ func GetLogsStat(c *gin.Context) {
 			//"token": tokenNum,
 		},
 	})
-	return
 }
 
+// GetLogsSelfStat reports quota usage metrics for the authenticated user over the requested range.
 func GetLogsSelfStat(c *gin.Context) {
 	username := c.GetString(ctxkey.Username)
 	logType, _ := strconv.Atoi(c.Query("type"))
@@ -150,9 +267,9 @@ func GetLogsSelfStat(c *gin.Context) {
 			//"token": tokenNum,
 		},
 	})
-	return
 }
 
+// DeleteHistoryLogs purges log entries older than the provided timestamp.
 func DeleteHistoryLogs(c *gin.Context) {
 	targetTimestamp, _ := strconv.ParseInt(c.Query("target_timestamp"), 10, 64)
 	if targetTimestamp == 0 {
@@ -170,10 +287,10 @@ func DeleteHistoryLogs(c *gin.Context) {
 		})
 		return
 	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    count,
 	})
-	return
 }

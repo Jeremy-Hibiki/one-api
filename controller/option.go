@@ -13,6 +13,7 @@ import (
 	"github.com/songquanpeng/one-api/model"
 )
 
+// GetOptions returns the current configuration options excluding sensitive values.
 func GetOptions(c *gin.Context) {
 	var options []*model.Option
 	config.OptionMapRWMutex.Lock()
@@ -31,9 +32,9 @@ func GetOptions(c *gin.Context) {
 		"message": "",
 		"data":    options,
 	})
-	return
 }
 
+// UpdateOption persists a configuration option after validating prerequisite fields for feature toggles.
 func UpdateOption(c *gin.Context) {
 	var option model.Option
 	err := json.NewDecoder(c.Request.Body).Decode(&option)
@@ -98,5 +99,4 @@ func UpdateOption(c *gin.Context) {
 		"success": true,
 		"message": "",
 	})
-	return
 }

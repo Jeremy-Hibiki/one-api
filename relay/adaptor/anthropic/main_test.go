@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -13,6 +14,104 @@ import (
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/relay/model"
 )
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func newThinkingContext(t *testing.T, rawURL string) *gin.Context {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, rawURL, nil)
+	c.Request = req
+	return c
+}
+
+func TestConvertRequest_ThinkingEnabledViaQuery(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions?thinking=enabled")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-3-opus-latest",
+		MaxTokens: 4096,
+		Messages:  []model.Message{{Role: "user", Content: "hello"}},
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	if assert.NotNil(t, converted.Thinking) {
+		assert.Equal(t, "enabled", converted.Thinking.Type)
+		assert.Equal(t, 1024, converted.Thinking.BudgetTokens)
+	}
+}
+
+func TestConvertRequest_RejectsThinkingWhenMaxTokensTooSmall(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-3-opus-latest",
+		MaxTokens: 1024,
+		Thinking: &model.Thinking{
+			Type:         "enabled",
+			BudgetTokens: 1024,
+		},
+	}
+
+	_, err := ConvertRequest(c, request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_tokens must be greater than 1024")
+}
+
+func TestConvertRequest_ClearsMutuallyExclusiveParametersWhenThinkingEnabled(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-3-opus-latest",
+		MaxTokens: 4096,
+		Thinking: &model.Thinking{
+			Type:         "enabled",
+			BudgetTokens: 2048,
+		},
+		Temperature: float64Ptr(0.7),
+		TopP:        float64Ptr(0.5),
+		TopK:        intPtr(32),
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	assert.Nil(t, converted.Temperature, "temperature should be nil when thinking is enabled")
+	assert.Nil(t, converted.TopP, "top_p should be nil when thinking is enabled")
+	assert.Nil(t, converted.TopK, "top_k should be nil when thinking is enabled")
+}
+
+func TestConvertRequest_ClearsTopPWhenTemperatureSpecified(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:       "claude-3-opus-latest",
+		MaxTokens:   4096,
+		Temperature: float64Ptr(0.8),
+		TopP:        float64Ptr(0.6),
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	assert.Nil(t, converted.TopP, "top_p should be nil when temperature is provided")
+	if assert.NotNil(t, converted.Temperature) {
+		assert.InEpsilon(t, 0.8, *converted.Temperature, 1e-9)
+	}
+}
 
 func TestConvertRequest_EmptyAssistantMessageWithToolCalls(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -41,7 +140,7 @@ func TestConvertRequest_EmptyAssistantMessageWithToolCalls(t *testing.T) {
 					{
 						Id:   "call_123",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "get_weather",
 							Arguments: `{"location": "San Francisco"}`,
 						},
@@ -57,13 +156,13 @@ func TestConvertRequest_EmptyAssistantMessageWithToolCalls(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_weather",
 					Description: "Get weather information",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"location": map[string]interface{}{
+						"properties": map[string]any{
+							"location": map[string]any{
 								"type":        "string",
 								"description": "The location",
 							},
@@ -159,7 +258,7 @@ func TestConvertRequest_AssistantMessageWithTextAndToolCalls(t *testing.T) {
 					{
 						Id:   "call_123",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "get_weather",
 							Arguments: `{"location": "San Francisco"}`,
 						},
@@ -170,13 +269,13 @@ func TestConvertRequest_AssistantMessageWithTextAndToolCalls(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_weather",
 					Description: "Get weather information",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"location": map[string]interface{}{
+						"properties": map[string]any{
+							"location": map[string]any{
 								"type":        "string",
 								"description": "The location",
 							},
@@ -230,7 +329,7 @@ func TestConvertRequest_EmptyTextContent(t *testing.T) {
 		Messages: []model.Message{
 			{
 				Role: "user",
-				Content: []map[string]interface{}{
+				Content: []map[string]any{
 					{
 						"type": "text",
 						"text": "", // Empty text
@@ -270,7 +369,7 @@ func TestConvertRequest_ValidJSONGeneration(t *testing.T) {
 					{
 						Id:   "initial_datetime_call",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "get_current_datetime",
 							Arguments: "{}",
 						},
@@ -281,12 +380,12 @@ func TestConvertRequest_ValidJSONGeneration(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "get_current_datetime",
 					Description: "Get current date and time",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type":       "object",
-						"properties": map[string]interface{}{},
+						"properties": map[string]any{},
 					},
 				},
 			},
@@ -318,17 +417,17 @@ func TestConvertRequest_ValidJSONGeneration(t *testing.T) {
 	assert.Equal(t, "get_current_datetime", assistantMessage.Content[0].Name)
 
 	// Verify the JSON doesn't contain empty text fields
-	var jsonObj map[string]interface{}
+	var jsonObj map[string]any
 	err = json.Unmarshal(jsonData, &jsonObj)
 	require.NoError(t, err)
 
 	// Check that no message content has empty text type
-	messages := jsonObj["messages"].([]interface{})
+	messages := jsonObj["messages"].([]any)
 	for _, msg := range messages {
-		msgMap := msg.(map[string]interface{})
-		if content, ok := msgMap["content"].([]interface{}); ok {
+		msgMap := msg.(map[string]any)
+		if content, ok := msgMap["content"].([]any); ok {
 			for _, c := range content {
-				contentMap := c.(map[string]interface{})
+				contentMap := c.(map[string]any)
 				if contentMap["type"] == "text" {
 					// If it's a text type, it must have non-empty text
 					text, exists := contentMap["text"]
@@ -411,7 +510,7 @@ func TestConvertRequest_ThinkingBlocksConversion(t *testing.T) {
 					{
 						Id:   "toolu_01Aihmmh3xCfqxLmzCLdepNi",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "fileOperation",
 							Arguments: `{"operation": "read", "filePath": "vite.config.ts"}`,
 						},
@@ -427,17 +526,17 @@ func TestConvertRequest_ThinkingBlocksConversion(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "fileOperation",
 					Description: "Perform file operations",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"operation": map[string]interface{}{
+						"properties": map[string]any{
+							"operation": map[string]any{
 								"type": "string",
 								"enum": []string{"read", "write"},
 							},
-							"filePath": map[string]interface{}{
+							"filePath": map[string]any{
 								"type": "string",
 							},
 						},
@@ -498,12 +597,12 @@ func TestConvertRequest_ThinkingBlocksConversion(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the JSON structure is correct for Claude API
-	var jsonObj map[string]interface{}
+	var jsonObj map[string]any
 	err = json.Unmarshal(jsonData, &jsonObj)
 	require.NoError(t, err)
 
 	// Check that thinking is properly set
-	thinking := jsonObj["thinking"].(map[string]interface{})
+	thinking := jsonObj["thinking"].(map[string]any)
 	assert.Equal(t, "enabled", thinking["type"])
 	assert.Equal(t, float64(1024), thinking["budget_tokens"])
 }
@@ -554,7 +653,7 @@ func TestConvertRequest_ThinkingBlocksWithComplexContent(t *testing.T) {
 					{
 						Id:   "toolu_01Aihmmh3xCfqxLmzCLdepNi",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "fileOperation",
 							Arguments: `{"operation": "read", "filePath": "vite.config.ts"}`,
 						},
@@ -570,16 +669,16 @@ func TestConvertRequest_ThinkingBlocksWithComplexContent(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "fileOperation",
 					Description: "Perform file operations",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"operation": map[string]interface{}{
+						"properties": map[string]any{
+							"operation": map[string]any{
 								"type": "string",
 							},
-							"filePath": map[string]interface{}{
+							"filePath": map[string]any{
 								"type": "string",
 							},
 						},
@@ -638,7 +737,7 @@ func TestConvertRequest_ThinkingBlocksWithComplexContent(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify the JSON structure is correct for Claude API
-	var jsonObj map[string]interface{}
+	var jsonObj map[string]any
 	err = json.Unmarshal(jsonData, &jsonObj)
 	require.NoError(t, err)
 }
@@ -703,7 +802,7 @@ func TestConvertRequest_BackwardCompatibility_NoThinking(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify no thinking blocks are present in the JSON
-	var jsonObj map[string]interface{}
+	var jsonObj map[string]any
 	err = json.Unmarshal(jsonData, &jsonObj)
 	require.NoError(t, err)
 
@@ -747,17 +846,17 @@ func TestConvertRequest_BugScenario_FullWorkflow(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "fileOperation",
 					Description: "Perform file operations",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"operation": map[string]interface{}{
+						"properties": map[string]any{
+							"operation": map[string]any{
 								"type": "string",
 								"enum": []string{"read", "write"},
 							},
-							"filePath": map[string]interface{}{
+							"filePath": map[string]any{
 								"type": "string",
 							},
 						},
@@ -810,7 +909,7 @@ func TestConvertRequest_BugScenario_FullWorkflow(t *testing.T) {
 					{
 						Id:   "toolu_01Aihmmh3xCfqxLmzCLdepNi",
 						Type: "function",
-						Function: model.Function{
+						Function: &model.Function{
 							Name:      "fileOperation",
 							Arguments: `{"operation": "read", "filePath": "vite.config.ts"}`,
 						},
@@ -826,17 +925,17 @@ func TestConvertRequest_BugScenario_FullWorkflow(t *testing.T) {
 		Tools: []model.Tool{
 			{
 				Type: "function",
-				Function: model.Function{
+				Function: &model.Function{
 					Name:        "fileOperation",
 					Description: "Perform file operations",
-					Parameters: map[string]interface{}{
+					Parameters: map[string]any{
 						"type": "object",
-						"properties": map[string]interface{}{
-							"operation": map[string]interface{}{
+						"properties": map[string]any{
+							"operation": map[string]any{
 								"type": "string",
 								"enum": []string{"read", "write"},
 							},
-							"filePath": map[string]interface{}{
+							"filePath": map[string]any{
 								"type": "string",
 							},
 						},
@@ -897,18 +996,18 @@ func TestConvertRequest_BugScenario_FullWorkflow(t *testing.T) {
 
 	// This should not produce the error from the bug report:
 	// "messages.1.content.0.type: Expected `thinking` or `redacted_thinking`, but found `text`"
-	var jsonObj map[string]interface{}
+	var jsonObj map[string]any
 	err = json.Unmarshal(jsonData, &jsonObj)
 	require.NoError(t, err)
 
 	// Verify the messages structure is correct for Claude API
-	messages := jsonObj["messages"].([]interface{})
+	messages := jsonObj["messages"].([]any)
 	for _, msg := range messages {
-		msgMap := msg.(map[string]interface{})
+		msgMap := msg.(map[string]any)
 		if msgMap["role"] == "assistant" {
-			content := msgMap["content"].([]interface{})
+			content := msgMap["content"].([]any)
 			if len(content) > 0 {
-				firstContent := content[0].(map[string]interface{})
+				firstContent := content[0].(map[string]any)
 				// The first content block should be thinking when thinking is enabled
 				// and the message has reasoning content
 				if len(content) > 1 { // If there are multiple content blocks
@@ -969,4 +1068,23 @@ func TestConvertClaudeRequest_DirectPassthrough(t *testing.T) {
 	// The result should be the original request (though it won't be used for marshaling)
 	// Since the interface returns any, we just verify it's not nil and the flags are set correctly
 	assert.NotNil(t, result, "result should not be nil")
+}
+
+func TestConvertClaudeRequest_ClearsTopPWhenTemperatureProvided(t *testing.T) {
+	c := newThinkingContext(t, "/v1/messages")
+
+	claudeRequest := model.ClaudeRequest{
+		Model:       "claude-3.5-sonnet",
+		MaxTokens:   2048,
+		Messages:    []model.ClaudeMessage{{Role: "user", Content: "hello"}},
+		Temperature: float64Ptr(0.6),
+		TopP:        float64Ptr(0.5),
+	}
+
+	converted, err := ConvertClaudeRequest(c, claudeRequest)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	assert.NotNil(t, converted.Temperature, "temperature should be preserved")
+	assert.Nil(t, converted.TopP, "top_p should be cleared when temperature is provided")
 }

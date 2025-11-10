@@ -41,10 +41,13 @@
       - [Key Functions](#key-functions-2)
     - [Post-consumption Phase](#post-consumption-phase)
       - [Key Functions](#key-functions-3)
+    - [Provisional Request Cost Reconciliation (2025-09)](#provisional-request-cost-reconciliation-2025-09)
+    - [Streaming Incremental Billing (2025-09)](#streaming-incremental-billing-2025-09)
     - [Quota Calculation](#quota-calculation)
       - [Text Requests](#text-requests)
       - [Audio Requests](#audio-requests)
       - [Image Requests](#image-requests)
+    - [Universal Two-Step Image Billing (2025-08)](#universal-two-step-image-billing-2025-08)
   - [Database Schema](#database-schema)
     - [Core Tables](#core-tables)
       - [Users Table](#users-table)
@@ -60,6 +63,7 @@
       - [Get Channel Pricing](#get-channel-pricing)
       - [Update Channel Pricing](#update-channel-pricing)
       - [Get Default Pricing](#get-default-pricing)
+  - [Testing \& Race Condition Policy (2025-08)](#testing--race-condition-policy-2025-08)
     - [Token Management Endpoints](#token-management-endpoints)
   - [Recent Pricing Implementation Improvements](#recent-pricing-implementation-improvements)
     - [Comprehensive Adapter Pricing Implementation](#comprehensive-adapter-pricing-implementation)
@@ -76,6 +80,7 @@
       - [What Was Preserved](#what-was-preserved)
       - [Benefits Achieved](#benefits-achieved)
   - [Implementation Details](#implementation-details)
+    - [Current Implementation Status](#current-implementation-status)
     - [Four-Layer Pricing Resolution](#four-layer-pricing-resolution)
       - [Legacy Compatibility](#legacy-compatibility)
     - [Batch Processing](#batch-processing)
@@ -86,7 +91,7 @@
       - [Quota Refund Mechanism](#quota-refund-mechanism)
       - [Key Files](#key-files-4)
     - [Structured Output Pricing](#structured-output-pricing)
-      - [Key Files](#key-files-5)
+      - [Key Notes](#key-notes)
   - [Performance Considerations](#performance-considerations)
     - [Caching Strategy](#caching-strategy-1)
     - [Database Optimization](#database-optimization)
@@ -94,6 +99,12 @@
     - [Monitoring and Metrics](#monitoring-and-metrics)
       - [Key Metrics](#key-metrics)
       - [Monitoring Files](#monitoring-files)
+  - [Unbilled Request Logging System](#unbilled-request-logging-system)
+    - [Logging Overview](#logging-overview)
+    - [Implementation](#implementation)
+    - [Log Levels and Keywords](#log-levels-and-keywords)
+    - [Coverage Analysis](#coverage-analysis)
+    - [Key Files](#key-files-5)
   - [Summary](#summary)
 
 ## Overview
@@ -270,62 +281,41 @@ graph TD
 
 ### 3. Adapter System
 
-Each channel adapter implements its own comprehensive pricing logic. As of the latest implementation, 25+ major adapters have native pricing support:
+All channel adapters now use a unified, centralized pricing logic. As of July 2025, 25+ major adapters import and use a shared `ModelRatios` constant from their respective `constants.go` or subadaptor, eliminating local, hardcoded pricing maps and ensuring consistency across the system. **All pricing, quota, and billing calculations are standardized to use "per 1M tokens" (1 million tokens) as the pricing unit. All user-facing documentation and UI must use this unit.**
 
-```mermaid
-classDiagram
-    class Adaptor {
-        <<interface>>
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
+**All adapters must use the shared `ModelRatios` map as the single source of truth for model pricing. Local pricing maps are deprecated.**
 
-    class DefaultPricingMethods {
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
+For unknown models, all adapters use a unified fallback (e.g., `5 * ratio.MilliTokensUsd`). This ensures that even if a model is missing from the shared map, it will still be billed with a reasonable default. VertexAI pricing is aggregated from all subadapters (Claude, Imagen, Gemini, Veo) and includes VertexAI-specific models. Any omission in a subadapter will propagate to VertexAI.
 
-    class OpenAIAdaptor {
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
+Model lists are always derived from the keys of the shared pricing maps, ensuring pricing and support are always in sync.
 
-    class AnthropicAdaptor {
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
+**Key interface:**
 
-    class AliAdaptor {
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
-
-    class GeminiAdaptor {
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
-
-    class ReplicateAdaptor {
-        +GetDefaultModelPricing() map[string]ModelConfig
-        +GetModelRatio(modelName string) float64
-        +GetCompletionRatio(modelName string) float64
-    }
-
-    Adaptor <|-- DefaultPricingMethods
-    Adaptor <|-- OpenAIAdaptor
-    Adaptor <|-- AnthropicAdaptor
-    Adaptor <|-- AliAdaptor
-    Adaptor <|-- GeminiAdaptor
-    Adaptor <|-- ReplicateAdaptor
-
-    note for Adaptor "25+ adapters with native pricing:\n• OpenAI (84 models)\n• Anthropic (15 models)\n• Zhipu (23 models)\n• Ali (89 models)\n• Baidu (16 models)\n• Tencent (6 models)\n• Gemini (26 models)\n• Xunfei (6 models)\n• VertexAI (34 models)\n• DeepSeek (2 models)\n• Groq (20+ models)\n• Mistral (10+ models)\n• Moonshot (3 models)\n• Cohere (12 models)\n• AI360 (4 models)\n• Doubao (20+ models)\n• Novita (40+ models)\n• OpenRouter (100+ models)\n• Replicate (48 models)\n• AWS (31 models)\n• StepFun (3 models)\n• LingYi WanWu (3 models)\n• Minimax (3 models)\n• Baichuan (2 models)\n• TogetherAI (40+ models)\n• SiliconFlow (30+ models)"
+```go
+type Adaptor interface {
+    GetDefaultModelPricing() map[string]ModelConfig
+    GetModelRatio(modelName string) float64
+    GetCompletionRatio(modelName string) float64
+}
 ```
+
+**Implementation details:**
+
+- Each adapter's `GetDefaultModelPricing()` returns the shared `ModelRatios` map, which is the single source of truth for model pricing.
+- Model lists are always derived from the keys of the shared pricing maps, ensuring pricing and support are always in sync.
+- All adapters use a unified fallback (e.g., `5 * ratio.MilliTokensUsd`) for unknown models.
+- VertexAI pricing is aggregated from all subadaptors (Claude, Imagen, Gemini, Veo) and includes VertexAI-specific models. Any omission in a subadaptor will propagate to VertexAI.
+- All pricing, quota, and billing calculations are standardized to use "per 1M tokens" (1 million tokens) instead of "per 1K tokens". This is reflected in all code, comments, and documentation. Double-check all user-facing messages and documentation for consistency.
+
+**Adapters with Native Pricing (25+ total):**
+
+- OpenAI, Anthropic, Zhipu, Ali (Alibaba), Baidu, Tencent, Gemini, Xunfei, VertexAI, DeepSeek, Groq, Mistral, Moonshot, Cohere, AI360, Doubao, Novita, OpenRouter, Replicate, AWS, StepFun, LingYi WanWu, Minimax, Baichuan, TogetherAI, SiliconFlow, XAI
+
+**Adapters using DefaultPricingMethods (fallback only):**
+
+- Ollama, Coze, DeepL
+
+All adapters now follow the same four-layer pricing system and fallback logic, with no local pricing map drift.
 
 #### Adapter Pricing Implementation Status
 
@@ -454,12 +444,9 @@ This four-layer approach ensures that custom channels with common models can aut
 // Currency and token conversion constants
 const (
     QuotaPerUsd     = 500000 // $1 = 500,000 quota
+    ExchangeRateRmb  = 8
     MilliTokensUsd  = 0.5    // 0.5 quota per milli-token (0.000001 USD * 500000)
-    ImageUsdPerPic  = 1000   // 1000 quota per image (0.002 USD * 500000)
-    MilliTokensRmb  = 3.5    // 3.5 quota per milli-token (0.000007 RMB * 500000)
-    ImageRmbPerPic  = 7000   // 7000 quota per image (0.014 RMB * 500000)
-    MilliTokensYuan = 3.5    // 3.5 quota per milli-token (0.000007 Yuan * 500000)
-    ImageYuanPerPic = 7000   // 7000 quota per image (0.014 Yuan * 500000)
+    MilliTokensRmb  = MilliTokensUsd / ExchangeRateRmb
     TokensPerSec    = 10     // Video tokens per second for video generation models
 )
 ```
@@ -468,8 +455,15 @@ const (
 
 ```go
 type ModelConfig struct {
-    Ratio           float64 `json:"ratio"`
-    CompletionRatio float64 `json:"completion_ratio,omitempty"`
+    Ratio             float64 `json:"ratio"`
+    CompletionRatio   float64 `json:"completion_ratio,omitempty"`
+    // For image models: explicit USD price per generated image.
+    ImagePriceUsd     float64 `json:"image_price_usd,omitempty"`
+    // Cached reads (cache hit/refresh)
+    CachedInputRatio  float64 `json:"cached_input_ratio,omitempty"`
+    // Cache writes (cache creation)
+    CacheWrite5mRatio float64 `json:"cache_write_5m_ratio,omitempty"`
+    CacheWrite1hRatio float64 `json:"cache_write_1h_ratio,omitempty"`
 }
 ```
 
@@ -604,15 +598,73 @@ After request completion, final billing is calculated:
 - `PostConsumeQuota()` in `relay/billing/billing.go`
 - Usage logging and metrics recording
 
+### Provisional Request Cost Reconciliation (2025-09)
+
+To prevent lost billing in early client disconnect scenarios, controllers now record a provisional per-request cost at dispatch and reconcile to the final cost when usage becomes available.
+
+Flow:
+
+1) After `DoRequest` succeeds, write a provisional `UserRequestCost` for the `request_id` using the estimated pre-consumed quota (prompt tokens + max output tokens × pricing), even if physical pre-consume is skipped for trusted users/tokens.
+2) If upstream responds with a non-success HTTP status, refund pre-consumed quota (if any) and set the provisional `UserRequestCost` to `0`.
+3) When usage arrives, compute the final quota using the detailed pricing formula and reconcile the record by overwriting the provisional value. Token/user/channel updates use the delta between pre- and post-consumption.
+
+Controllers:
+
+- Text/Chat (`relay/controller/text.go`)
+- Response API (`relay/controller/response.go`)
+- Claude Messages (`relay/controller/claude_messages.go`)
+- Images (`relay/controller/image.go`) — per-image pre-consume + usage override (e.g., `gpt-image-1`)
+- Audio (`relay/controller/audio.go`)
+
+Helper:
+
+- `model.UpdateUserRequestCostQuotaByRequestID(userID, requestID, quota)` creates or updates the `user_request_costs` row keyed by `request_id`.
+
+### Streaming Incremental Billing (2025-09)
+
+- Streaming controllers for chat/text responses now charge completion usage in near real time while the upstream connection is still open. Instead of waiting for the final chunk, the billing subsystem flushes usage every few seconds.
+- The default flush cadence is **3 seconds** and can be tuned with the `STREAMING_BILLING_INTERVAL` environment variable (value in seconds).
+- If an incremental flush detects that the user no longer has sufficient quota, the stream is cut off immediately and an SSE error frame is emitted to the caller before the upstream sends additional tokens.
+- Final reconciliation subtracts the pre-consumed reservation and the already-charged incremental amount to avoid double billing and ensures the `usage` record remains authoritative.
+
 ### Quota Calculation
 
 Different request types use different calculation methods:
 
 #### Text Requests
 
+Base formula (no caching):
+
 ```
 quota = (prompt_tokens + completion_tokens * completion_ratio) * model_ratio * group_ratio
 ```
+
+Claude prompt caching extends billing with cache-read and cache-write costs. We split prompt tokens into: normal input, cached-read input, and cache-write input (5m and 1h). Completion tokens may also be cached by some providers.
+
+```
+normal_input = prompt_tokens - cached_read - cache_write_5m - cache_write_1h
+
+quota =
+    normal_input        * input_price
++ cached_read         * cached_input_price
++ noncached_completion* output_price
+    # Note: we do not bill cached completion tokens. Providers do not return cached completion metrics and there is no CachedOutputRatio.
++ cache_write_5m      * write5m_price
++ cache_write_1h      * write1h_price
+
+where:
+    input_price           = model_ratio * group_ratio
+    output_price          = model_ratio * completion_ratio * group_ratio
+    cached_input_price    = (CachedInputRatio if >0 else input_price) or 0 if <0
+    # No cached output price; completions are always billed at output_price
+    write5m_price         = (CacheWrite5mRatio if >0 else input_price) or 0 if <0
+    write1h_price         = (CacheWrite1hRatio if >0 else input_price) or 0 if <0
+```
+
+Notes:
+
+- We prevent double-charging by subtracting cache-write tokens from the normal-input bucket; values are clamped to avoid negatives if upstream reports inconsistent totals.
+- For Anthropic Claude, cached-read tokens come from `usage.cache_read_input_tokens`. Cache-write tokens come from `usage.cache_creation.ephemeral_5m_input_tokens` and `usage.cache_creation.ephemeral_1h_input_tokens` (or the legacy `cache_creation_input_tokens`). See `docs/refs/claude_prompt_caching.md`.
 
 #### Audio Requests
 
@@ -622,9 +674,62 @@ quota = audio_duration_seconds * audio_tokens_per_second * model_ratio * group_r
 
 #### Image Requests
 
-```
-quota = image_count * image_cost_per_pic * model_ratio * group_ratio
-```
+### Universal Two-Step Image Billing (2025-08)
+
+The billing system now implements a universal, robust two-step billing process for all image-centric models (e.g., DALL·E 2/3, gpt-image-1):
+
+**1. Pre-consume:**
+
+- Before sending the request, the system pre-consumes quota based on a fixed per-image price (`ImagePriceUsd`), multiplied by the appropriate size/quality tier and group ratio.
+- This ensures quota is reserved up front, even if usage data is missing later.
+- Example: For gpt-image-1, the base price for 1024x1024/low is $0.011; higher qualities and sizes use tier multipliers (see `ratio.ImageTierTables`).
+
+**2. Post-consume (Reconciliation):**
+
+- After the request, if the provider returns detailed usage metrics (token buckets), the system recomputes the quota using the most accurate, token-based formula for that model.
+- For gpt-image-1, the formula is:
+
+  - Input text tokens: $5 per 1M tokens
+  - Cached input text tokens: $1.25 per 1M tokens
+  - Input image tokens: $10 per 1M tokens
+  - Cached input image tokens: $2.5 per 1M tokens
+  - Output image tokens: $40 per 1M tokens
+  - Cached tokens are apportioned between text/image proportionally.
+  - The group ratio is applied as a final multiplier.
+
+- If usage data is missing or unreliable, the system falls back to the pre-consumed per-image price.
+
+**3. Fallback and Extensibility:**
+
+- This two-step process is universal for all image models with per-image pricing. As more models publish token-bucket rates, they can be added to the usage reconciliation logic.
+- The system is designed to always use usage-derived costs when available, ensuring fairness and accuracy.
+
+**4. Channel/Admin Overrides:**
+
+- Channel-specific overrides for image tiers and per-image pricing are supported and merged with adapter and global defaults.
+
+**5. Logging and Quota Management:**
+
+- All quota operations (pre-consume, post-consume, refund) are logged with clear context, and quota is always refunded if the request fails.
+
+**6. Example (gpt-image-1):**
+
+- Pre-consume: For a 1024x1024/high image, pre-consume $0.167 × group ratio × quota-per-USD.
+- Post-consume: If usage is returned, recompute using the five-bucket formula above and override the pre-charge.
+
+**7. Implementation References:**
+
+- Controller logic: `relay/controller/image.go` (see `RelayImageHelper`, `computeImageUsageQuota`, `computeGptImage1TokenQuota`)
+- Pricing constants: `relay/adaptor/openai/constants.go`, `relay/billing/ratio/image.go`
+- Tier tables: `ratio.ImageTierTables`
+
+**8. Tests:**
+
+- All changes are covered by unit tests and must pass `go test -race ./...` before merge.
+
+**Summary:**
+
+- The system now guarantees that image requests are always billed fairly: usage-derived token costs take priority, with a safe fallback to per-image pricing. This is universal for all image models and extensible to new models as they publish token-bucket rates.
 
 ## Database Schema
 
@@ -683,10 +788,17 @@ CREATE TABLE logs (
     model_name VARCHAR(255),
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
+    cached_prompt_tokens INTEGER,         -- Persisted cached prompt tokens (2025-08)
     quota INTEGER,
+    metadata TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+**Note:**
+
+- The backend log API returns `cached_prompt_tokens` for each log entry. The frontend shows cached prompt tokens as a tooltip in the Prompt column.
+- Provider-specific attributes such as Claude cache-write token counts are serialized into the `metadata` text column as JSON (e.g., `{ "cache_write_tokens": { "ephemeral_5m": 123 } }`).
 
 ### Relationships
 
@@ -800,10 +912,22 @@ GET /api/channel/default-pricing?type=:channelType
   "message": "",
   "data": {
     "model_ratio": "{\"model1\": 0.001, \"model2\": 0.002}",
-    "completion_ratio": "{\"model1\": 1.0, \"model2\": 3.0}"
+    "completion_ratio": "{\"model1\": 1.0, \"model2\": 3.0}",
+    "cached_prompt_tokens": 123 // (in log API responses)
   }
 }
 ```
+
+**Frontend:**
+
+- The logs table displays these cached token fields as tooltips in the Prompt/Completion columns for each log entry.
+
+## Testing & Race Condition Policy (2025-08)
+
+- All changes must pass `go test -race ./...` before merge. Any test that fails due to argument mismatch, floating-point precision, or race must be fixed immediately.
+- For floating-point comparisons in tests, always use a tolerance (epsilon) instead of strict equality to avoid failures due to precision errors.
+- If a function signature changes (e.g., new arguments to billing functions), update all test calls accordingly. Use zero or default values for new arguments in legacy/compatibility tests.
+- Some tests (e.g., migration, timestamp, or error recovery tests) are intentionally designed to fail or log errors to verify error handling. These include tests for invalid JSON, duplicate keys, or constraint violations. These edge-case tests should not be removed, but failures in these tests do not indicate a problem with business logic. Only address these if the test intent changes or if they block CI/CD pipelines.
 
 **Key Implementation Details**:
 
@@ -889,9 +1013,9 @@ for model, price := range defaultPricing {
 
 **Ali (Alibaba Cloud)**: 89 models
 
-- Qwen models: ¥0.0003-¥0.0024 per 1K tokens
-- DeepSeek models: ¥0.0001-¥0.008 per 1K tokens
-- Embedding models: ¥0.00005 per 1K tokens
+- Qwen models: ¥0.3-¥2.4 per 1M tokens
+- DeepSeek models: ¥0.1-¥8 per 1M tokens
+- Embedding models: ¥0.05 per 1M tokens
 
 **AWS Bedrock**: 31 models
 
@@ -1161,18 +1285,11 @@ func ReturnPreConsumedQuota(ctx context.Context, quota int64, tokenId int) {
 
 ### Structured Output Pricing
 
-Special handling for structured output requests with additional cost multipliers:
+Structured outputs have no additional surcharge. Only token usage is billed.
 
-```go
-// Apply 25% additional cost for structured output
-structuredOutputCost := int64(math.Ceil(float64(completionTokens) * 0.25 * modelRatio))
-usage.ToolsCost += structuredOutputCost
-```
+#### Key Notes
 
-#### Key Files
-
-- `relay/adaptor/openai/adaptor.go` - Structured output cost calculation
-- Test files: `relay/adaptor/openai/structured_output_*_test.go`
+- OpenAI and Anthropic docs do not indicate any surcharge for structured outputs.
 
 ## Performance Considerations
 
@@ -1210,6 +1327,105 @@ The system includes comprehensive monitoring:
 - `common/metrics/` - Metrics collection
 - Monitoring integration in controller files
 
+## Unbilled Request Logging System
+
+### Logging Overview
+
+The system implements comprehensive error logging to ensure that any requests sent to upstream adaptors/channels that haven't been properly billed are logged as ERROR. This is critical for:
+
+1. **Revenue Protection**: Detecting requests that were processed but not billed
+2. **System Integrity**: Ensuring billing operations complete successfully
+3. **Audit Trail**: Maintaining comprehensive logs for financial tracking
+4. **Debugging**: Identifying billing system failures
+
+### Implementation
+
+The unbilled request logging system operates at multiple levels:
+
+```mermaid
+graph TD
+    subgraph "Request Flow with Logging"
+        REQ[Request] --> LOG1[Log Upstream Request]
+        LOG1 --> UPSTREAM[Send to Upstream]
+        UPSTREAM --> SUCCESS{Success?}
+        SUCCESS -->|Yes| BILL[Billing Operations]
+        SUCCESS -->|No| ERROR1[Log Failed Request ERROR]
+        BILL --> BILL_SUCCESS{Billing Success?}
+        BILL_SUCCESS -->|Yes| COMPLETE[Complete]
+        BILL_SUCCESS -->|No| ERROR2[Log Billing Failure CRITICAL]
+    end
+
+    style LOG1 fill:#e3f2fd
+    style ERROR1 fill:#ffebee
+    style ERROR2 fill:#ffcdd2
+```
+
+**Key Implementation Areas**:
+
+1. **Upstream Request Tracking**: All requests to upstream channels are logged at INFO level
+2. **Failed Request Logging**: Failed upstream requests are logged as ERROR
+3. **Critical Billing Failures**: Billing operation failures are logged as CRITICAL
+4. **Database Operation Failures**: Database update failures are logged as CRITICAL
+
+### Log Levels and Keywords
+
+**INFO Level - Request Tracking**:
+
+- `"sending request to upstream channel"` - Normal upstream request tracking
+- `"sending audio request to upstream channel"` - Audio request tracking
+
+**ERROR Level - Request Failures**:
+
+- `"upstream request failed - potential unbilled request"` - Failed upstream requests
+- `"upstream audio request failed - potential unbilled request"` - Failed audio requests
+
+**CRITICAL Level - Billing Failures**:
+
+- `"CRITICAL: upstream request was sent but billing failed - unbilled request detected"`
+- `"CRITICAL: upstream request was sent but user quota cache update failed"`
+- `"CRITICAL: failed to record billing log - upstream request sent but not logged"`
+- `"CRITICAL: failed to update user used quota and request count - upstream request sent but user quota not updated"`
+- `"CRITICAL: failed to update channel used quota - upstream request sent but channel quota not updated"`
+- `"CRITICAL: failed to return pre-consumed quota - potential double billing"`
+
+### Coverage Analysis
+
+**✅ Fully Covered Relay Helpers**:
+
+1. **RelayTextHelper** - Complete billing with comprehensive error logging
+2. **RelayImageHelper** - Complete billing with comprehensive error logging
+3. **RelayAudioHelper** - Complete billing with comprehensive error logging
+4. **RelayResponseAPIHelper** - Complete billing with comprehensive error logging
+5. **RelayClaudeMessagesHelper** - Complete billing with comprehensive error logging
+6. **RelayProxyHelper** - Intentionally logs with 0 quota (free proxy requests)
+
+**🔍 Error Scenarios Covered**:
+
+1. **Upstream Request Failures**: All DoRequest failures are logged as ERROR
+2. **Billing Database Failures**: PostConsumeTokenQuota failures are logged as CRITICAL
+3. **Cache Update Failures**: User quota cache update failures are logged as CRITICAL
+4. **Log Recording Failures**: Billing log recording failures are logged as CRITICAL
+5. **User Quota Update Failures**: User quota database update failures are logged as CRITICAL
+6. **Channel Quota Update Failures**: Channel quota database update failures are logged as CRITICAL
+7. **Quota Refund Failures**: Pre-consumed quota refund failures are logged as CRITICAL
+
+### Key Files
+
+**Core Implementation Files**:
+
+- `relay/adaptor/common.go` - Upstream request logging and failed request error logging
+- `relay/controller/audio.go` - Audio API direct request logging
+- `relay/billing/billing.go` - Critical billing operation error logging
+- `model/log.go` - Billing log recording failure logging
+- `model/user.go` - User quota update failure logging
+- `model/channel.go` - Channel quota update failure logging
+
+**Monitoring Integration**:
+
+- All error logs include structured data (zap fields) for easy monitoring and alerting
+- CRITICAL level logs are designed for immediate alerting and investigation
+- Complete request context is preserved in all log entries
+
 ## Summary
 
 The One-API billing system has evolved into a sophisticated, multi-layered pricing and quota management system that provides:
@@ -1220,5 +1436,6 @@ The One-API billing system has evolved into a sophisticated, multi-layered prici
 **✅ High Performance**: Caching, batch processing, and optimized database operations
 **✅ Legacy Compatibility**: Smooth migration path from old centralized pricing system
 **✅ Real-time Billing**: Pre-consumption and post-consumption quota management with refund capabilities
+**✅ Comprehensive Error Logging**: Complete visibility into unbilled requests with structured logging and monitoring integration
 
 The system successfully migrated from a centralized model ratio approach to a distributed adapter-based pricing system while maintaining full backward compatibility and adding comprehensive global pricing fallback capabilities.

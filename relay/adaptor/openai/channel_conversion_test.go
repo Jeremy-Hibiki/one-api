@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
@@ -55,7 +57,12 @@ func TestChannelSpecificConversion(t *testing.T) {
 				RequestURLPath: "/v1/chat/completions",
 				BaseURL:        "https://api.openai.com",
 			}
-			c.Set("meta", testMeta)
+			testMeta.ActualModelName = chatRequest.Model
+			// Azure requires a deployment/model name in the URL; set a dummy one for the test
+			if tc.channelType == channeltype.Azure {
+				testMeta.ActualModelName = "gpt-4o-mini"
+			}
+			c.Set(ctxkey.Meta, testMeta)
 
 			// Create adaptor
 			adaptor := &Adaptor{}
@@ -87,7 +94,7 @@ func TestChannelSpecificConversion(t *testing.T) {
 				if !isResponseAPI {
 					t.Errorf("Expected request conversion for %s but request was not converted", tc.name)
 				}
-				t.Logf("✓ %s: Correctly converted to Response API", tc.name)
+				t.Logf("✓ %s: Converted to Response API", tc.name)
 			} else {
 				if urlConverted {
 					t.Errorf("Did not expect URL conversion for %s but got: %s", tc.name, url)
@@ -95,7 +102,7 @@ func TestChannelSpecificConversion(t *testing.T) {
 				if isResponseAPI {
 					t.Errorf("Did not expect request conversion for %s but request was converted", tc.name)
 				}
-				t.Logf("✓ %s: Correctly kept as ChatCompletion API", tc.name)
+				t.Logf("✓ %s: Kept as native ChatCompletion payload", tc.name)
 			}
 		})
 	}
@@ -110,12 +117,11 @@ func TestModelSpecificConversion(t *testing.T) {
 		expectConversion bool
 		name             string
 	}{
-		{"gpt-4", true, "GPT-4 should be converted"},
-		{"gpt-4o", true, "GPT-4o should be converted"},
-		{"gpt-3.5-turbo", true, "GPT-3.5-turbo should be converted"},
-		{"o1-preview", true, "o1-preview should be converted"},
-		// Add future models that only support ChatCompletion here
-		// {"legacy-model", false, "Legacy model should not be converted"},
+		{"gpt-4", true, "GPT-4 should convert"},
+		{"gpt-4o", true, "GPT-4o should convert"},
+		{"gpt-3.5-turbo", true, "GPT-3.5-turbo should convert"},
+		{"o1-preview", true, "o1-preview should convert"},
+		{"gpt-4-search-2024-12-20", false, "Search model should stay ChatCompletion"},
 	}
 
 	for _, tc := range testCases {
@@ -141,7 +147,8 @@ func TestModelSpecificConversion(t *testing.T) {
 				RequestURLPath: "/v1/chat/completions",
 				BaseURL:        "https://api.openai.com",
 			}
-			c.Set("meta", testMeta)
+			testMeta.ActualModelName = tc.model
+			c.Set(ctxkey.Meta, testMeta)
 
 			// Create adaptor
 			adaptor := &Adaptor{}
@@ -153,21 +160,58 @@ func TestModelSpecificConversion(t *testing.T) {
 				t.Fatalf("ConvertRequest failed: %v", err)
 			}
 
-			// Check if request was converted to ResponseAPIRequest
 			_, isResponseAPI := convertedReq.(*ResponseAPIRequest)
 
-			// Verify expectations
 			if tc.expectConversion {
 				if !isResponseAPI {
 					t.Errorf("Expected request conversion for model %s but request was not converted", tc.model)
 				}
-				t.Logf("✓ Model %s: Correctly converted to Response API", tc.model)
+				t.Logf("✓ Model %s: Converted to Response API", tc.model)
 			} else {
 				if isResponseAPI {
 					t.Errorf("Did not expect request conversion for model %s but request was converted", tc.model)
 				}
-				t.Logf("✓ Model %s: Correctly kept as ChatCompletion API", tc.model)
+				t.Logf("✓ Model %s: Kept as ChatCompletion payload", tc.model)
 			}
 		})
 	}
+}
+
+func TestAzureGPT5ConversionToResponseAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chatRequest := &model.GeneralOpenAIRequest{
+		Model: "gpt-5-mini",
+		Messages: []model.Message{
+			{Role: "user", Content: "Hi"},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = &http.Request{}
+
+	azureMeta := &meta.Meta{
+		Mode:            relaymode.ChatCompletions,
+		ChannelType:     channeltype.Azure,
+		BaseURL:         "https://example.azure.com",
+		RequestURLPath:  "/v1/chat/completions",
+		ActualModelName: chatRequest.Model,
+	}
+	c.Set(ctxkey.Meta, azureMeta)
+
+	adaptor := &Adaptor{}
+	adaptor.Init(azureMeta)
+
+	converted, err := adaptor.ConvertRequest(c, relaymode.ChatCompletions, chatRequest)
+	require.NoError(t, err)
+	require.IsType(t, &ResponseAPIRequest{}, converted)
+
+	url, urlErr := adaptor.GetRequestURL(azureMeta)
+	require.NoError(t, urlErr)
+	require.Contains(t, url, "/openai/v1/responses?api-version=v1")
+
+	stored, ok := c.Get(ctxkey.ConvertedRequest)
+	require.True(t, ok)
+	require.IsType(t, &ResponseAPIRequest{}, stored)
 }

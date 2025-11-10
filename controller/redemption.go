@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,12 +14,23 @@ import (
 	"github.com/songquanpeng/one-api/model"
 )
 
+// GetAllRedemptions lists redemption codes with pagination.
 func GetAllRedemptions(c *gin.Context) {
 	p, _ := strconv.Atoi(c.Query("p"))
 	if p < 0 {
 		p = 0
 	}
-	redemptions, err := model.GetAllRedemptions(p*config.MaxItemsPerPage, config.MaxItemsPerPage)
+
+	// Get page size from query parameter, default to config value
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+
+	redemptions, err := model.GetAllRedemptions(p*size, size)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -26,17 +38,45 @@ func GetAllRedemptions(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get total count for pagination
+	totalCount, err := model.GetRedemptionCount()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data":    redemptions,
+		"total":   totalCount,
 	})
-	return
 }
 
+// SearchRedemptions performs a keyword search for redemption codes and returns paginated results.
 func SearchRedemptions(c *gin.Context) {
 	keyword := c.Query("keyword")
-	redemptions, err := model.SearchRedemptions(keyword)
+	p, _ := strconv.Atoi(c.Query("p"))
+	if p < 0 {
+		p = 0
+	}
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+	sortBy := c.Query("sort")
+	sortOrder := c.Query("order")
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+	redemptions, total, err := model.SearchRedemptions(keyword, p*size, size, sortBy, sortOrder)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -48,10 +88,11 @@ func SearchRedemptions(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    redemptions,
+		"total":   total,
 	})
-	return
 }
 
+// GetRedemption fetches a single redemption code by its identifier.
 func GetRedemption(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -74,9 +115,9 @@ func GetRedemption(c *gin.Context) {
 		"message": "",
 		"data":    redemption,
 	})
-	return
 }
 
+// AddRedemption creates one or more redemption codes based on the supplied payload.
 func AddRedemption(c *gin.Context) {
 	redemption := model.Redemption{}
 	err := c.ShouldBindJSON(&redemption)
@@ -85,6 +126,10 @@ func AddRedemption(c *gin.Context) {
 			"success": false,
 			"message": err.Error(),
 		})
+		return
+	}
+	if strings.TrimSpace(redemption.Name) == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Redemption name is required"})
 		return
 	}
 	if len(redemption.Name) == 0 || len(redemption.Name) > 20 {
@@ -134,9 +179,9 @@ func AddRedemption(c *gin.Context) {
 		"message": "",
 		"data":    keys,
 	})
-	return
 }
 
+// DeleteRedemption removes a redemption code by ID.
 func DeleteRedemption(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	err := model.DeleteRedemptionById(id)
@@ -151,9 +196,9 @@ func DeleteRedemption(c *gin.Context) {
 		"success": true,
 		"message": "",
 	})
-	return
 }
 
+// UpdateRedemption modifies redemption metadata or status depending on the request.
 func UpdateRedemption(c *gin.Context) {
 	statusOnly := c.Query("status_only")
 	redemption := model.Redemption{}
@@ -177,6 +222,10 @@ func UpdateRedemption(c *gin.Context) {
 		cleanRedemption.Status = redemption.Status
 	} else {
 		// If you add more fields, please also update redemption.Update()
+		if strings.TrimSpace(redemption.Name) == "" {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "Redemption name cannot be empty"})
+			return
+		}
 		cleanRedemption.Name = redemption.Name
 		cleanRedemption.Quota = redemption.Quota
 	}
@@ -193,5 +242,4 @@ func UpdateRedemption(c *gin.Context) {
 		"message": "",
 		"data":    cleanRedemption,
 	})
-	return
 }

@@ -7,7 +7,241 @@
 Responses
 OpenAI's most advanced interface for generating model responses. Supports text and image inputs, and text outputs. Create stateful interactions with the model, using the output of previous responses as input. Extend the model's capabilities with built-in tools for file search, web search, computer use, and more. Allow the model access to external systems and data using function calling.
 
-# Text generation and prompting
+### References
+
+https://api.openai.com/v1/responses
+Creates a model response. Provide text or image inputs to generate text or JSON outputs. Have the model call your own custom code or use built-in tools like web search or file search to use your own data as input for the model's response.
+
+Request body
+background
+boolean
+
+Optional
+Defaults to false
+Whether to run the model response in the background. Learn more.
+
+conversation
+string or object
+
+Optional
+Defaults to null
+The conversation that this response belongs to. Items from this conversation are prepended to input_items for this response request. Input items and output items from this response are automatically added to this conversation after this response completes.
+
+Show possible types
+include
+array
+
+Optional
+Specify additional output data to include in the model response. Currently supported values are:
+
+web_search_call.action.sources: Include the sources of the web search tool call.
+code_interpreter_call.outputs: Includes the outputs of python code execution in code interpreter tool call items.
+computer_call_output.output.image_url: Include image urls from the computer call output.
+file_search_call.results: Include the search results of the file search tool call.
+message.input_image.image_url: Include image urls from the input message.
+message.output_text.logprobs: Include logprobs with assistant messages.
+reasoning.encrypted_content: Includes an encrypted version of reasoning tokens in reasoning item outputs. This enables reasoning items to be used in multi-turn conversations when using the Responses API statelessly (like when the store parameter is set to false, or when an organization is enrolled in the zero data retention program).
+input
+string or array
+
+Optional
+Text, image, or file inputs to the model, used to generate a response.
+
+Learn more:
+
+Text inputs and outputs
+Image inputs
+File inputs
+Conversation state
+Function calling
+
+Show possible types
+instructions
+string
+
+Optional
+A system (or developer) message inserted into the model's context.
+
+When using along with previous_response_id, the instructions from a previous response will not be carried over to the next response. This makes it simple to swap out system (or developer) messages in new responses.
+
+max_output_tokens
+integer
+
+Optional
+An upper bound for the number of tokens that can be generated for a response, including visible output tokens and reasoning tokens.
+
+max_tool_calls
+integer
+
+Optional
+The maximum number of total calls to built-in tools that can be processed in a response. This maximum number applies across all built-in tool calls, not per individual tool. Any further attempts to call a tool by the model will be ignored.
+
+metadata
+map
+
+Optional
+Set of 16 key-value pairs that can be attached to an object. This can be useful for storing additional information about the object in a structured format, and querying for objects via API or the dashboard.
+
+Keys are strings with a maximum length of 64 characters. Values are strings with a maximum length of 512 characters.
+
+model
+string
+
+Optional
+Model ID used to generate the response, like gpt-4o or o3. OpenAI offers a wide range of models with different capabilities, performance characteristics, and price points. Refer to the model guide to browse and compare available models.
+
+parallel_tool_calls
+boolean
+
+Optional
+Defaults to true
+Whether to allow the model to run tool calls in parallel.
+
+previous_response_id
+string
+
+Optional
+The unique ID of the previous response to the model. Use this to create multi-turn conversations. Learn more about conversation state. Cannot be used in conjunction with conversation.
+
+prompt
+object
+
+Optional
+Reference to a prompt template and its variables. Learn more.
+
+Show properties
+prompt_cache_key
+string
+
+Optional
+Used by OpenAI to cache responses for similar requests to optimize your cache hit rates. Replaces the user field. Learn more.
+
+reasoning
+object
+
+Optional
+gpt-5 and o-series models only
+
+Configuration options for reasoning models.
+
+Show properties
+safety_identifier
+string
+
+Optional
+A stable identifier used to help detect users of your application that may be violating OpenAI's usage policies. The IDs should be a string that uniquely identifies each user. We recommend hashing their username or email address, in order to avoid sending us any identifying information. Learn more.
+
+service_tier
+string
+
+Optional
+Defaults to auto
+Specifies the processing type used for serving the request.
+
+If set to 'auto', then the request will be processed with the service tier configured in the Project settings. Unless otherwise configured, the Project will use 'default'.
+If set to 'default', then the request will be processed with the standard pricing and performance for the selected model.
+If set to 'flex' or 'priority', then the request will be processed with the corresponding service tier.
+When not set, the default behavior is 'auto'.
+When the service_tier parameter is set, the response body will include the service_tier value based on the processing mode actually used to serve the request. This response value may be different from the value set in the parameter.
+
+store
+boolean
+
+Optional
+Defaults to true
+Whether to store the generated model response for later retrieval via API.
+
+stream
+boolean
+
+Optional
+Defaults to false
+If set to true, the model response data will be streamed to the client as it is generated using server-sent events. See the Streaming section below for more information.
+
+stream_options
+object
+
+Optional
+Defaults to null
+Options for streaming responses. Only set this when you set stream: true.
+
+Show properties
+temperature
+number
+
+Optional
+Defaults to 1
+What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. We generally recommend altering this or top_p but not both.
+
+text
+object
+
+Optional
+Configuration options for a text response from the model. Can be plain text or structured JSON data. Learn more:
+
+Text inputs and outputs
+Structured Outputs
+
+Show properties
+tool_choice
+string or object
+
+Optional
+How the model should select which tool (or tools) to use when generating a response. See the tools parameter to see how to specify which tools the model can call.
+
+Show possible types
+tools
+array
+
+Optional
+An array of tools the model may call while generating a response. You can specify which tool to use by setting the tool_choice parameter.
+
+We support the following categories of tools:
+
+Built-in tools: Tools that are provided by OpenAI that extend the model's capabilities, like web search or file search. Learn more about built-in tools.
+MCP Tools: Integrations with third-party systems via custom MCP servers or predefined connectors such as Google Drive and SharePoint. Learn more about MCP Tools.
+Function calls (custom tools): Functions that are defined by you, enabling the model to call your own code with strongly typed arguments and outputs. Learn more about function calling. You can also use custom tools to call your own code.
+
+## Web search tool integration
+
+- Chat Completions requests that include a `web_search_options` object now automatically inject a `{"type":"web_search"}` entry into the tool list before we forward the payload upstream. The real production logs in `errlog` showed OpenAI expecting the explicit tool declaration even when only `web_search_options` was provided, so the adaptor enforces that contract to keep behaviour consistent across channels.
+- Streaming Responses expose web search activity through dedicated events. Each call emits a `response.output_item.added` item of `type: "web_search_call"`, followed by status updates such as `response.web_search_call.searching` and `response.web_search_call.completed`. We deduplicate these by the upstream item id (or the query when OpenAI omits the id) and persist the total in `ctxkey.WebSearchCallCount` so quota and billing reflect the actual number of external searches.
+- Non-streaming Responses include the same `web_search_call` entries in the final `output` array. The adaptor scans that array, counts completed search actions, and charges the appropriate per-call quota (e.g. `gpt-5-mini` reporting three separate search queries in the sample logs resulted in a 15,000 tool-cost quota adjustment).
+- When downstream clients need a Chat Completions shaped response, the converter preserves the search metadata (query, domains, optional sources) inside the generated Response API envelope so the caller can replay or audit the exact web lookups that were performed.
+
+Show possible types
+top_logprobs
+integer
+
+Optional
+An integer between 0 and 20 specifying the number of most likely tokens to return at each token position, each with an associated log probability.
+
+top_p
+number
+
+Optional
+Defaults to 1
+An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered.
+
+We generally recommend altering this or temperature but not both.
+
+truncation
+string
+
+Optional
+Defaults to disabled
+The truncation strategy to use for the model response.
+
+auto: If the input to this Response exceeds the model's context window size, the model will truncate the response to fit the context window by dropping items from the beginning of the conversation.
+disabled (default): If the input size will exceed the context window size for a model, the request will fail with a 400 error.
+user
+Deprecated
+string
+
+Optional
+This field is being replaced by safety_identifier and prompt_cache_key. Use prompt_cache_key instead to maintain caching optimizations. A stable identifier for your end-users. Used to boost cache hit rates by better bucketing similar requests and to help OpenAI detect and prevent abuse. Learn more.
+
+## Text generation and prompting
 
 Learn how to prompt a model to generate text.
 
@@ -666,7 +900,7 @@ Check out all the options for text generation in the API reference.
 
 ](/docs/api-reference/responses)
 
-# Images and vision
+## Images and vision
 
 Learn how to understand or generate images.
 
@@ -688,7 +922,7 @@ Process image inputs
 
 Use our models' vision capabilities to analyze images.
 
-](/docs/guides/images-vision#analyze-images)
+](#analyze-images)
 
 In this guide, you will learn about building applications involving images with the OpenAI API. If you know what you want to build, find your use case below to get started. If you're not sure where to start, continue reading to get an overview.
 
@@ -714,56 +948,6 @@ Our latest image generation model, `gpt-image-1`, is a natively multimodal large
 
 In contrast, we also offer specialized image generation models - DALL·E 2 and 3 - which don't have the same inherent understanding of the world as GPT Image.
 
-Generate images with Responses
-
-```javascript
-import OpenAI from "openai";
-const openai = new OpenAI();
-
-const response = await openai.responses.create({
-  model: "gpt-4.1-mini",
-  input:
-    "Generate an image of gray tabby cat hugging an otter with an orange scarf",
-  tools: [{ type: "image_generation" }],
-});
-
-// Save the image to a file
-const imageData = response.output
-  .filter((output) => output.type === "image_generation_call")
-  .map((output) => output.result);
-
-if (imageData.length > 0) {
-  const imageBase64 = imageData[0];
-  const fs = await import("fs");
-  fs.writeFileSync("cat_and_otter.png", Buffer.from(imageBase64, "base64"));
-}
-```
-
-```python
-from openai import OpenAI
-import base64
-
-client = OpenAI()
-
-response = client.responses.create(
-    model="gpt-4.1-mini",
-    input="Generate an image of gray tabby cat hugging an otter with an orange scarf",
-    tools=[{"type": "image_generation"}],
-)
-
-// Save the image to a file
-image_data = [
-    output.result
-    for output in response.output
-    if output.type == "image_generation_call"
-]
-
-if image_data:
-    image_base64 = image_data[0]
-    with open("cat_and_otter.png", "wb") as f:
-        f.write(base64.b64decode(image_base64))
-```
-
 You can learn more about image generation in our [Image generation](/docs/guides/image-generation) guide.
 
 ### Using world knowledge for image generation
@@ -774,17 +958,13 @@ For example, if you prompt GPT Image to generate an image of a glass cabinet wit
 
 ## Analyze images
 
-**Vision** is the ability for a model to "see" and understand images. If there is text in an image, the model can also understand the text. It can understand most visual elements, including objects, shapes, colors, and textures, even if there are some [limitations](#limitations).
+**Vision** is the ability for a model to "see" and understand images. If there is text in an image, the model can also understand the text. It can understand most visual elements, including objects, shapes, colors, and textures, even if there are some [limitations](/docs/guides/images-vision#limitations).
 
 ### Giving a model images as input
 
-You can provide images as input to generation requests in multiple ways:
+You can provide images as input to generation requests either by providing a fully qualified URL to an image file, or providing an image as a Base64-encoded data URL.
 
-- By providing a fully qualified URL to an image file
-- By providing an image as a Base64-encoded data URL
-- By providing a file ID (created with the [Files API](/docs/api-reference/files))
-
-You can provide multiple images as input in a single request by including multiple images in the `content` array, but keep in mind that [images count as tokens](#calculating-costs) and will be billed accordingly.
+You can provide multiple images as input in a single request by including multiple images in the `content` array, but keep in mind that [images count as tokens](/docs/guides/images-vision#calculating-costs) and will be billed accordingly.
 
 Passing a URL
 
@@ -792,69 +972,76 @@ Analyze the content of an image
 
 ```javascript
 import OpenAI from "openai";
-
 const openai = new OpenAI();
 
-const response = await openai.responses.create({
+const response = await openai.chat.completions.create({
   model: "gpt-4.1-mini",
-  input: [
+  messages: [
     {
       role: "user",
       content: [
-        { type: "input_text", text: "what's in this image?" },
+        { type: "text", text: "What is in this image?" },
         {
-          type: "input_image",
-          image_url:
-            "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+          type: "image_url",
+          image_url: {
+            url: "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+          },
         },
       ],
     },
   ],
 });
 
-console.log(response.output_text);
+console.log(response.choices[0].message.content);
 ```
 
 ```python
 from openai import OpenAI
-
 client = OpenAI()
 
-response = client.responses.create(
+response = client.chat.completions.create(
     model="gpt-4.1-mini",
-    input=[{
+    messages=[{
         "role": "user",
         "content": [
-            {"type": "input_text", "text": "what's in this image?"},
+            {"type": "text", "text": "What's in this image?"},
             {
-                "type": "input_image",
-                "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+                },
             },
         ],
     }],
 )
 
-print(response.output_text)
+print(response.choices[0].message.content)
 ```
 
 ```bash
-curl https://api.openai.com/v1/responses \
+curl https://api.openai.com/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
     "model": "gpt-4.1-mini",
-    "input": [
+    "messages": [
       {
         "role": "user",
         "content": [
-          {"type": "input_text", "text": "what is in this image?"},
           {
-            "type": "input_image",
-            "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+            "type": "text",
+            "text": "What is in this image?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+            }
           }
         ]
       }
-    ]
+    ],
+    "max_tokens": 300
   }'
 ```
 
@@ -871,23 +1058,25 @@ const openai = new OpenAI();
 const imagePath = "path_to_your_image.jpg";
 const base64Image = fs.readFileSync(imagePath, "base64");
 
-const response = await openai.responses.create({
+const completion = await openai.chat.completions.create({
   model: "gpt-4.1-mini",
-  input: [
+  messages: [
     {
       role: "user",
       content: [
-        { type: "input_text", text: "what's in this image?" },
+        { type: "text", text: "what's in this image?" },
         {
-          type: "input_image",
-          image_url: `data:image/jpeg;base64,${base64Image}`,
+          type: "image_url",
+          image_url: {
+            url: `data:image/jpeg;base64,${base64Image}`,
+          },
         },
       ],
     },
   ],
 });
 
-console.log(response.output_text);
+console.log(completion.choices[0].message.content);
 ```
 
 ```python
@@ -907,126 +1096,77 @@ image_path = "path_to_your_image.jpg"
 # Getting the Base64 string
 base64_image = encode_image(image_path)
 
-response = client.responses.create(
+completion = client.chat.completions.create(
     model="gpt-4.1",
-    input=[
+    messages=[
         {
             "role": "user",
             "content": [
-                { "type": "input_text", "text": "what's in this image?" },
+                { "type": "text", "text": "what's in this image?" },
                 {
-                    "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{base64_image}",
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}",
+                    },
                 },
             ],
         }
     ],
 )
 
-print(response.output_text)
+print(completion.choices[0].message.content)
 ```
 
-Passing a file ID
-
-Analyze the content of an image
-
-```javascript
-import OpenAI from "openai";
-import fs from "fs";
-
-const openai = new OpenAI();
-
-// Function to create a file with the Files API
-async function createFile(filePath) {
-  const fileContent = fs.createReadStream(filePath);
-  const result = await openai.files.create({
-    file: fileContent,
-    purpose: "vision",
-  });
-  return result.id;
-}
-
-// Getting the file ID
-const fileId = await createFile("path_to_your_image.jpg");
-
-const response = await openai.responses.create({
-  model: "gpt-4.1-mini",
-  input: [
-    {
-      role: "user",
-      content: [
-        { type: "input_text", text: "what's in this image?" },
-        {
-          type: "input_image",
-          file_id: fileId,
-        },
-      ],
-    },
-  ],
-});
-
-console.log(response.output_text);
-```
-
-```python
-from openai import OpenAI
-
-client = OpenAI()
-
-# Function to create a file with the Files API
-def create_file(file_path):
-  with open(file_path, "rb") as file_content:
-    result = client.files.create(
-        file=file_content,
-        purpose="vision",
-    )
-    return result.id
-
-# Getting the file ID
-file_id = create_file("path_to_your_image.jpg")
-
-response = client.responses.create(
-    model="gpt-4.1-mini",
-    input=[{
+```bash
+BASE64_IMAGE=$(base64 < path_to_your_image.jpg) && curl https://api.openai.com/v1/chat/completions   -H "Content-Type: application/json"   -H "Authorization: Bearer $OPENAI_API_KEY"   -d @- <<EOF
+  {
+    "model": "gpt-4.1-mini",
+    "messages": [
+      {
         "role": "user",
         "content": [
-            {"type": "input_text", "text": "what's in this image?"},
-            {
-                "type": "input_image",
-                "file_id": file_id,
-            },
-        ],
-    }],
-)
-
-print(response.output_text)
+          {
+            "type": "text",
+            "text": "What is in this image?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/jpeg;base64,$BASE64_IMAGE"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 300
+  }
+EOF
 ```
 
 ### Image input requirements
 
 Input images must meet the following requirements to be used in the API.
 
-|Supported file types|PNG (.png)JPEG (.jpeg and .jpg)WEBP (.webp)Non-animated GIF (.gif)|
-|Size limits|Up to 50 MB total payload size per requestUp to 500 individual image inputs per request|
-|Other requirements|No watermarks or logosNo NSFW contentClear enough for a human to understand|
+|Supported file types|PNG (.png) - JPEG (.jpeg and .jpg) - WEBP (.webp) - Non-animated GIF (.gif)|
+|Size limits|Up to 50 MB total payload size per request - Up to 500 individual image inputs per request|
+|Other requirements|No watermarks or logos - No NSFW content - Clear enough for a human to understand|
 
 ### Specify image input detail level
 
 The `detail` parameter tells the model what level of detail to use when processing and understanding the image (`low`, `high`, or `auto` to let the model decide). If you skip the parameter, the model will use `auto`.
 
 ```plain
-{
-    "type": "input_image",
-    "image_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+"image_url": {
+    "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
     "detail": "high"
-}
+},
 ```
 
 You can save tokens and speed up responses by using `"detail": "low"`. This lets the model process the image with a budget of 85 tokens. The model receives a low-resolution 512px x 512px version of the image. This is fine if your use case doesn't require the model to see with high-resolution detail (for example, if you're asking about the dominant shape or color in the image).
 
 On the other hand, you can use `"detail": "high"` if you want the model to have a better understanding of the image.
 
-Read more about calculating image processing costs in the [Calculating costs](#calculating-costs) section below.
+Read more about calculating image processing costs in the [Calculating costs](/docs/guides/images-vision#calculating-costs) section below.
 
 ## Limitations
 
@@ -1052,12 +1192,34 @@ Image inputs are metered and charged in tokens, just as text inputs are. How ima
 
 Image inputs are metered and charged in tokens based on their dimensions. The token cost of an image is determined as follows:
 
-- Calculate the number of 32px x 32px patches that are needed to fully cover the image
-- If the number of patches exceeds 1536, we scale down the image so that it can be covered by no more than 1536 patches
-- The token cost is the number of patches, capped at a maximum of 1536 tokens
-- For `gpt-4.1-mini` we multiply image tokens by 1.62 to get total tokens, for `gpt-4.1-nano` we multiply image tokens by 2.46 to get total tokens, and for `o4-mini` we multiply image tokens by 1.72 to get total tokens, that are then billed at normal text token rates.
+A. Calculate the number of 32px x 32px patches that are needed to fully cover the image (a patch may extend beyond the image boundaries; out-of-bounds pixels are treated as black.)
 
-Note:
+```text
+raw_patches = ceil(width/32)×ceil(height/32)
+```
+
+B. If the number of patches exceeds 1536, we scale down the image so that it can be covered by no more than 1536 patches
+
+```text
+r = √(32²×1536/(width×height))
+r = r × min( floor(width×r/32) / (width×r/32), floor(height×r/32) / (height×r/32) )
+```
+
+C. The token cost is the number of patches, capped at a maximum of 1536 tokens
+
+```text
+image_tokens = ceil(resized_width/32)×ceil(resized_height/32)
+```
+
+D. Apply a multiplier based on the model to get the total tokens.
+
+| Model        | Multiplier |
+| ------------ | ---------- |
+| gpt-5-mini   | 1.62       |
+| gpt-5-nano   | 2.46       |
+| gpt-4.1-mini | 1.62       |
+| gpt-4.1-nano | 2.46       |
+| o4-mini      | 1.72       |
 
 **Cost calculation examples**
 
@@ -1081,19 +1243,20 @@ Note:
 
 The token cost of an image is determined by two factors: size and detail.
 
-Any image with `"detail": "low"` costs a set, base number of tokens. This amount varies by model (see charte below). To calculate the cost of an image with `"detail": "high"`, we do the following:
+Any image with `"detail": "low"` costs a set, base number of tokens. This amount varies by model (see chart below). To calculate the cost of an image with `"detail": "high"`, we do the following:
 
 - Scale to fit in a 2048px x 2048px square, maintaining original aspect ratio
 - Scale so that the image's shortest side is 768px long
 - Count the number of 512px squares in the image—each square costs a set amount of tokens (see chart below)
 - Add the base tokens to the total
 
-| Model                | Base tokens | Tile tokens |
-| -------------------- | ----------- | ----------- |
-| 4o, 4.1, 4.5         | 85          | 170         |
-| 4o-mini              | 2833        | 5667        |
-| o1, o1-pro, o3       | 75          | 150         |
-| computer-use-preview | 65          | 129         |
+| Model                    | Base tokens | Tile tokens |
+| ------------------------ | ----------- | ----------- |
+| gpt-5, gpt-5-chat-latest | 70          | 140         |
+| 4o, 4.1, 4.5             | 85          | 170         |
+| 4o-mini                  | 2833        | 5667        |
+| o1, o1-pro, o3           | 75          | 150         |
+| computer-use-preview     | 65          | 129         |
 
 **Cost calculation examples (for gpt-4o)**
 
@@ -1110,9 +1273,12 @@ Any image with `"detail": "low"` costs a set, base number of tokens. This amount
 
 ### GPT Image 1
 
-For GPT Image 1, we calculate the cost of an image input the same way as described above, except that we scale down the image so that the shortest side is 512px instead of 768px. There is no detail level configuration for this model, so the price depends on the dimensions of the image.
+For GPT Image 1, we calculate the cost of an image input the same way as described above, except that we scale down the image so that the shortest side is 512px instead of 768px. The price depends on the dimensions of the image and the [input fidelity](/docs/guides/image-generation?image-generation-model=gpt-image-1#input-fidelity).
 
-The base cost is 65 image tokens, and each tile costs 129 image tokens.
+When input fidelity is set to low, the base cost is 65 image tokens, and each tile costs 129 image tokens. When using high input fidelity, we add a set number of tokens based on the image's aspect ratio in addition to the image tokens described above.
+
+- If your image is square, we add 4096 extra input image tokens.
+- If it is closer to portrait or landscape, we add 6144 extra tokens.
 
 To see pricing for image input tokens, refer to our [pricing page](/docs/pricing#latest-models).
 

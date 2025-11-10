@@ -2,14 +2,15 @@ package render
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 )
 
+// StringData streams an SSE data chunk to the client using the provided string payload.
 func StringData(c *gin.Context, str string) {
 	str = strings.TrimPrefix(str, "data: ")
 	str = strings.TrimSuffix(str, "\r")
@@ -17,15 +18,17 @@ func StringData(c *gin.Context, str string) {
 	c.Writer.Flush()
 }
 
-func ObjectData(c *gin.Context, object interface{}) error {
+// ObjectData serializes the object to JSON and streams it as an SSE chunk.
+func ObjectData(c *gin.Context, object any) error {
 	jsonData, err := json.Marshal(object)
 	if err != nil {
-		return fmt.Errorf("error marshalling object: %w", err)
+		return errors.Wrapf(err, "error marshalling object")
 	}
 	StringData(c, string(jsonData))
 	return nil
 }
 
+// Done signals the completion of an SSE stream to the client.
 func Done(c *gin.Context) {
 	StringData(c, "[DONE]")
 }

@@ -2,7 +2,10 @@ package pricing
 
 import (
 	"fmt"
+	"maps"
 	"sync"
+
+	"github.com/Laisky/zap"
 
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/adaptor"
@@ -30,7 +33,7 @@ var DefaultGlobalPricingAdapters = []int{
 
 // GlobalPricingManager manages the third-layer global model pricing
 // It merges pricing from selected adapters to provide fallback pricing
-// for custom channels that don't have specific model pricing
+// for OpenAI-compatible channels (including legacy "custom" entries) that don't have specific model pricing
 type GlobalPricingManager struct {
 	mu                   sync.RWMutex
 	globalModelPricing   map[string]adaptor.ModelConfig
@@ -56,13 +59,12 @@ func InitializeGlobalPricingManager(getAdaptor func(apiType int) adaptor.Adaptor
 	if globalPricingManager.contributingAdapters == nil {
 		globalPricingManager.contributingAdapters = make([]int, len(DefaultGlobalPricingAdapters))
 		copy(globalPricingManager.contributingAdapters, DefaultGlobalPricingAdapters)
-		logger.SysLog(fmt.Sprintf("Loaded %d adapters for global pricing",
-			len(globalPricingManager.contributingAdapters)))
+		logger.Logger.Info("Loaded adapters for global pricing", zap.Int("adapter_count", len(globalPricingManager.contributingAdapters)))
 	}
 
 	globalPricingManager.initialized = false // Force re-initialization with new function
 
-	logger.SysLog("Global pricing manager initialized")
+	logger.Logger.Info("Global pricing manager initialized")
 }
 
 // SetContributingAdapters allows configuration of which adapters contribute to global pricing
@@ -74,7 +76,7 @@ func SetContributingAdapters(apiTypes []int) {
 	copy(globalPricingManager.contributingAdapters, apiTypes)
 	globalPricingManager.initialized = false // Force re-initialization
 
-	logger.SysLog("Global pricing adapters updated, will reload on next access")
+	logger.Logger.Info("Global pricing adapters updated, will reload on next access")
 }
 
 // ReloadDefaultConfiguration reloads the adapter configuration from the default slice
@@ -86,7 +88,7 @@ func ReloadDefaultConfiguration() {
 	copy(globalPricingManager.contributingAdapters, DefaultGlobalPricingAdapters)
 	globalPricingManager.initialized = false // Force re-initialization
 
-	logger.SysLog(fmt.Sprintf("Reloaded global pricing configuration: %d adapters", len(globalPricingManager.contributingAdapters)))
+	logger.Logger.Info("Reloaded global pricing configuration", zap.Int("adapter_count", len(globalPricingManager.contributingAdapters)))
 }
 
 // GetContributingAdapters returns the current list of contributing adapters
@@ -126,11 +128,11 @@ func (gpm *GlobalPricingManager) ensureInitialized() {
 // Must be called with write lock held
 func (gpm *GlobalPricingManager) initializeUnsafe() {
 	if gpm.getAdaptorFunc == nil {
-		logger.SysWarn("Global pricing manager not properly initialized - missing adaptor getter function")
+		logger.Logger.Warn("Global pricing manager not properly initialized - missing adaptor getter function")
 		return
 	}
 
-	logger.SysLog("Initializing global model pricing from contributing adapters...")
+	logger.Logger.Info("Initializing global model pricing from contributing adapters...")
 
 	gpm.globalModelPricing = make(map[string]adaptor.ModelConfig)
 	successCount := 0
@@ -142,8 +144,10 @@ func (gpm *GlobalPricingManager) initializeUnsafe() {
 	}
 
 	gpm.initialized = true
-	logger.SysLog(fmt.Sprintf("Global model pricing initialized with %d models from %d/%d adapters",
-		len(gpm.globalModelPricing), successCount, len(gpm.contributingAdapters)))
+	logger.Logger.Info("Global model pricing initialized",
+		zap.Int("model_count", len(gpm.globalModelPricing)),
+		zap.Int("successful_adapters", successCount),
+		zap.Int("total_adapters", len(gpm.contributingAdapters)))
 }
 
 // mergeAdapterPricing merges pricing from a specific adapter
@@ -152,13 +156,13 @@ func (gpm *GlobalPricingManager) initializeUnsafe() {
 func (gpm *GlobalPricingManager) mergeAdapterPricing(apiType int) bool {
 	adaptor := gpm.getAdaptorFunc(apiType)
 	if adaptor == nil {
-		logger.SysWarn(fmt.Sprintf("No adaptor found for API type %d", apiType))
+		logger.Logger.Warn(fmt.Sprintf("No adaptor found for API type %d", apiType))
 		return false
 	}
 
 	pricing := adaptor.GetDefaultModelPricing()
 	if len(pricing) == 0 {
-		logger.SysWarn(fmt.Sprintf("Adaptor %d returned empty pricing", apiType))
+		logger.Logger.Warn(fmt.Sprintf("Adaptor %d returned empty pricing", apiType))
 		return false
 	}
 
@@ -168,7 +172,7 @@ func (gpm *GlobalPricingManager) mergeAdapterPricing(apiType int) bool {
 	for modelName, modelPrice := range pricing {
 		if existingPrice, exists := gpm.globalModelPricing[modelName]; exists {
 			// Handle conflict: prefer the first adapter's pricing (could be configurable)
-			logger.SysWarn(fmt.Sprintf("Model %s pricing conflict: existing=%.9f, new=%.9f (keeping existing)",
+			logger.Logger.Warn(fmt.Sprintf("Model %s pricing conflict: existing=%.9f, new=%.9f (keeping existing)",
 				modelName, existingPrice.Ratio, modelPrice.Ratio))
 			conflictCount++
 		} else {
@@ -177,7 +181,10 @@ func (gpm *GlobalPricingManager) mergeAdapterPricing(apiType int) bool {
 		}
 	}
 
-	logger.SysLog(fmt.Sprintf("Merged %d models from adapter %d (%d conflicts)", mergedCount, apiType, conflictCount))
+	logger.Logger.Info("Merged models from adapter",
+		zap.Int("merged_count", mergedCount),
+		zap.Int("api_type", apiType),
+		zap.Int("conflict_count", conflictCount))
 	return true
 }
 
@@ -220,9 +227,7 @@ func GetGlobalModelPricing() map[string]adaptor.ModelConfig {
 
 	// Return a copy to prevent external modification
 	result := make(map[string]adaptor.ModelConfig)
-	for k, v := range globalPricingManager.globalModelPricing {
-		result[k] = v
-	}
+	maps.Copy(result, globalPricingManager.globalModelPricing)
 
 	return result
 }
@@ -279,9 +284,11 @@ func GetModelRatioWithThreeLayers(modelName string, channelOverrides map[string]
 	}
 
 	// Layer 3: Global model pricing (merged from selected adapters)
-	globalRatio := GetGlobalModelRatio(modelName)
-	if globalRatio > 0 {
-		return globalRatio
+	// Respect explicit zero pricing by checking existence, not value.
+	if globalPricing := GetGlobalModelPricing(); globalPricing != nil {
+		if cfg, exists := globalPricing[modelName]; exists {
+			return cfg.Ratio
+		}
 	}
 
 	// Layer 4: Final fallback - reasonable default
@@ -308,11 +315,110 @@ func GetCompletionRatioWithThreeLayers(modelName string, channelOverrides map[st
 	}
 
 	// Layer 3: Global model pricing (merged from selected adapters)
-	globalRatio := GetGlobalCompletionRatio(modelName)
-	if globalRatio > 0 {
-		return globalRatio
+	// Respect explicit zero pricing by checking existence, not value.
+	if globalPricing := GetGlobalModelPricing(); globalPricing != nil {
+		if cfg, exists := globalPricing[modelName]; exists {
+			return cfg.CompletionRatio
+		}
 	}
 
 	// Layer 4: Final fallback - reasonable default
 	return 1.0 // Default completion ratio
+}
+
+// EffectivePricing holds fully-resolved pricing numbers for the current request
+// after applying tiers and cached discounts.
+type EffectivePricing struct {
+	// Per-token prices (per 1 token)
+	InputRatio       float64
+	OutputRatio      float64 // equals InputRatio * CompletionRatio
+	CachedInputRatio float64 // negative means free
+	// Cache-write prices (per 1 token)
+	CacheWrite5mRatio    float64 // zero => use InputRatio; negative => free
+	CacheWrite1hRatio    float64 // zero => use InputRatio; negative => free
+	AppliedTierThreshold int     // 0 for base tier
+}
+
+// ResolveEffectivePricing determines the effective pricing for a model given the
+// input token count and the adapter's default pricing table. Channel overrides
+// are already handled in higher-level ratio resolution and should be folded into
+// the per-token ratio before calling this if overrides apply globally.
+//
+// Behavior:
+// - If no tiers exist, returns base ratios.
+// - If tiers exist, finds the tier whose InputTokenThreshold <= inputTokens and is the highest such threshold.
+// - Optional tier fields inherit from base if zero. Negative cached ratios mean free.
+func ResolveEffectivePricing(modelName string, inputTokens int, adaptor adaptor.Adaptor) EffectivePricing {
+	eff := EffectivePricing{}
+	if adaptor == nil {
+		// Fallback to defaults if adaptor missing
+		baseIn := 2.5 * 0.000001
+		baseComp := 1.0
+		eff.InputRatio = baseIn
+		eff.OutputRatio = baseIn * baseComp
+		eff.CachedInputRatio = 0
+		eff.CacheWrite5mRatio = 0
+		eff.CacheWrite1hRatio = 0
+		eff.AppliedTierThreshold = 0
+		return eff
+	}
+
+	pricing := adaptor.GetDefaultModelPricing()
+	base, ok := pricing[modelName]
+	if !ok {
+		// Use adaptor fallbacks
+		baseRatio := adaptor.GetModelRatio(modelName)
+		baseComp := adaptor.GetCompletionRatio(modelName)
+		eff.InputRatio = baseRatio
+		eff.OutputRatio = baseRatio * baseComp
+		eff.CachedInputRatio = base.CachedInputRatio // will be zero, as base not exists
+		eff.CacheWrite5mRatio = base.CacheWrite5mRatio
+		eff.CacheWrite1hRatio = base.CacheWrite1hRatio
+		eff.AppliedTierThreshold = 0
+		return eff
+	}
+
+	// Start with base
+	in := base.Ratio
+	comp := base.CompletionRatio
+	cachedIn := base.CachedInputRatio
+	cw5 := base.CacheWrite5mRatio
+	cw1 := base.CacheWrite1hRatio
+	appliedThreshold := 0
+
+	// Find applicable tier (tiers are sorted ascending by threshold)
+	if len(base.Tiers) > 0 {
+		for _, t := range base.Tiers {
+			if inputTokens >= t.InputTokenThreshold {
+				// Apply overrides from this tier
+				if t.Ratio != 0 {
+					in = t.Ratio
+				}
+				if t.CompletionRatio != 0 {
+					comp = t.CompletionRatio
+				}
+				if t.CachedInputRatio != 0 {
+					cachedIn = t.CachedInputRatio
+				}
+				if t.CacheWrite5mRatio != 0 {
+					cw5 = t.CacheWrite5mRatio
+				}
+				if t.CacheWrite1hRatio != 0 {
+					cw1 = t.CacheWrite1hRatio
+				}
+				appliedThreshold = t.InputTokenThreshold
+			} else {
+				break
+			}
+		}
+	}
+
+	eff.InputRatio = in
+	// Allow completion ratio to be zero if explicitly configured (means free completion tokens)
+	eff.OutputRatio = in * comp
+	eff.CachedInputRatio = cachedIn
+	eff.CacheWrite5mRatio = cw5
+	eff.CacheWrite1hRatio = cw1
+	eff.AppliedTierThreshold = appliedThreshold
+	return eff
 }

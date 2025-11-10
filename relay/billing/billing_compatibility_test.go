@@ -4,29 +4,15 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	modelpkg "github.com/songquanpeng/one-api/model"
 )
 
 // TestBackwardCompatibility ensures that the billing refactor doesn't break existing functionality
 func TestBackwardCompatibility(t *testing.T) {
 	// Test basic function signatures and validation without database operations
 
-	t.Run("Audio API Compatibility - PostConsumeQuota", func(t *testing.T) {
-		// Test that the original PostConsumeQuota function still works for Audio API
-		// Note: This would normally interact with database, but we're testing function signature and validation
-
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("PostConsumeQuota panicked: %v", r)
-			}
-		}()
-
-		// Test with valid parameters - should not panic
-		// PostConsumeQuota(ctx, audioTestData.tokenId, audioTestData.quotaDelta, audioTestData.totalQuota,
-		//     audioTestData.userId, audioTestData.channelId, audioTestData.modelRatio, audioTestData.groupRatio,
-		//     audioTestData.modelName, audioTestData.tokenName)
-
-		t.Log("Audio API PostConsumeQuota compatibility test passed")
-	})
+	// Legacy PostConsumeQuota removed; unified PostConsumeQuotaWithLog covers audio API too.
 
 	t.Run("ChatCompletion/Response API - PostConsumeQuotaDetailed", func(t *testing.T) {
 		// Test that the new PostConsumeQuotaDetailed function works correctly
@@ -60,30 +46,30 @@ func TestInputValidation(t *testing.T) {
 		description string
 	}{
 		{
-			name: "PostConsumeQuota - Invalid TokenId",
+			name: "PostConsumeQuotaWithLog - Invalid TokenId",
 			testFunc: func() bool {
-				defer func() { recover() }() // Catch any panics
-				PostConsumeQuota(ctx, -1, 10, 50, 1, 5, 1.0, 1.0, "test-model", "test-token")
+				defer func() { recover() }()
+				PostConsumeQuotaWithLog(ctx, -1, 10, 50, &modelpkg.Log{UserId: 1, ChannelId: 5, ModelName: "test-model", TokenName: "test-token"})
 				return true
 			},
 			shouldFail:  true,
 			description: "Should handle invalid tokenId gracefully",
 		},
 		{
-			name: "PostConsumeQuota - Invalid UserId",
+			name: "PostConsumeQuotaWithLog - Invalid UserId",
 			testFunc: func() bool {
 				defer func() { recover() }()
-				PostConsumeQuota(ctx, 123, 10, 50, -1, 5, 1.0, 1.0, "test-model", "test-token")
+				PostConsumeQuotaWithLog(ctx, 123, 10, 50, &modelpkg.Log{UserId: -1, ChannelId: 5, ModelName: "test-model", TokenName: "test-token"})
 				return true
 			},
 			shouldFail:  true,
 			description: "Should handle invalid userId gracefully",
 		},
 		{
-			name: "PostConsumeQuota - Empty ModelName",
+			name: "PostConsumeQuotaWithLog - Empty ModelName",
 			testFunc: func() bool {
 				defer func() { recover() }()
-				PostConsumeQuota(ctx, 123, 10, 50, 1, 5, 1.0, 1.0, "", "test-token")
+				PostConsumeQuotaWithLog(ctx, 123, 10, 50, &modelpkg.Log{UserId: 1, ChannelId: 5, ModelName: "", TokenName: "test-token"})
 				return true
 			},
 			shouldFail:  true,
@@ -93,8 +79,27 @@ func TestInputValidation(t *testing.T) {
 			name: "PostConsumeQuotaDetailed - Negative Tokens",
 			testFunc: func() bool {
 				defer func() { recover() }()
-				PostConsumeQuotaDetailed(ctx, 123, 10, 50, 1, 5, -10, 20, 1.0, 1.0, "test-model", "test-token",
-					false, validTime, false, 1.0, 0)
+				PostConsumeQuotaDetailed(QuotaConsumeDetail{
+					Ctx:                    ctx,
+					TokenId:                123,
+					QuotaDelta:             10,
+					TotalQuota:             50,
+					UserId:                 1,
+					ChannelId:              5,
+					PromptTokens:           -10,
+					CompletionTokens:       20,
+					ModelRatio:             1.0,
+					GroupRatio:             1.0,
+					ModelName:              "test-model",
+					TokenName:              "test-token",
+					IsStream:               false,
+					StartTime:              validTime,
+					SystemPromptReset:      false,
+					CompletionRatio:        1.0,
+					ToolsCost:              0,
+					CachedPromptTokens:     0,
+					CachedCompletionTokens: 0,
+				})
 				return true
 			},
 			shouldFail:  true,

@@ -56,7 +56,7 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	apiKey = strings.TrimPrefix(apiKey, "Bearer ")
 	_, secretId, secretKey, err := ParseConfig(apiKey)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "parse tencent channel config")
 	}
 	var convertedRequest any
 	switch relayMode {
@@ -192,7 +192,7 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequ
 	for _, tool := range request.Tools {
 		openaiTool := model.Tool{
 			Type: "function",
-			Function: model.Function{
+			Function: &model.Function{
 				Name:        tool.Name,
 				Description: tool.Description,
 			},

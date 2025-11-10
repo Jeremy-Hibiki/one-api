@@ -17,7 +17,7 @@ type Input struct {
 
 type Parameters struct {
 	TopP              *float64                `json:"top_p,omitempty"`
-	TopK              int                     `json:"top_k,omitempty"`
+	TopK              *int                    `json:"top_k,omitempty"`
 	Seed              uint64                  `json:"seed,omitempty"`
 	EnableSearch      bool                    `json:"enable_search,omitempty"`
 	SearchOptions     *map[string]interface{} `json:"search_options,omitempty"`
@@ -31,7 +31,7 @@ type Parameters struct {
 type ChatRequest struct {
 	Model      string     `json:"model"`
 	Input      Input      `json:"input"`
-	Parameters Parameters `json:"parameters,omitempty"`
+	Parameters Parameters `json:"parameters"`
 }
 
 type ImageRequest struct {
@@ -45,7 +45,7 @@ type ImageRequest struct {
 		N     int    `json:"n,omitempty"`
 		Steps string `json:"steps,omitempty"`
 		Scale string `json:"scale,omitempty"`
-	} `json:"parameters,omitempty"`
+	} `json:"parameters"`
 	ResponseFormat string `json:"response_format,omitempty"`
 }
 
@@ -69,8 +69,8 @@ type TaskResponse struct {
 			Total     int `json:"TOTAL,omitempty"`
 			Succeeded int `json:"SUCCEEDED,omitempty"`
 			Failed    int `json:"FAILED,omitempty"`
-		} `json:"task_metrics,omitempty"`
-	} `json:"output,omitempty"`
+		} `json:"task_metrics"`
+	} `json:"output"`
 	Usage Usage `json:"usage"`
 }
 
@@ -93,18 +93,18 @@ type Payload struct {
 		SampleRate int     `json:"sample_rate,omitempty"`
 		Rate       float64 `json:"rate,omitempty"`
 		Format     string  `json:"format,omitempty"`
-	} `json:"parameters,omitempty"`
+	} `json:"parameters"`
 	Input struct {
 		Text string `json:"text,omitempty"`
-	} `json:"input,omitempty"`
+	} `json:"input"`
 	Usage struct {
 		Characters int `json:"characters,omitempty"`
-	} `json:"usage,omitempty"`
+	} `json:"usage"`
 }
 
 type WSSMessage struct {
-	Header  Header  `json:"header,omitempty"`
-	Payload Payload `json:"payload,omitempty"`
+	Header  Header  `json:"header"`
+	Payload Payload `json:"payload"`
 }
 
 type EmbeddingRequest struct {

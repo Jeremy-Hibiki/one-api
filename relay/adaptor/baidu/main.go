@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/client"
 	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/render"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
@@ -142,6 +143,7 @@ func embeddingResponseBaidu2OpenAI(response *EmbeddingResponse) *openai.Embeddin
 }
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
+	lg := gmw.GetLogger(c)
 	var usage model.Usage
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
@@ -158,7 +160,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		var baiduResponse ChatStreamResponse
 		err := json.Unmarshal([]byte(data), &baiduResponse)
 		if err != nil {
-			logger.SysError("error unmarshalling stream response: " + err.Error())
+			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
 		}
 		if baiduResponse.Usage.TotalTokens != 0 {
@@ -169,12 +171,12 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		response := streamResponseBaidu2OpenAI(&baiduResponse)
 		err = render.ObjectData(c, response)
 		if err != nil {
-			logger.SysError(err.Error())
+			lg.Error("error rendering stream response", zap.Error(err))
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
 	render.Done(c)
@@ -203,10 +205,11 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 	if baiduResponse.ErrorMsg != "" {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: baiduResponse.ErrorMsg,
-				Type:    "baidu_error",
-				Param:   "",
-				Code:    baiduResponse.ErrorCode,
+				Message:  baiduResponse.ErrorMsg,
+				Type:     "baidu_error",
+				Param:    "",
+				Code:     baiduResponse.ErrorCode,
+				RawError: errors.New(baiduResponse.ErrorMsg),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
@@ -240,10 +243,11 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStat
 	if baiduResponse.ErrorMsg != "" {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: baiduResponse.ErrorMsg,
-				Type:    "baidu_error",
-				Param:   "",
-				Code:    baiduResponse.ErrorCode,
+				Message:  baiduResponse.ErrorMsg,
+				Type:     "baidu_error",
+				Param:    "",
+				Code:     baiduResponse.ErrorCode,
+				RawError: errors.New(baiduResponse.ErrorMsg),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
@@ -290,20 +294,19 @@ func getBaiduAccessTokenHelper(apiKey string) (*AccessToken, error) {
 	req, err := http.NewRequest("POST", fmt.Sprintf("https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id=%s&client_secret=%s",
 		parts[0], parts[1]), nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "build baidu access token request")
 	}
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("Accept", "application/json")
 	res, err := client.ImpatientHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "request baidu access token")
 	}
 	defer res.Body.Close()
 
 	var accessToken AccessToken
-	err = json.NewDecoder(res.Body).Decode(&accessToken)
-	if err != nil {
-		return nil, err
+	if err = json.NewDecoder(res.Body).Decode(&accessToken); err != nil {
+		return nil, errors.Wrap(err, "decode baidu access token response")
 	}
 	if accessToken.Error != "" {
 		return nil, errors.New(accessToken.Error + ": " + accessToken.ErrorDescription)

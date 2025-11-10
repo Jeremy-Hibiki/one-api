@@ -1,8 +1,11 @@
 package model
 
 import (
+	"context"
 	"sync"
 	"time"
+
+	"github.com/Laisky/zap"
 
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
@@ -21,7 +24,7 @@ var batchUpdateStores []map[int]int64
 var batchUpdateLocks []sync.Mutex
 
 func init() {
-	for i := 0; i < BatchUpdateTypeCount; i++ {
+	for range BatchUpdateTypeCount {
 		batchUpdateStores = append(batchUpdateStores, make(map[int]int64))
 		batchUpdateLocks = append(batchUpdateLocks, sync.Mutex{})
 	}
@@ -47,8 +50,8 @@ func addNewRecord(type_ int, id int, value int64) {
 }
 
 func batchUpdate() {
-	logger.SysLog("batch update started")
-	for i := 0; i < BatchUpdateTypeCount; i++ {
+	logger.Logger.Info("batch update started")
+	for i := range BatchUpdateTypeCount {
 		batchUpdateLocks[i].Lock()
 		store := batchUpdateStores[i]
 		batchUpdateStores[i] = make(map[int]int64)
@@ -59,12 +62,12 @@ func batchUpdate() {
 			case BatchUpdateTypeUserQuota:
 				err := increaseUserQuota(key, value)
 				if err != nil {
-					logger.SysError("failed to batch update user quota: " + err.Error())
+					logger.Logger.Error("failed to batch update user quota", zap.Error(err))
 				}
 			case BatchUpdateTypeTokenQuota:
-				err := increaseTokenQuota(key, value)
+				err := increaseTokenQuota(context.Background(), key, value)
 				if err != nil {
-					logger.SysError("failed to batch update token quota: " + err.Error())
+					logger.Logger.Error("failed to batch update token quota", zap.Error(err))
 				}
 			case BatchUpdateTypeUsedQuota:
 				updateUserUsedQuota(key, value)
@@ -75,5 +78,5 @@ func batchUpdate() {
 			}
 		}
 	}
-	logger.SysLog("batch update finished")
+	logger.Logger.Info("batch update finished")
 }

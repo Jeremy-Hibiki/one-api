@@ -1,8 +1,10 @@
 package model
 
 import (
-	"context"
+	"encoding/json"
 	"strings"
+
+	"github.com/Laisky/zap"
 
 	"github.com/songquanpeng/one-api/common/logger"
 )
@@ -81,18 +83,27 @@ type UrlCitation struct {
 
 // SetReasoningContent sets the reasoning content based on the format
 func (m *Message) SetReasoningContent(format string, reasoningContent string) {
-	switch ReasoningFormat(strings.ToLower(strings.TrimSpace(format))) {
+	normalized := ReasoningFormat(strings.ToLower(strings.TrimSpace(format)))
+	content := reasoningContent
+
+	switch normalized {
 	case ReasoningFormatReasoningContent:
-		m.ReasoningContent = &reasoningContent
+		m.Reasoning = nil
+		m.Thinking = nil
+		m.ReasoningContent = &content
 		// case ReasoningFormatThinkTag:
 		// 	m.Content = fmt.Sprintf("<think>%s</think>%s", reasoningContent, m.Content)
 	case ReasoningFormatThinking:
-		m.Thinking = &reasoningContent
+		m.Reasoning = nil
+		m.ReasoningContent = nil
+		m.Thinking = &content
 	case ReasoningFormatReasoning,
 		ReasoningFormatUnspecified:
-		m.Reasoning = &reasoningContent
+		m.ReasoningContent = nil
+		m.Thinking = nil
+		m.Reasoning = &content
 	default:
-		logger.Warnf(context.TODO(), "unknown reasoning format: %q", format)
+		logger.Logger.Warn("unknown reasoning format", zap.String("format", format))
 	}
 }
 
@@ -121,10 +132,22 @@ func (m Message) StringContent() string {
 			if !ok {
 				continue
 			}
-
-			if contentMap["type"] == ContentTypeText {
+			typeStr, _ := contentMap["type"].(string)
+			switch strings.ToLower(typeStr) {
+			case strings.ToLower(ContentTypeText):
 				if subStr, ok := contentMap["text"].(string); ok {
 					contentStr += subStr
+				}
+			case "output_json":
+				if jsonText := extractJSONText(contentMap["json"]); jsonText != "" {
+					contentStr += jsonText
+				}
+				if text, ok := contentMap["text"].(string); ok {
+					contentStr += text
+				}
+			case "output_json_delta":
+				if partial, ok := contentMap["partial_json"].(string); ok {
+					contentStr += partial
 				}
 			}
 		}
@@ -153,25 +176,50 @@ func (m Message) ParseContent() []MessageContent {
 
 	anyList, ok := m.Content.([]any)
 	if ok {
+		var jsonAccumulator strings.Builder
+		var outputJSONSeen bool
 		for _, contentItem := range anyList {
 			contentMap, ok := contentItem.(map[string]any)
 			if !ok {
 				continue
 			}
-			switch contentMap["type"] {
-			case ContentTypeText:
+			typeStr, _ := contentMap["type"].(string)
+			switch strings.ToLower(typeStr) {
+			case strings.ToLower(ContentTypeText):
 				if subStr, ok := contentMap["text"].(string); ok {
 					contentList = append(contentList, MessageContent{
 						Type: ContentTypeText,
 						Text: &subStr,
 					})
 				}
+			case "output_json", "output_json_delta":
+				if jsonText := extractJSONText(contentMap["json"]); jsonText != "" {
+					jsonAccumulator.WriteString(jsonText)
+					outputJSONSeen = true
+				}
+				if text, ok := contentMap["text"].(string); ok {
+					jsonAccumulator.WriteString(text)
+					outputJSONSeen = true
+				}
+				if partial, ok := contentMap["partial_json"].(string); ok {
+					jsonAccumulator.WriteString(partial)
+					outputJSONSeen = true
+				}
 			case ContentTypeImageURL:
 				if subObj, ok := contentMap["image_url"].(map[string]any); ok {
+					var urlStr string
+					if u, ok := subObj["url"].(string); ok {
+						urlStr = u
+					}
+					var detailStr string
+					if d, ok := subObj["detail"].(string); ok {
+						detailStr = d
+					}
 					contentList = append(contentList, MessageContent{
 						Type: ContentTypeImageURL,
 						ImageURL: &ImageURL{
-							Url: subObj["url"].(string),
+							Url:    urlStr,
+							Detail: detailStr,
 						},
 					})
 				}
@@ -186,13 +234,34 @@ func (m Message) ParseContent() []MessageContent {
 					})
 				}
 			default:
-				logger.Warnf(context.TODO(), "unknown content type: %s", contentMap["type"])
+				logger.Logger.Warn("unknown content type", zap.Any("type", contentMap["type"]))
 			}
+		}
+		if outputJSONSeen && jsonAccumulator.Len() > 0 {
+			jsonText := jsonAccumulator.String()
+			contentList = append(contentList, MessageContent{Type: ContentTypeText, Text: &jsonText})
 		}
 
 		return contentList
 	}
 	return nil
+}
+
+// extractJSONText normalizes JSON payloads that may appear as strings, bytes, or nested objects.
+func extractJSONText(raw any) string {
+	switch val := raw.(type) {
+	case string:
+		return val
+	case json.RawMessage:
+		return string(val)
+	case []byte:
+		return string(val)
+	case map[string]any, []any:
+		if encoded, err := json.Marshal(val); err == nil {
+			return string(encoded)
+		}
+	}
+	return ""
 }
 
 type ImageURL struct {

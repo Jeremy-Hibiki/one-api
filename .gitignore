@@ -5,7 +5,6 @@ upload
 *.db
 build
 *.db-journal
-logs
 data
 node_modules
 /web/node_modules
@@ -17,3 +16,13 @@ temp
 /__debug_bin*
 /cmd/migrate/migrate
 /patch
+/logs/
+errlog
+
+# instructions
+.github/instructions/filesystem.instructions.md
+.github/instructions/gopls.instructions.md
+.github/instructions/laisky.instructions.md
+
+# test
+/cmd/test/generated/*

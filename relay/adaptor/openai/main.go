@@ -4,23 +4,62 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	stdErrors "errors"
 	"io"
 	"math"
 	"net/http"
 	"strings"
 
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/conv"
 	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/common/tracing"
+	relaymodel "github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
 	"github.com/songquanpeng/one-api/relay/billing/ratio"
+	metalib "github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/songquanpeng/one-api/relay/streaming"
 )
+
+type responseStreamToolCallState struct {
+	name     string
+	index    int
+	hasIndex bool
+	args     strings.Builder
+}
+
+func (s *responseStreamToolCallState) setName(name string) {
+	if name != "" {
+		s.name = name
+	}
+}
+
+func (s *responseStreamToolCallState) setIndex(idx int) {
+	s.index = idx
+	s.hasIndex = true
+}
+
+func (s *responseStreamToolCallState) appendArgs(delta string) {
+	if delta != "" {
+		s.args.WriteString(delta)
+	}
+}
+
+func (s *responseStreamToolCallState) replaceArgs(full string) {
+	s.args.Reset()
+	s.args.WriteString(full)
+}
+
+func (s *responseStreamToolCallState) arguments() string {
+	return s.args.String()
+}
 
 // Use shared constants from openai_compatible package
 const (
@@ -29,14 +68,36 @@ const (
 	dataPrefixLength = openai_compatible.DataPrefixLength
 )
 
+// Optionally: record when upstream streaming is completed (non-standard event)
+func recordUpstreamCompleted(c *gin.Context) {
+	// Only attempt to record trace timestamp when DB is initialized. In tests or
+	// lightweight environments the global DB may be nil which would cause a
+	// panic inside the model package. Guard to keep handler robust.
+	if relaymodel.DB == nil {
+		return
+	}
+	tracing.RecordTraceTimestamp(c, relaymodel.TimestampUpstreamCompleted)
+}
+
 // StreamHandler processes streaming responses from OpenAI API
 // It handles incremental content delivery and accumulates the final response text
 // Returns error (if any), accumulated response text, and token usage information
 func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.ErrorWithStatusCode, string, *model.Usage) {
+	lg := gmw.GetLogger(c)
+	metaInfo := metalib.GetByContext(c)
+	tracker := streaming.FromContext(c)
+	var trackerErr error
 	// Initialize accumulators for the response
 	responseText := ""
 	reasoningText := ""
 	var usage *model.Usage
+
+	var streamRewriter openai_compatible.StreamRewriteHandler
+	if rewriteAny, exists := c.Get(ctxkey.ResponseStreamRewriteHandler); exists {
+		if rewriter, ok := rewriteAny.(openai_compatible.StreamRewriteHandler); ok {
+			streamRewriter = rewriter
+		}
+	}
 
 	// Set up scanner for reading the stream line by line
 	scanner := bufio.NewScanner(resp.Body)
@@ -48,12 +109,26 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 	common.SetEventStreamHeaders(c)
 
 	doneRendered := false
+	sendStreamingError := func(code, message string) {
+		if err := render.ObjectData(c, map[string]any{
+			"error": map[string]any{
+				"message": message,
+				"type":    code,
+				"code":    code,
+			},
+		}); err != nil {
+			lg.Warn("failed to render streaming error", zap.Error(err))
+		}
+		render.Done(c)
+		doneRendered = true
+	}
 
 	// Process each line from the stream
+streamLoop:
 	for scanner.Scan() {
 		data := openai_compatible.NormalizeDataLine(scanner.Text())
 
-		// logger.Debugf(c.Request.Context(), "stream response: %s", data)
+		lg.Debug("stream response", zap.String("event", data))
 
 		// Skip lines that don't match expected format
 		if len(data) < dataPrefixLength {
@@ -67,6 +142,15 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 
 		// Check for stream termination
 		if strings.HasPrefix(data[dataPrefixLength:], done) {
+			if streamRewriter != nil {
+				handled, handledDone := streamRewriter.HandleUpstreamDone(c)
+				if handled {
+					if handledDone {
+						doneRendered = true
+					}
+					continue
+				}
+			}
 			render.StringData(c, data)
 			doneRendered = true
 			continue
@@ -75,12 +159,14 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 		// Process based on relay mode
 		switch relayMode {
 		case relaymode.ChatCompletions:
-			var streamResponse ChatCompletionsStreamResponse
+			var streamResponse openai_compatible.ChatCompletionsStreamResponse
 
 			// Parse the JSON response
 			err := json.Unmarshal([]byte(data[dataPrefixLength:]), &streamResponse)
 			if err != nil {
-				logger.Errorf(c.Request.Context(), "unmarshalling stream data %q got %+v", data, err)
+				lg.Error("unmarshalling stream data",
+					zap.String("data", data),
+					zap.Error(err))
 				render.StringData(c, data) // Pass raw data to client if parsing fails
 				continue
 			}
@@ -105,14 +191,54 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 
 				// Accumulate response content
 				responseText += conv.AsString(choice.Delta.Content)
+
+				if tracker != nil && metaInfo != nil {
+					deltaTokens := 0
+					if chunk := conv.AsString(choice.Delta.Content); chunk != "" {
+						deltaTokens += CountTokenText(chunk, metaInfo.ActualModelName)
+					}
+					if currentReasoningChunk != "" {
+						deltaTokens += CountTokenText(currentReasoningChunk, metaInfo.ActualModelName)
+					}
+					if deltaTokens > 0 {
+						if err := tracker.RecordCompletionTokens(deltaTokens); err != nil {
+							trackerErr = err
+							if stdErrors.Is(err, streaming.ErrQuotaExceeded) {
+								sendStreamingError("insufficient_user_quota", "user quota exhausted during streaming")
+							} else {
+								sendStreamingError("streaming_billing_failed", "failed to track streaming usage")
+							}
+							break streamLoop
+						}
+					}
+				}
 			}
 
-			// Send the processed data to the client
-			render.StringData(c, data)
+			handledByRewriter := false
+			if streamRewriter != nil {
+				if handled, handledDone := streamRewriter.HandleChunk(c, &streamResponse); handled {
+					handledByRewriter = true
+					if handledDone {
+						doneRendered = true
+					}
+				}
+			}
+
+			if !handledByRewriter {
+				// Send the processed data to the client
+				render.StringData(c, data)
+			}
 
 			// Update usage information if available
 			if streamResponse.Usage != nil {
 				usage = streamResponse.Usage
+				if tracker != nil {
+					tracker.UpdateFinalUsage(streamResponse.Usage)
+				}
+			}
+
+			if handledByRewriter {
+				continue
 			}
 
 		case relaymode.Completions:
@@ -122,25 +248,50 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 			var streamResponse CompletionsStreamResponse
 			err := json.Unmarshal([]byte(data[dataPrefixLength:]), &streamResponse)
 			if err != nil {
-				logger.SysError("error unmarshalling stream response: " + err.Error())
+				lg.Error("error unmarshalling stream response", zap.Error(err))
 				continue
 			}
 
 			// Accumulate text from all choices
 			for _, choice := range streamResponse.Choices {
 				responseText += choice.Text
+				if tracker != nil && metaInfo != nil {
+					if tokens := CountTokenText(choice.Text, metaInfo.ActualModelName); tokens > 0 {
+						if err := tracker.RecordCompletionTokens(tokens); err != nil {
+							trackerErr = err
+							if stdErrors.Is(err, streaming.ErrQuotaExceeded) {
+								sendStreamingError("insufficient_user_quota", "user quota exhausted during streaming")
+							} else {
+								sendStreamingError("streaming_billing_failed", "failed to track streaming usage")
+							}
+							break streamLoop
+						}
+					}
+				}
 			}
 		}
 	}
 
 	// Check for scanner errors
-	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+	if err := scanner.Err(); err != nil && trackerErr == nil {
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
 	// Ensure stream termination is sent to client
-	if !doneRendered {
+	if streamRewriter != nil {
+		streamRewriter.FinalizeUsage(usage)
+		handled, handledDone := streamRewriter.HandleDone(c)
+		if handled {
+			if handledDone {
+				doneRendered = true
+			}
+		} else if !doneRendered {
+			render.Done(c)
+			doneRendered = true
+		}
+	} else if !doneRendered {
 		render.Done(c)
+		doneRendered = true
 	}
 
 	// Clean up resources
@@ -148,8 +299,28 @@ func StreamHandler(c *gin.Context, resp *http.Response, relayMode int) (*model.E
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), "", nil
 	}
 
+	if trackerErr != nil {
+		if stdErrors.Is(trackerErr, streaming.ErrQuotaExceeded) {
+			return ErrorWrapper(trackerErr, "insufficient_user_quota", http.StatusForbidden), "", usage
+		}
+		return ErrorWrapper(trackerErr, "streaming_billing_failed", http.StatusInternalServerError), "", usage
+	}
+
+	// Record when upstream streaming is completed
+	recordUpstreamCompleted(c)
+
+	combined := reasoningText + responseText
+	if combined != "" || usage != nil {
+		c.Set(ctxkey.ConvertedResponse, map[string]any{
+			"stream":    true,
+			"reasoning": reasoningText,
+			"content":   combined,
+			"usage":     usage,
+		})
+	}
+
 	// Return the complete response text (reasoning + content) and usage
-	return nil, reasoningText + responseText, usage
+	return nil, combined, usage
 }
 
 // Helper function to extract reasoning content from message delta
@@ -173,6 +344,7 @@ func extractReasoningContent(delta *model.Message) string {
 // Handler processes non-streaming responses from OpenAI API
 // Returns error (if any) and token usage information
 func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
+	logger := gmw.GetLogger(c)
 	// Read the entire response body
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -191,26 +363,24 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	}
 
 	// Check for API errors
-	if textResponse.Error.Type != "" {
+	if textResponse.Error != nil && textResponse.Error.Type != "" {
 		return &model.ErrorWithStatusCode{
-			Error:      textResponse.Error,
+			Error:      *textResponse.Error,
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
 
 	// Process reasoning content in each choice
-	for _, msg := range textResponse.Choices {
-		reasoningContent := processReasoningContent(&msg)
+	reasoningFormat := c.Query("reasoning_format")
+	for i := range textResponse.Choices {
+		choice := &textResponse.Choices[i]
+		reasoningContent := processReasoningContent(choice)
 
 		// Set reasoning in requested format if content exists
 		if reasoningContent != "" {
-			msg.SetReasoningContent(c.Query("reasoning_format"), reasoningContent)
+			choice.SetReasoningContent(reasoningFormat, reasoningContent)
 		}
 	}
-
-	// Reset response body for forwarding to client
-	resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
-	logger.Debugf(c.Request.Context(), "handler response: %s", string(responseBody))
 
 	// Check if this is a Claude Messages conversion - if so, don't write response here
 	// The DoResponse method will handle the conversion and response writing
@@ -220,6 +390,20 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		calculateTokenUsage(&textResponse, promptTokens, modelName)
 		return nil, &textResponse.Usage
 	}
+
+	// Calculate token usage BEFORE writing to client so we can still return usage
+	// even if client disconnects causes a write error.
+	calculateTokenUsage(&textResponse, promptTokens, modelName)
+
+	if modifiedBody, marshalErr := json.Marshal(textResponse); marshalErr != nil {
+		logger.Error("failed to marshal modified response body",
+			zap.Error(marshalErr))
+		resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
+	} else {
+		responseBody = modifiedBody
+		resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
+	}
+	logger.Debug("handler response", zap.ByteString("body", responseBody))
 
 	// Forward all response headers (not just first value of each)
 	for k, values := range resp.Header {
@@ -231,17 +415,18 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	// Set response status and copy body to client
 	c.Writer.WriteHeader(resp.StatusCode)
 	if _, err = io.Copy(c.Writer, resp.Body); err != nil {
-		return ErrorWrapper(err, "copy_response_body_failed", http.StatusInternalServerError), nil
+		// Return usage even on write failure so billing can proceed for forwarded requests
+		return ErrorWrapper(err, "copy_response_body_failed", http.StatusInternalServerError), &textResponse.Usage
 	}
+
+	c.Set(ctxkey.ConvertedResponse, textResponse)
 
 	// Close the reset body
 	if err = resp.Body.Close(); err != nil {
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 
-	// Calculate token usage if not provided by API
-	calculateTokenUsage(&textResponse, promptTokens, modelName)
-
+	// Usage was already calculated above
 	return nil, &textResponse.Usage
 }
 
@@ -263,6 +448,12 @@ func processReasoningContent(msg *TextResponseChoice) string {
 	case msg.Message.ReasoningContent != nil:
 		reasoningContent = *msg.Message.ReasoningContent
 		msg.Message.ReasoningContent = nil
+	case msg.Thinking != nil:
+		reasoningContent = *msg.Thinking
+		msg.Thinking = nil
+	case msg.Message.Thinking != nil:
+		reasoningContent = *msg.Message.Thinking
+		msg.Message.Thinking = nil
 	}
 
 	return reasoningContent
@@ -346,9 +537,9 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 		return ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
 	}
 
+	lg := gmw.GetLogger(c)
 	// Log the response body for debugging
-	logger.Debugf(c.Request.Context(),
-		"got response from upstream: %s", string(responseBody))
+	lg.Debug("got response from upstream", zap.ByteString("body", responseBody))
 
 	// Close the original response body
 	if err = resp.Body.Close(); err != nil {
@@ -367,6 +558,10 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 			Error:      *responseAPIResp.Error,
 			StatusCode: resp.StatusCode,
 		}, nil
+	}
+
+	if calls := countWebSearchSearchActions(responseAPIResp.Output); calls > 0 {
+		c.Set(ctxkey.WebSearchCallCount, calls)
 	}
 
 	// Convert Response API response to ChatCompletion format
@@ -412,10 +607,15 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 		return ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), nil
 	}
 
-	logger.Debugf(c.Request.Context(), "generate response to user: %s", string(jsonResponse))
+	lg.Debug("generate response to user", zap.ByteString("body", jsonResponse))
 
 	// Forward all response headers
 	for k, values := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") ||
+			strings.EqualFold(k, "Transfer-Encoding") ||
+			strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
 		for _, v := range values {
 			c.Writer.Header().Add(k, v)
 		}
@@ -425,7 +625,8 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
 	if _, err = c.Writer.Write(jsonResponse); err != nil {
-		return ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), nil
+		// Return usage even on write failure so billing can proceed for forwarded requests
+		return ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), &chatCompletionResp.Usage
 	}
 
 	return nil, &chatCompletionResp.Usage
@@ -439,6 +640,24 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 	responseText := ""
 	reasoningText := ""
 	var usage *model.Usage
+	webSearchSeen := make(map[string]struct{})
+	webSearchCount := 0
+	toolStates := make(map[string]*responseStreamToolCallState)
+
+	// Track output item IDs for which we've already forwarded delta content.
+	seenOutputItems := make(map[string]struct{})
+
+	getToolState := func(id string) *responseStreamToolCallState {
+		if id == "" {
+			return nil
+		}
+		state, ok := toolStates[id]
+		if !ok {
+			state = &responseStreamToolCallState{}
+			toolStates[id] = state
+		}
+		return state
+	}
 
 	// Set up scanner for reading the stream line by line
 	scanner := bufio.NewScanner(resp.Body)
@@ -455,7 +674,7 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 	for scanner.Scan() {
 		data := openai_compatible.NormalizeDataLine(scanner.Text())
 
-		logger.Debugf(c.Request.Context(), "receive stream event: %s", data)
+		gmw.GetLogger(c).Debug("receive stream event", zap.String("event", data))
 
 		if !strings.HasPrefix(data, dataPrefix) {
 			continue
@@ -474,7 +693,7 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 		fullResponse, streamEvent, err := ParseResponseAPIStreamEvent([]byte(data))
 		if err != nil {
 			// Log the error with more context but continue processing
-			logger.Debugf(c.Request.Context(), "skipping unparseable stream chunk: %s, error: %s", data, err.Error())
+			gmw.GetLogger(c).Debug("skipping unparseable stream chunk", zap.String("chunk", data), zap.Error(err))
 			continue
 		}
 
@@ -495,6 +714,10 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 			continue
 		}
 
+		if newCalls := countNewWebSearchSearchActions(responseAPIChunk.Output, webSearchSeen); newCalls > 0 {
+			webSearchCount += newCalls
+		}
+
 		// IMPORTANT: Accumulate response text for token counting - but only from delta events to avoid duplicates
 		//
 		// The Response API emits both:
@@ -505,13 +728,60 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 		// Solution: Only accumulate delta events for final response text counting.
 		if streamEvent != nil && strings.Contains(streamEvent.Type, "delta") {
 			// Only accumulate content from delta events to prevent duplication
-			if streamEvent.Delta != "" {
+			if delta := extractStringFromRaw(streamEvent.Delta, "partial_json", "json", "text", "delta"); delta != "" {
 				if strings.Contains(streamEvent.Type, "reasoning_summary_text") {
 					// This is reasoning content
-					reasoningText += streamEvent.Delta
+					reasoningText += delta
 				} else {
 					// This is regular content
-					responseText += streamEvent.Delta
+					responseText += delta
+				}
+			}
+		}
+
+		// Update tool state tracking with metadata from the streaming event
+		// Derive a canonical event type string for both streaming events and
+		// full response events so the downstream emission logic can handle
+		// both uniformly.
+		eventType := ""
+		if streamEvent != nil {
+			eventType = streamEvent.Type
+		} else if fullResponse != nil {
+			if responseAPIChunk.Status != "" {
+				eventType = "response." + responseAPIChunk.Status
+			} else {
+				eventType = "response.completed"
+			}
+		}
+
+		if eventType != "" {
+			if streamEvent.Item != nil && streamEvent.Item.Type == "function_call" {
+				if state := getToolState(streamEvent.Item.Id); state != nil {
+					if streamEvent.OutputIndex >= 0 {
+						state.setIndex(streamEvent.OutputIndex)
+					}
+					state.setName(streamEvent.Item.Name)
+					if streamEvent.Item.Arguments != "" {
+						state.appendArgs(streamEvent.Item.Arguments)
+					}
+				}
+			}
+			if strings.HasPrefix(eventType, "response.function_call_arguments.delta") {
+				if state := getToolState(streamEvent.ItemId); state != nil {
+					if streamEvent.OutputIndex >= 0 {
+						state.setIndex(streamEvent.OutputIndex)
+					}
+					state.appendArgs(extractStringFromRaw(streamEvent.Delta, "partial_json", "text", "arguments", "delta"))
+				}
+			}
+			if strings.HasPrefix(eventType, "response.function_call_arguments.done") {
+				if state := getToolState(streamEvent.ItemId); state != nil {
+					if streamEvent.OutputIndex >= 0 {
+						state.setIndex(streamEvent.OutputIndex)
+					}
+					if streamEvent.Arguments != "" {
+						state.replaceArgs(streamEvent.Arguments)
+					}
 				}
 			}
 		}
@@ -519,32 +789,232 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 		// Convert Response API chunk to ChatCompletion streaming format with proper index context
 		chatCompletionChunk := ConvertResponseAPIStreamToChatCompletionWithIndex(&responseAPIChunk, outputIndex)
 
+		// If this is a done/complete event and the output item was already emitted
+		// from prior delta events, clear content to avoid duplicate text emission.
+		if streamEvent != nil {
+			eventType := streamEvent.Type
+			if !strings.Contains(eventType, "delta") {
+				seen := false
+				for _, out := range responseAPIChunk.Output {
+					if out.Id != "" {
+						if _, ok := seenOutputItems[out.Id]; ok {
+							seen = true
+							break
+						}
+					}
+				}
+
+				if seen {
+					// For intermediate done events (content_part.done, output_item.done), drop
+					// content to avoid duplicates (we already sent deltas). For the final
+					// response.completed event, re-emit a single terminal chunk with the
+					// accumulated responseText so clients receive a full-text final chunk
+					// but only once.
+					if eventType == "response.completed" {
+						if len(chatCompletionChunk.Choices) > 0 {
+							delta := &chatCompletionChunk.Choices[0].Delta
+							// Use accumulated responseText (from prior delta events) as the
+							// final content to avoid duplication while preserving the final
+							// combined message for clients.
+							delta.Content = responseText
+							delta.Reasoning = nil
+							delta.ToolCalls = nil
+						}
+					} else {
+						if len(chatCompletionChunk.Choices) > 0 {
+							delta := &chatCompletionChunk.Choices[0].Delta
+							delta.Content = ""
+							delta.Reasoning = nil
+							delta.ToolCalls = nil
+						}
+					}
+				}
+			}
+		}
+
+		if len(chatCompletionChunk.Choices) > 0 {
+			delta := &chatCompletionChunk.Choices[0].Delta
+			candidateIDs := make([]string, 0, 3)
+			for _, tc := range delta.ToolCalls {
+				candidateIDs = append(candidateIDs, tc.Id)
+			}
+			if streamEvent != nil {
+				if streamEvent.Item != nil && streamEvent.Item.Type == "function_call" && streamEvent.Item.Id != "" {
+					candidateIDs = append(candidateIDs, streamEvent.Item.Id)
+				}
+				if streamEvent.ItemId != "" {
+					candidateIDs = append(candidateIDs, streamEvent.ItemId)
+				}
+			}
+
+			// Ensure tool call deltas include accumulated state
+			for idx := range delta.ToolCalls {
+				tc := &delta.ToolCalls[idx]
+				callID := tc.Id
+				if callID == "" && streamEvent != nil {
+					if streamEvent.Item != nil && streamEvent.Item.Type == "function_call" && streamEvent.Item.Id != "" {
+						callID = streamEvent.Item.Id
+						tc.Id = callID
+					} else if streamEvent.ItemId != "" {
+						callID = streamEvent.ItemId
+						tc.Id = callID
+					}
+				}
+				if state := getToolState(callID); state != nil {
+					if tc.Function == nil {
+						tc.Function = &model.Function{}
+					}
+					tc.Function.Name = state.name
+					tc.Function.Arguments = state.arguments()
+					if state.hasIndex {
+						idxCopy := state.index
+						tc.Index = &idxCopy
+					}
+				}
+			}
+
+			if len(delta.ToolCalls) == 0 && len(candidateIDs) > 0 {
+				for _, id := range candidateIDs {
+					if state := toolStates[id]; state != nil {
+						tool := model.Tool{
+							Id:   id,
+							Type: "function",
+							Function: &model.Function{
+								Name:      state.name,
+								Arguments: state.arguments(),
+							},
+						}
+						if state.hasIndex {
+							idxCopy := state.index
+							tool.Index = &idxCopy
+						}
+						delta.ToolCalls = append(delta.ToolCalls, tool)
+						break
+					}
+				}
+			}
+
+			// Mark that we've seen delta content for this item id so later done events
+			// referencing the same item won't re-emit the full content.
+			if streamEvent != nil && strings.Contains(streamEvent.Type, "delta") {
+				itemId := streamEvent.ItemId
+				if itemId == "" && streamEvent.Item != nil {
+					itemId = streamEvent.Item.Id
+				}
+				if itemId != "" {
+					seenOutputItems[itemId] = struct{}{}
+				}
+			}
+		}
+
 		// Accumulate usage information
 		if chatCompletionChunk.Usage != nil {
 			usage = chatCompletionChunk.Usage
 		}
 
-		// IMPORTANT: Only send ChatCompletion chunks to client for delta events ONLY
-		// Completely discard ALL other events including completion events to prevent client-side duplication
-		if streamEvent != nil {
-			eventType := streamEvent.Type
+		if eventType != "" {
+			// Prevent duplicate payloads for terminal events by clearing content deltas
+			if strings.HasPrefix(eventType, "response.completed") && len(chatCompletionChunk.Choices) > 0 {
+				// If this completed event corresponds to a fullResponse (not a
+				// streaming event) and we have accumulated deltas, prefer to
+				// re-emit the accumulated responseText as the final chunk
+				// rather than the upstream-provided content to avoid
+				// duplication.
+				if fullResponse != nil {
+					if len(chatCompletionChunk.Choices) > 0 {
+						delta := &chatCompletionChunk.Choices[0].Delta
+						delta.Content = responseText
+						delta.Reasoning = nil
+						delta.ToolCalls = nil
+					}
+				} else {
+					delta := &chatCompletionChunk.Choices[0].Delta
+					if content, ok := delta.Content.(string); ok && content != "" {
+						delta.Content = ""
+					}
+					delta.Reasoning = nil
+					delta.ToolCalls = nil
+				}
+			}
 
-			// Only send chunks for delta events (incremental content)
+			hasMeaningfulDelta := func() bool {
+				if len(chatCompletionChunk.Choices) == 0 {
+					return false
+				}
+				delta := chatCompletionChunk.Choices[0].Delta
+				if delta.Reasoning != nil && *delta.Reasoning != "" {
+					return true
+				}
+				if len(delta.ToolCalls) > 0 {
+					return true
+				}
+				switch v := delta.Content.(type) {
+				case string:
+					return v != ""
+				case []byte:
+					return len(v) > 0
+				}
+				return false
+			}()
+
+			hasToolCalls := len(chatCompletionChunk.Choices) > 0 && len(chatCompletionChunk.Choices[0].Delta.ToolCalls) > 0
+			hasFinishReason := len(chatCompletionChunk.Choices) > 0 && chatCompletionChunk.Choices[0].FinishReason != nil
+			shouldSendChunk := false
+
 			if strings.Contains(eventType, "delta") {
-				// Send the converted chunk to the client
+				shouldSendChunk = hasMeaningfulDelta
+			} else if hasToolCalls {
+				shouldSendChunk = true
+			} else if eventType == "response.completed" && hasFinishReason {
+				shouldSendChunk = true
+			} else if hasMeaningfulDelta &&
+				!strings.Contains(eventType, "output_text.done") &&
+				!strings.Contains(eventType, "content_part.done") &&
+				!strings.Contains(eventType, "output_item.done") &&
+				!strings.Contains(eventType, "reasoning_summary_text.done") {
+				shouldSendChunk = true
+			}
+
+			if shouldSendChunk {
 				jsonStr, err := json.Marshal(chatCompletionChunk)
 				if err != nil {
-					logger.SysError("error marshalling stream chunk: " + err.Error())
+					lg := gmw.GetLogger(c)
+					lg.Error("error marshalling stream chunk", zap.Error(err))
 					continue
 				}
 
 				c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
 			} else if eventType == "response.completed" && responseAPIChunk.Usage != nil {
-				// Special handling for response.completed event to send usage information
-				// Convert ResponseAPI usage to model.Usage format
+				// Special handling for response.completed when no terminal chunk was
+				// emitted above. Emit a single terminal chunk that includes the
+				// accumulated content (from deltas) and the usage payload so
+				// clients receive a final message plus billing info without
+				// duplication.
 				convertedUsage := responseAPIChunk.Usage.ToModelUsage()
 				if convertedUsage != nil {
-					// Create a usage-only streaming chunk with empty delta
+					finalContent := ""
+					var finalFinish *string
+					if len(chatCompletionChunk.Choices) > 0 {
+						// Prefer finish reason from the generated chunk if present
+						if chatCompletionChunk.Choices[0].FinishReason != nil {
+							fr := *chatCompletionChunk.Choices[0].FinishReason
+							finalFinish = &fr
+						}
+						if content, ok := chatCompletionChunk.Choices[0].Delta.Content.(string); ok && content != "" {
+							finalContent = content
+						}
+					}
+					// If upstream did not include final content (we suppressed it),
+					// fall back to the accumulated responseText built from deltas.
+					if finalContent == "" {
+						finalContent = responseText
+					}
+					// Ensure there's a finish reason
+					if finalFinish == nil {
+						fr := "stop"
+						finalFinish = &fr
+					}
+
 					usageChunk := ChatCompletionsStreamResponse{
 						Id:      responseAPIChunk.Id,
 						Object:  "chat.completion.chunk",
@@ -555,9 +1025,9 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 								Index: 0,
 								Delta: model.Message{
 									Role:    "assistant",
-									Content: "",
+									Content: finalContent,
 								},
-								FinishReason: nil, // Don't set finish reason in usage chunk
+								FinishReason: finalFinish,
 							},
 						},
 						Usage: convertedUsage,
@@ -565,21 +1035,21 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 
 					jsonStr, err := json.Marshal(usageChunk)
 					if err != nil {
-						logger.SysError("error marshalling usage chunk: " + err.Error())
+						lg := gmw.GetLogger(c)
+						lg.Error("error marshalling usage chunk", zap.Error(err))
 						continue
 					}
 
 					c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonStr)})
-					logger.Debugf(c.Request.Context(), "sent usage chunk from response.completed: %s", string(jsonStr))
+					gmw.GetLogger(c).Debug("sent usage chunk from response.completed", zap.ByteString("chunk", jsonStr))
 				}
 			}
-			// ALL other events (done events, in_progress events, etc.) are completely discarded
-			// This prevents ANY duplicate content from reaching the client
+			// ALL other events (done events, in_progress events, etc.) are discarded to avoid duplicate content leakage
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		// Let ErrorWrapper handle the logging to avoid duplicate logging
 		return ErrorWrapper(err, "read_stream_failed", http.StatusInternalServerError), responseText, usage
 	}
 
@@ -590,6 +1060,13 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 	if err := resp.Body.Close(); err != nil {
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), responseText, usage
 	}
+
+	if webSearchCount > 0 {
+		c.Set(ctxkey.WebSearchCallCount, webSearchCount)
+	}
+
+	// Record when upstream streaming is completed
+	recordUpstreamCompleted(c)
 
 	return nil, responseText, usage
 }
@@ -605,8 +1082,7 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 	}
 
 	// Log the response body for debugging
-	logger.Debugf(c.Request.Context(),
-		"got response from upstream: %s", string(responseBody))
+	gmw.GetLogger(c).Debug("got response from upstream", zap.ByteString("body", responseBody))
 
 	// Close the original response body
 	if err = resp.Body.Close(); err != nil {
@@ -625,6 +1101,10 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 			Error:      *responseAPIResp.Error,
 			StatusCode: resp.StatusCode,
 		}, nil
+	}
+
+	if calls := countWebSearchSearchActions(responseAPIResp.Output); calls > 0 {
+		c.Set(ctxkey.WebSearchCallCount, calls)
 	}
 
 	// Extract usage information for billing
@@ -655,6 +1135,11 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 
 	// Forward all response headers
 	for k, values := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") ||
+			strings.EqualFold(k, "Transfer-Encoding") ||
+			strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
 		for _, v := range values {
 			c.Writer.Header().Add(k, v)
 		}
@@ -664,8 +1149,11 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
 	if _, err = c.Writer.Write(responseBody); err != nil {
-		return ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), nil
+		// Return usage even on write failure so billing can proceed for forwarded requests
+		return ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), finalUsage
 	}
+
+	c.Set(ctxkey.ConvertedResponse, responseAPIResp)
 
 	return nil, finalUsage
 }
@@ -677,6 +1165,9 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 	// Initialize accumulators for the response
 	responseText := ""
 	var usage *model.Usage
+	webSearchSeen := make(map[string]struct{})
+	webSearchCount := 0
+	var lastFullResponse *ResponseAPIResponse
 
 	// Set up scanner for reading the stream line by line
 	scanner := bufio.NewScanner(resp.Body)
@@ -693,7 +1184,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 	for scanner.Scan() {
 		data := openai_compatible.NormalizeDataLine(scanner.Text())
 
-		logger.Debugf(c.Request.Context(), "receive stream event: %s", data)
+		gmw.GetLogger(c).Debug("receive stream event", zap.String("event", data))
 
 		if !strings.HasPrefix(data, dataPrefix) {
 			continue
@@ -712,7 +1203,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 		fullResponse, streamEvent, err := ParseResponseAPIStreamEvent([]byte(data))
 		if err != nil {
 			// Log the error with more context but continue processing
-			logger.Debugf(c.Request.Context(), "skipping unparseable stream chunk: %s, error: %s", data, err.Error())
+			gmw.GetLogger(c).Debug("skipping unparseable stream chunk", zap.String("chunk", data), zap.Error(err))
 			continue
 		}
 
@@ -720,6 +1211,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 		var responseAPIChunk ResponseAPIResponse
 		if fullResponse != nil {
 			responseAPIChunk = *fullResponse
+			lastFullResponse = fullResponse
 		} else if streamEvent != nil {
 			// Convert streaming event to ResponseAPIResponse for processing
 			responseAPIChunk = ConvertStreamEventToResponse(streamEvent)
@@ -728,11 +1220,15 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 			continue
 		}
 
+		if newCalls := countNewWebSearchSearchActions(responseAPIChunk.Output, webSearchSeen); newCalls > 0 {
+			webSearchCount += newCalls
+		}
+
 		// Accumulate response text for token counting - only from delta events to avoid duplicates
 		if streamEvent != nil && strings.Contains(streamEvent.Type, "delta") {
 			// Only accumulate content from delta events to prevent duplication
-			if streamEvent.Delta != "" {
-				responseText += streamEvent.Delta
+			if delta := extractStringFromRaw(streamEvent.Delta, "partial_json", "json", "text", "delta"); delta != "" {
+				responseText += delta
 			}
 		}
 
@@ -748,7 +1244,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		// Let ErrorWrapper handle the logging to avoid duplicate logging
 		return ErrorWrapper(err, "read_stream_failed", http.StatusInternalServerError), responseText, usage
 	}
 
@@ -758,6 +1254,23 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 
 	if err := resp.Body.Close(); err != nil {
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), responseText, usage
+	}
+
+	if webSearchCount > 0 {
+		c.Set(ctxkey.WebSearchCallCount, webSearchCount)
+	}
+
+	// Record when upstream streaming is completed
+	recordUpstreamCompleted(c)
+
+	if lastFullResponse != nil {
+		c.Set(ctxkey.ConvertedResponse, *lastFullResponse)
+	} else if responseText != "" || usage != nil {
+		c.Set(ctxkey.ConvertedResponse, map[string]any{
+			"stream":  true,
+			"content": responseText,
+			"usage":   usage,
+		})
 	}
 
 	return nil, responseText, usage

@@ -7,14 +7,22 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Laisky/zap"
+
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/logger"
 )
 
+// HTTPClient is the default outbound client used for relay requests.
 var HTTPClient *http.Client
+
+// ImpatientHTTPClient is a short-timeout client for quick health checks or metadata requests.
 var ImpatientHTTPClient *http.Client
+
+// UserContentRequestHTTPClient fetches user-supplied resources, optionally via a dedicated proxy.
 var UserContentRequestHTTPClient *http.Client
 
+// Init builds the shared HTTP clients with proxy and timeout settings derived from configuration.
 func Init() {
 	// Create a transport with HTTP/2 disabled to avoid stream errors in CI environments
 	createTransport := func(proxyURL *url.URL) *http.Transport {
@@ -28,10 +36,10 @@ func Init() {
 	}
 
 	if config.UserContentRequestProxy != "" {
-		logger.SysLog(fmt.Sprintf("using %s as proxy to fetch user content", config.UserContentRequestProxy))
+		logger.Logger.Info("using proxy to fetch user content", zap.String("proxy", config.UserContentRequestProxy))
 		proxyURL, err := url.Parse(config.UserContentRequestProxy)
 		if err != nil {
-			logger.FatalLog(fmt.Sprintf("USER_CONTENT_REQUEST_PROXY set but invalid: %s", config.UserContentRequestProxy))
+			logger.Logger.Fatal(fmt.Sprintf("USER_CONTENT_REQUEST_PROXY set but invalid: %s", config.UserContentRequestProxy))
 		}
 		UserContentRequestHTTPClient = &http.Client{
 			Transport: createTransport(proxyURL),
@@ -45,10 +53,10 @@ func Init() {
 	}
 	var transport http.RoundTripper
 	if config.RelayProxy != "" {
-		logger.SysLog(fmt.Sprintf("using %s as api relay proxy", config.RelayProxy))
+		logger.Logger.Info("using api relay proxy", zap.String("proxy", config.RelayProxy))
 		proxyURL, err := url.Parse(config.RelayProxy)
 		if err != nil {
-			logger.FatalLog(fmt.Sprintf("RELAY_PROXY set but invalid: %s", config.RelayProxy))
+			logger.Logger.Fatal(fmt.Sprintf("RELAY_PROXY set but invalid: %s", config.RelayProxy))
 		}
 		transport = createTransport(proxyURL)
 	} else {

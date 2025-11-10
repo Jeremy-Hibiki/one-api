@@ -21,6 +21,11 @@ const Dashboard = () => {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [dateError, setDateError] = useState('');
+  const [statisticsMetric, setStatisticsMetric] = useState('expenses'); // Default to expenses for berry template
+
+  const handleStatisticsMetricChange = (event, newValue) => {
+    setStatisticsMetric(newValue);
+  };
 
   const fetchDashboardUsers = async () => {
     try {
@@ -61,11 +66,13 @@ const Dashboard = () => {
     const { success, message, data } = res.data;
     if (success) {
       if (data) {
-        let lineData = getLineDataGroup(data);
+        // Handle new API response structure
+        const dashboardData = data.logs || data || [];
+        let lineData = getLineDataGroup(dashboardData);
         setRequestChart(getLineCardOption(lineData, 'RequestCount'));
         setQuotaChart(getLineCardOption(lineData, 'Quota'));
         setTokenChart(getLineCardOption(lineData, 'PromptTokens'));
-        setStatisticalData(getBarDataGroup(data));
+        setStatisticalData(getBarDataGroup(dashboardData, statisticsMetric));
       }
       setDateError('');
     } else {
@@ -110,6 +117,13 @@ const Dashboard = () => {
       userDashboard(selectedUserId, fromDate, toDate);
     }
   }, [selectedUserId, fromDate, toDate]);
+
+  useEffect(() => {
+    // Refresh data when statistics metric changes
+    if (selectedUserId && fromDate && toDate) {
+      userDashboard(selectedUserId, fromDate, toDate);
+    }
+  }, [statisticsMetric]);
 
 
 
@@ -339,7 +353,12 @@ const Dashboard = () => {
       <Grid item xs={12}>
         <Grid container spacing={gridSpacing}>
           <Grid item lg={8} xs={12}>
-            <StatisticalBarChart isLoading={isLoading} chartDatas={statisticalData} />
+            <StatisticalBarChart
+              isLoading={isLoading}
+              chartDatas={statisticalData}
+              statisticsMetric={statisticsMetric}
+              onMetricChange={handleStatisticsMetricChange}
+            />
           </Grid>
           <Grid item lg={4} xs={12}>
             <UserCard>
@@ -405,7 +424,7 @@ function getLineDataGroup(statisticalData) {
   });
 }
 
-function getBarDataGroup(data) {
+function getBarDataGroup(data, metric = 'expenses') {
   const lastSevenDays = getLastSevenDays();
   const result = [];
   const map = new Map();
@@ -427,7 +446,20 @@ function getBarDataGroup(data) {
     }
     const index = lastSevenDays.indexOf(item.Day);
     if (index !== -1) {
-      map.get(item.ModelName).data[index] = calculateQuota(item.Quota, 3);
+      let value;
+      switch (metric) {
+        case 'requests':
+          value = item.RequestCount;
+          break;
+        case 'tokens':
+          value = item.PromptTokens + item.CompletionTokens;
+          break;
+        case 'expenses':
+        default:
+          value = calculateQuota(item.Quota, 3);
+          break;
+      }
+      map.get(item.ModelName).data[index] = value;
     }
   }
 

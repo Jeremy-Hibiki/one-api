@@ -18,6 +18,7 @@ import (
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/random"
 	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
@@ -36,10 +37,10 @@ var mimeTypeMap = map[string]string{
 }
 
 // cleanJsonSchemaForGemini removes unsupported fields and converts types for Gemini API compatibility
-func cleanJsonSchemaForGemini(schema interface{}) interface{} {
+func cleanJsonSchemaForGemini(schema any) any {
 	switch v := schema.(type) {
-	case map[string]interface{}:
-		cleaned := make(map[string]interface{})
+	case map[string]any:
+		cleaned := make(map[string]any)
 
 		// List of supported fields in Gemini (from official documentation)
 		supportedFields := map[string]bool{
@@ -98,8 +99,8 @@ func cleanJsonSchemaForGemini(schema interface{}) interface{} {
 				}
 			case "properties":
 				// Handle properties object - recursively clean each property
-				if props, ok := value.(map[string]interface{}); ok {
-					cleanedProps := make(map[string]interface{})
+				if props, ok := value.(map[string]any); ok {
+					cleanedProps := make(map[string]any)
 					for propKey, propValue := range props {
 						cleanedProps[propKey] = cleanJsonSchemaForGemini(propValue)
 					}
@@ -116,9 +117,9 @@ func cleanJsonSchemaForGemini(schema interface{}) interface{} {
 			}
 		}
 		return cleaned
-	case []interface{}:
+	case []any:
 		// Clean arrays recursively
-		cleaned := make([]interface{}, len(v))
+		cleaned := make([]any, len(v))
 		for i, item := range v {
 			cleaned[i] = cleanJsonSchemaForGemini(item)
 		}
@@ -130,16 +131,16 @@ func cleanJsonSchemaForGemini(schema interface{}) interface{} {
 }
 
 // cleanFunctionParameters recursively removes additionalProperties and other unsupported fields from function parameters
-func cleanFunctionParameters(params interface{}) interface{} {
+func cleanFunctionParameters(params any) any {
 	return cleanFunctionParametersInternal(params, true)
 }
 
 // cleanFunctionParametersInternal recursively removes additionalProperties and other unsupported fields from function parameters
 // isTopLevel indicates if we're at the top level where description and strict should be removed
-func cleanFunctionParametersInternal(params interface{}, isTopLevel bool) interface{} {
+func cleanFunctionParametersInternal(params any, isTopLevel bool) any {
 	switch v := params.(type) {
-	case map[string]interface{}:
-		cleaned := make(map[string]interface{})
+	case map[string]any:
+		cleaned := make(map[string]any)
 
 		// Format mapping from OpenAI to Gemini supported formats
 		// Based on error message: only 'enum' and 'date-time' are supported for STRING type
@@ -154,6 +155,10 @@ func cleanFunctionParametersInternal(params interface{}, isTopLevel bool) interf
 		for key, value := range v {
 			// Skip additionalProperties at all levels
 			if key == "additionalProperties" {
+				continue
+			}
+			// Remove $schema markers; Gemini rejects JSON Schema meta keys
+			if key == "$schema" {
 				continue
 			}
 			// Skip description and strict only at top level
@@ -176,9 +181,9 @@ func cleanFunctionParametersInternal(params interface{}, isTopLevel bool) interf
 			cleaned[key] = cleanFunctionParametersInternal(value, false)
 		}
 		return cleaned
-	case []interface{}:
+	case []any:
 		// Clean arrays recursively
-		cleaned := make([]interface{}, len(v))
+		cleaned := make([]any, len(v))
 		for i, item := range v {
 			cleaned[i] = cleanFunctionParametersInternal(item, false)
 		}
@@ -222,6 +227,7 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *ChatRequest {
 			ResponseModalities: geminiOpenaiCompatible.GetModelModalities(textRequest.Model),
 		},
 	}
+
 	if geminiRequest.GenerationConfig.MaxOutputTokens == 0 {
 		geminiRequest.GenerationConfig.MaxOutputTokens = config.DefaultMaxToken
 	}
@@ -237,6 +243,13 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *ChatRequest {
 		}
 	}
 
+	// remove temperature & top_p for some models
+	if strings.Contains(textRequest.Model, "-image") {
+		geminiRequest.GenerationConfig.Temperature = nil
+		geminiRequest.GenerationConfig.TopP = nil
+		geminiRequest.GenerationConfig.ResponseModalities = []string{"TEXT", "IMAGE"}
+	}
+
 	// FIX(https://github.com/Laisky/one-api/issues/60):
 	// Gemini's function call supports fewer parameters than OpenAI's,
 	// so a conversion is needed here to keep only the parameters supported by Gemini.
@@ -246,13 +259,15 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *ChatRequest {
 			// Use the helper function to recursively clean function parameters
 			cleanedParams := cleanFunctionParameters(tool.Function.Parameters)
 			// Type assert to map[string]any
-			cleanedParamsMap, ok := cleanedParams.(map[string]interface{})
+			cleanedParamsMap, ok := cleanedParams.(map[string]any)
 			if !ok {
 				// If type assertion fails, fallback to original parameters without additionalProperties
-				cleanedParamsMap = make(map[string]interface{})
-				for k, v := range tool.Function.Parameters {
-					if k != "additionalProperties" && k != "description" && k != "strict" {
-						cleanedParamsMap[k] = v
+				cleanedParamsMap = make(map[string]any)
+				if originalParams, ok := tool.Function.Parameters.(map[string]any); ok {
+					for k, v := range originalParams {
+						if k != "additionalProperties" && k != "description" && k != "strict" {
+							cleanedParamsMap[k] = v
+						}
 					}
 				}
 			}
@@ -273,13 +288,15 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *ChatRequest {
 			// Use the helper function to recursively clean function parameters
 			cleanedParams := cleanFunctionParameters(function.Parameters)
 			// Type assert to map[string]any
-			cleanedParamsMap, ok := cleanedParams.(map[string]interface{})
+			cleanedParamsMap, ok := cleanedParams.(map[string]any)
 			if !ok {
 				// If type assertion fails, fallback to original parameters without additionalProperties
-				cleanedParamsMap = make(map[string]interface{})
-				for k, v := range function.Parameters {
-					if k != "additionalProperties" && k != "description" && k != "strict" {
-						cleanedParamsMap[k] = v
+				cleanedParamsMap = make(map[string]any)
+				if originalParams, ok := function.Parameters.(map[string]any); ok {
+					for k, v := range originalParams {
+						if k != "additionalProperties" && k != "description" && k != "strict" {
+							cleanedParamsMap[k] = v
+						}
 					}
 				}
 			}
@@ -318,7 +335,7 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *ChatRequest {
 		if len(message.ToolCalls) > 0 {
 			for _, toolCall := range message.ToolCalls {
 				// Parse the arguments from JSON string to interface{}
-				var args interface{}
+				var args any
 				if err := json.Unmarshal([]byte(toolCall.Function.Arguments.(string)), &args); err != nil {
 					// If parsing fails, use the raw string
 					args = toolCall.Function.Arguments
@@ -481,13 +498,13 @@ func getToolCalls(candidate *ChatCandidate) []model.Tool {
 	}
 	argsBytes, err := json.Marshal(item.FunctionCall.Arguments)
 	if err != nil {
-		logger.FatalLog("getToolCalls failed: " + errors.Wrap(err, "marshal function call arguments").Error())
+		logger.Logger.Fatal("getToolCalls failed: " + errors.Wrap(err, "marshal function call arguments").Error())
 		return toolCalls
 	}
 	toolCall := model.Tool{
 		Id:   fmt.Sprintf("call_%s", random.GetUUID()),
 		Type: "function",
-		Function: model.Function{
+		Function: &model.Function{
 			Arguments: string(argsBytes),
 			Name:      item.FunctionCall.FunctionName,
 		},
@@ -507,7 +524,7 @@ func getStreamingToolCalls(candidate *ChatCandidate) []model.Tool {
 		}
 		argsBytes, err := json.Marshal(part.FunctionCall.Arguments)
 		if err != nil {
-			logger.FatalLog("getStreamingToolCalls failed: " + errors.Wrap(err, "marshal function call arguments").Error())
+			logger.Logger.Fatal("getStreamingToolCalls failed: " + errors.Wrap(err, "marshal function call arguments").Error())
 			continue
 		}
 		// Set index for streaming tool calls - use the part index to ensure proper ordering
@@ -516,7 +533,7 @@ func getStreamingToolCalls(candidate *ChatCandidate) []model.Tool {
 		toolCall := model.Tool{
 			Id:   fmt.Sprintf("call_%s", random.GetUUID()),
 			Type: "function",
-			Function: model.Function{
+			Function: &model.Function{
 				Arguments: string(argsBytes),
 				Name:      part.FunctionCall.FunctionName,
 			},
@@ -527,9 +544,9 @@ func getStreamingToolCalls(candidate *ChatCandidate) []model.Tool {
 	return toolCalls
 }
 
-func responseGeminiChat2OpenAI(response *ChatResponse) *openai.TextResponse {
+func responseGeminiChat2OpenAI(c *gin.Context, response *ChatResponse) *openai.TextResponse {
 	fullTextResponse := openai.TextResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion",
 		Created: helper.GetTimestamp(),
 		Choices: make([]openai.TextResponseChoice, 0, len(response.Candidates)),
@@ -597,7 +614,7 @@ func responseGeminiChat2OpenAI(response *ChatResponse) *openai.TextResponse {
 	return &fullTextResponse
 }
 
-func streamResponseGeminiChat2OpenAI(geminiResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
+func streamResponseGeminiChat2OpenAI(c *gin.Context, geminiResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
 	var choice openai.ChatCompletionsStreamResponseChoice
 	choice.Delta.Role = "assistant"
 
@@ -665,7 +682,7 @@ func streamResponseGeminiChat2OpenAI(geminiResponse *ChatResponse) *openai.ChatC
 
 	// Create response
 	var response openai.ChatCompletionsStreamResponse
-	response.Id = fmt.Sprintf("chatcmpl-%s", random.GetUUID())
+	response.Id = tracing.GenerateChatCompletionID(c)
 	response.Created = helper.GetTimestamp()
 	response.Object = "chat.completion.chunk"
 	response.Model = "gemini"
@@ -714,11 +731,11 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		var geminiResponse ChatResponse
 		err := json.Unmarshal([]byte(data), &geminiResponse)
 		if err != nil {
-			logger.SysError("error unmarshalling stream response: " + errors.Wrap(err, "unmarshal stream").Error())
+			logger.Logger.Error("error unmarshalling stream response: " + errors.Wrap(err, "unmarshal stream").Error())
 			continue
 		}
 
-		response := streamResponseGeminiChat2OpenAI(&geminiResponse)
+		response := streamResponseGeminiChat2OpenAI(c, &geminiResponse)
 		if response == nil {
 			continue
 		}
@@ -727,11 +744,11 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 		err = render.ObjectData(c, response)
 		if err != nil {
-			logger.SysError(errors.Wrap(err, "render stream").Error())
+			logger.Logger.Error(errors.Wrap(err, "render stream").Error())
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + errors.Wrap(err, "scanner stream").Error())
+		logger.Logger.Error("error reading stream: " + errors.Wrap(err, "scanner stream").Error())
 	}
 
 	render.Done(c)
@@ -749,10 +766,12 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	if err != nil {
 		return openai.ErrorWrapper(errors.Wrap(err, "read_response_body_failed"), "read_response_body_failed", http.StatusInternalServerError), nil
 	}
+
 	err = resp.Body.Close()
 	if err != nil {
 		return openai.ErrorWrapper(errors.Wrap(err, "close_response_body_failed"), "close_response_body_failed", http.StatusInternalServerError), nil
 	}
+
 	var geminiResponse ChatResponse
 	err = json.Unmarshal(responseBody, &geminiResponse)
 	if err != nil {
@@ -761,22 +780,39 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	if len(geminiResponse.Candidates) == 0 {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: "No candidates returned",
-				Type:    "server_error",
-				Param:   "",
-				Code:    500,
+				Message:  "No candidates returned",
+				Type:     "server_error",
+				Param:    "",
+				Code:     500,
+				RawError: errors.New("No candidates returned"),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
-	fullTextResponse := responseGeminiChat2OpenAI(&geminiResponse)
+	fullTextResponse := responseGeminiChat2OpenAI(c, &geminiResponse)
 	fullTextResponse.Model = modelName
-	completionTokens := openai.CountTokenText(geminiResponse.GetResponseText(), modelName)
-	usage := model.Usage{
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      promptTokens + completionTokens,
+
+	// Prioritize usageMetadata from Gemini response
+	var usage model.Usage
+	if geminiResponse.UsageMetadata != nil &&
+		geminiResponse.UsageMetadata.TotalTokenCount > 0 {
+		// Use Gemini's provided token counts
+		usage = model.Usage{
+			PromptTokens: geminiResponse.UsageMetadata.PromptTokenCount,
+			CompletionTokens: geminiResponse.UsageMetadata.CandidatesTokenCount +
+				geminiResponse.UsageMetadata.ThoughtsTokenCount,
+			TotalTokens: geminiResponse.UsageMetadata.TotalTokenCount,
+		}
+	} else {
+		// Fall back to manual calculation if usageMetadata is unavailable or zero
+		completionTokens := openai.CountTokenText(geminiResponse.GetResponseText(), modelName)
+		usage = model.Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		}
 	}
+
 	fullTextResponse.Usage = usage
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
@@ -805,10 +841,11 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStat
 	if geminiEmbeddingResponse.Error != nil {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: geminiEmbeddingResponse.Error.Message,
-				Type:    "gemini_error",
-				Param:   "",
-				Code:    geminiEmbeddingResponse.Error.Code,
+				Message:  geminiEmbeddingResponse.Error.Message,
+				Type:     "gemini_error",
+				Param:    "",
+				Code:     geminiEmbeddingResponse.Error.Code,
+				RawError: errors.New(geminiEmbeddingResponse.Error.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil

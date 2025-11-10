@@ -2,18 +2,18 @@ package palm
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 
-	"github.com/songquanpeng/one-api/common/render"
-
+	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
+	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
 	"github.com/songquanpeng/one-api/relay/model"
@@ -84,15 +84,16 @@ func streamResponsePaLM2OpenAI(palmResponse *ChatResponse) *openai.ChatCompletio
 }
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, string) {
+	lg := gmw.GetLogger(c)
 	responseText := ""
-	responseId := fmt.Sprintf("chatcmpl-%s", random.GetUUID())
+	responseId := tracing.GenerateChatCompletionID(c)
 	createdTime := helper.GetTimestamp()
 
 	common.SetEventStreamHeaders(c)
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		logger.SysError("error reading stream response: " + err.Error())
+		lg.Error("error reading stream response", zap.Error(err))
 		err := resp.Body.Close()
 		if err != nil {
 			return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), ""
@@ -108,7 +109,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 	var palmResponse ChatResponse
 	err = json.Unmarshal(responseBody, &palmResponse)
 	if err != nil {
-		logger.SysError("error unmarshalling stream response: " + err.Error())
+		lg.Error("error unmarshalling stream response", zap.Error(err))
 		return openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), ""
 	}
 
@@ -121,13 +122,13 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
-		logger.SysError("error marshalling stream response: " + err.Error())
+		lg.Error("error marshalling stream response", zap.Error(err))
 		return openai.ErrorWrapper(err, "marshal_response_body_failed", http.StatusInternalServerError), ""
 	}
 
 	err = render.ObjectData(c, string(jsonResponse))
 	if err != nil {
-		logger.SysError(err.Error())
+		lg.Error("error rendering response", zap.Error(err))
 	}
 
 	render.Done(c)
@@ -152,10 +153,11 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	if palmResponse.Error.Code != 0 || len(palmResponse.Candidates) == 0 {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: palmResponse.Error.Message,
-				Type:    palmResponse.Error.Status,
-				Param:   "",
-				Code:    palmResponse.Error.Code,
+				Message:  palmResponse.Error.Message,
+				Type:     palmResponse.Error.Status,
+				Param:    "",
+				Code:     palmResponse.Error.Code,
+				RawError: errors.New(palmResponse.Error.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil

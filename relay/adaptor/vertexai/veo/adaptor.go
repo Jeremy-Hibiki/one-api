@@ -10,20 +10,29 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
+	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
 )
 
-var ModelList = []string{
-	"veo-2.0-generate-001",
-	"veo-3.0-generate-preview",
+// ModelRatios contains all supported models and their pricing ratios
+// Model list is derived from the keys of this map, eliminating redundancy
+// Based on VertexAI Veo pricing: https://cloud.google.com/vertex-ai/generative-ai/pricing
+var ModelRatios = map[string]adaptor.ModelConfig{
+	// Veo Video Generation Models
+	"veo-2.0-generate-001":     {Ratio: 0.1 * ratio.QuotaPerUsd, CompletionRatio: 1},  // $0.1 per video (scaled by unit)
+	"veo-3.0-generate-preview": {Ratio: 0.15 * ratio.QuotaPerUsd, CompletionRatio: 1}, // $0.15 per video (scaled by unit)
 }
+
+// ModelList derived from ModelRatios for backward compatibility
+var ModelList = adaptor.GetModelListFromPricing(ModelRatios)
 
 const (
 	pollInterval             = 5 * time.Second // Polling interval for video task status
@@ -158,7 +167,7 @@ func pollVideoTask(
 		var pollAttemptErr *model.ErrorWithStatusCode
 
 		func() { // Anonymous function to scope defer
-			req, err := http.NewRequestWithContext(c.Request.Context(),
+			req, err := http.NewRequestWithContext(gmw.Ctx(c),
 				http.MethodPost, pollUrl, bytes.NewBuffer(pollBodyBytes))
 			if err != nil {
 				pollAttemptErr = openai.ErrorWrapper(errors.Wrap(err, "create_poll_request_failed"), "create_poll_request_failed", http.StatusInternalServerError)
@@ -202,8 +211,8 @@ func pollVideoTask(
 		select {
 		case <-time.After(pollInterval):
 			// Continue to next iteration
-		case <-c.Request.Context().Done():
-			return openai.ErrorWrapper(c.Request.Context().Err(), "request_context_done_while_waiting_for_poll", http.StatusRequestTimeout)
+		case <-gmw.Ctx(c).Done():
+			return openai.ErrorWrapper(gmw.Ctx(c).Err(), "request_context_done_while_waiting_for_poll", http.StatusRequestTimeout)
 		}
 	}
 }

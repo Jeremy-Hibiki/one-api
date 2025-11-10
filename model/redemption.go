@@ -27,6 +27,8 @@ type Redemption struct {
 	CreatedTime  int64  `json:"created_time" gorm:"bigint"`
 	RedeemedTime int64  `json:"redeemed_time" gorm:"bigint"`
 	Count        int    `json:"count" gorm:"-:all"` // only for api request
+	CreatedAt    int64  `json:"created_at" gorm:"bigint;autoCreateTime:milli"`
+	UpdatedAt    int64  `json:"updated_at" gorm:"bigint;autoUpdateTime:milli"`
 }
 
 func GetAllRedemptions(startIdx int, num int) ([]*Redemption, error) {
@@ -36,9 +38,29 @@ func GetAllRedemptions(startIdx int, num int) ([]*Redemption, error) {
 	return redemptions, err
 }
 
-func SearchRedemptions(keyword string) (redemptions []*Redemption, err error) {
-	err = DB.Where("id = ? or name LIKE ?", keyword, keyword+"%").Find(&redemptions).Error
-	return redemptions, err
+func GetRedemptionCount() (count int64, err error) {
+	err = DB.Model(&Redemption{}).Count(&count).Error
+	return count, err
+}
+
+func SearchRedemptions(keyword string, startIdx int, num int, sortBy string, sortOrder string) (redemptions []*Redemption, total int64, err error) {
+	db := DB.Model(&Redemption{})
+	if keyword != "" {
+		db = db.Where("id = ? or name LIKE ?", keyword, keyword+"%")
+	}
+	if sortBy != "" {
+		orderClause := sortBy
+		if sortOrder == "asc" {
+			orderClause += " asc"
+		} else {
+			orderClause += " desc"
+		}
+		db = db.Order(orderClause)
+	} else {
+		db = db.Order("id desc")
+	}
+	err = db.Count(&total).Limit(num).Offset(startIdx).Find(&redemptions).Error
+	return redemptions, total, err
 }
 
 func GetRedemptionById(id int) (*Redemption, error) {
@@ -61,7 +83,7 @@ func Redeem(ctx context.Context, key string, userId int) (quota int64, err error
 	redemption := &Redemption{}
 
 	keyCol := "`key`"
-	if common.UsingPostgreSQL {
+	if common.UsingPostgreSQL.Load() {
 		keyCol = `"key"`
 	}
 
@@ -75,24 +97,27 @@ func Redeem(ctx context.Context, key string, userId int) (quota int64, err error
 		}
 		err = tx.Model(&User{}).Where("id = ?", userId).Update("quota", gorm.Expr("quota + ?", redemption.Quota)).Error
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "increase user %d quota with redemption", userId)
 		}
 		redemption.RedeemedTime = helper.GetTimestamp()
 		redemption.Status = RedemptionCodeStatusUsed
-		err = tx.Save(redemption).Error
-		return err
+		if err = tx.Save(redemption).Error; err != nil {
+			return errors.Wrap(err, "update redemption status")
+		}
+		return nil
 	})
 	if err != nil {
-		return 0, errors.New("Redeem failed, " + err.Error())
+		return 0, errors.Wrap(err, "Redeem failed")
 	}
 	RecordLog(ctx, userId, LogTypeTopup, fmt.Sprintf("Recharged %s using redemption code", common.LogQuota(redemption.Quota)))
 	return redemption.Quota, nil
 }
 
 func (redemption *Redemption) Insert() error {
-	var err error
-	err = DB.Create(redemption).Error
-	return err
+	if err := DB.Create(redemption).Error; err != nil {
+		return errors.Wrap(err, "insert redemption")
+	}
+	return nil
 }
 
 func (redemption *Redemption) SelectUpdate() error {
@@ -102,15 +127,17 @@ func (redemption *Redemption) SelectUpdate() error {
 
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (redemption *Redemption) Update() error {
-	var err error
-	err = DB.Model(redemption).Select("name", "status", "quota", "redeemed_time").Updates(redemption).Error
-	return err
+	if err := DB.Model(redemption).Select("name", "status", "quota", "redeemed_time").Updates(redemption).Error; err != nil {
+		return errors.Wrapf(err, "update redemption %d", redemption.Id)
+	}
+	return nil
 }
 
 func (redemption *Redemption) Delete() error {
-	var err error
-	err = DB.Delete(redemption).Error
-	return err
+	if err := DB.Delete(redemption).Error; err != nil {
+		return errors.Wrapf(err, "delete redemption %d", redemption.Id)
+	}
+	return nil
 }
 
 func DeleteRedemptionById(id int) (err error) {
@@ -120,7 +147,7 @@ func DeleteRedemptionById(id int) (err error) {
 	redemption := Redemption{Id: id}
 	err = DB.Where(redemption).First(&redemption).Error
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "find redemption %d", id)
 	}
 	return redemption.Delete()
 }

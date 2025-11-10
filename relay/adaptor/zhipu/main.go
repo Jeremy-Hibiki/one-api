@@ -9,12 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/render"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
@@ -40,7 +42,7 @@ func GetToken(apikey string) string {
 
 	split := strings.Split(apikey, ".")
 	if len(split) != 2 {
-		logger.SysError("invalid zhipu key: " + apikey)
+		// invalid zhipu key
 		return ""
 	}
 
@@ -145,12 +147,13 @@ func streamMetaResponseZhipu2OpenAI(zhipuResponse *StreamMetaResponse) (*openai.
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	var usage *model.Usage
+	lg := gmw.GetLogger(c)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
 			return 0, nil, nil
 		}
-		if i := strings.Index(string(data), "\n\n"); i >= 0 && strings.Index(string(data), ":") >= 0 {
+		if i := strings.Index(string(data), "\n\n"); i >= 0 && strings.Contains(string(data), ":") {
 			return i + 2, data[0:i], nil
 		}
 		if atEOF {
@@ -176,20 +179,20 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 				response := streamResponseZhipu2OpenAI(dataSegment)
 				err := render.ObjectData(c, response)
 				if err != nil {
-					logger.SysError("error marshalling stream response: " + err.Error())
+					lg.Error("error marshalling stream response", zap.Error(err))
 				}
 			} else if strings.HasPrefix(line, "meta:") {
 				metaSegment := line[5:]
 				var zhipuResponse StreamMetaResponse
 				err := json.Unmarshal([]byte(metaSegment), &zhipuResponse)
 				if err != nil {
-					logger.SysError("error unmarshalling stream response: " + err.Error())
+					lg.Error("error unmarshalling stream response", zap.Error(err))
 					continue
 				}
 				response, zhipuUsage := streamMetaResponseZhipu2OpenAI(&zhipuResponse)
 				err = render.ObjectData(c, response)
 				if err != nil {
-					logger.SysError("error marshalling stream response: " + err.Error())
+					lg.Error("error marshalling stream response", zap.Error(err))
 				}
 				usage = zhipuUsage
 			}
@@ -197,7 +200,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
 	render.Done(c)
@@ -227,10 +230,11 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 	if !zhipuResponse.Success {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: zhipuResponse.Msg,
-				Type:    "zhipu_error",
-				Param:   "",
-				Code:    zhipuResponse.Code,
+				Message:  zhipuResponse.Msg,
+				Type:     "zhipu_error",
+				Param:    "",
+				Code:     zhipuResponse.Code,
+				RawError: errors.New(zhipuResponse.Msg),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil

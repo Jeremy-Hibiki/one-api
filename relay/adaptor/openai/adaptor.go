@@ -3,21 +3,24 @@ package openai
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"strings"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
+
+	"github.com/songquanpeng/one-api/common/image"
 
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
-	dbmodel "github.com/songquanpeng/one-api/model"
+	imgutil "github.com/songquanpeng/one-api/common/image"
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/alibailian"
 	"github.com/songquanpeng/one-api/relay/adaptor/baiduv2"
@@ -25,6 +28,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
 	"github.com/songquanpeng/one-api/relay/adaptor/minimax"
 	"github.com/songquanpeng/one-api/relay/adaptor/novita"
+	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
 	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
@@ -33,7 +37,84 @@ import (
 )
 
 type Adaptor struct {
+	// failed to inline image URL; sending original URL upstream
+	// logger.Logger.Warn("failed to inline image URL; sending original URL upstream",
+	//     zap.String("url", url),
+	//     zap.Error(err))
 	ChannelType int
+}
+
+// azureRequiresResponseAPI returns true when Azure supports the model only via the Response API.
+func azureRequiresResponseAPI(modelName string) bool {
+	normalized := normalizedModelName(modelName)
+	return strings.HasPrefix(normalized, "gpt-5")
+}
+
+// shouldForceResponseAPI reports whether the upstream request must use the Response API surface.
+func shouldForceResponseAPI(metaInfo *meta.Meta) bool {
+	if metaInfo == nil {
+		return false
+	}
+	switch metaInfo.ChannelType {
+	case channeltype.OpenAI:
+		if metaInfo.ResponseAPIFallback {
+			return false
+		}
+		return !IsModelsOnlySupportedByChatCompletionAPI(metaInfo.ActualModelName)
+	case channeltype.Azure:
+		return azureRequiresResponseAPI(metaInfo.ActualModelName)
+	case channeltype.OpenAICompatible:
+		if metaInfo.ResponseAPIFallback {
+			return false
+		}
+		if openai_compatible.IsGitHubModelsBaseURL(metaInfo.BaseURL) {
+			return false
+		}
+		return channeltype.UseOpenAICompatibleResponseAPI(metaInfo.Config.APIFormat)
+	default:
+		return false
+	}
+}
+
+// webSearchCallUSDPerThousand returns the USD cost per 1000 calls for the given model name
+//
+//   - https://openai.com/api/pricing/
+//   - https://platform.openai.com/docs/pricing#built-in-tools
+func webSearchCallUSDPerThousand(modelName string) float64 {
+	lower := normalizedModelName(modelName)
+
+	if isModelSupportedReasoning(lower) {
+		return 10.0
+	}
+
+	if isWebSearchPreviewModel(lower) {
+		return 25.0
+	}
+
+	if strings.Contains(lower, "-web-search") || strings.Contains(lower, "-search") {
+		return 10.0
+	}
+
+	return 25.0
+}
+
+func normalizedModelName(modelName string) string {
+	return strings.ToLower(strings.TrimSpace(modelName))
+}
+
+func isWebSearchPreviewModel(lower string) bool {
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "search-preview") || strings.Contains(lower, "web-search-preview")
+}
+
+func webSearchCallQuotaPerInvocation(modelName string) int64 {
+	usd := webSearchCallUSDPerThousand(modelName)
+	if usd <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(usd / 1000.0 * ratio.QuotaPerUsd))
 }
 
 func (a *Adaptor) Init(meta *meta.Meta) {
@@ -43,12 +124,20 @@ func (a *Adaptor) Init(meta *meta.Meta) {
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 	switch meta.ChannelType {
 	case channeltype.Azure:
+		// Azure requires a deployment name (model) in the URL.
+		if strings.TrimSpace(meta.ActualModelName) == "" {
+			return "", errors.Errorf("azure request url build failed: empty ActualModelName for path %q", meta.RequestURLPath)
+		}
+
 		defaultVersion := meta.Config.APIVersion
 
 		// https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/reasoning?tabs=python#api--feature-support
 		if strings.HasPrefix(meta.ActualModelName, "o1") ||
+			strings.HasPrefix(meta.ActualModelName, "o4") ||
 			strings.HasPrefix(meta.ActualModelName, "o3") {
-			defaultVersion = "2024-12-01-preview"
+			defaultVersion = "2025-04-01-preview"
+		} else if azureRequiresResponseAPI(meta.ActualModelName) {
+			defaultVersion = "v1"
 		}
 
 		if meta.Mode == relaymode.ImagesGenerations {
@@ -59,16 +148,55 @@ func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 		}
 
 		// https://learn.microsoft.com/en-us/azure/cognitive-services/openai/chatgpt-quickstart?pivots=rest-api&tabs=command-line#rest-api
-		requestURL := strings.Split(meta.RequestURLPath, "?")[0]
-		requestURL = fmt.Sprintf("%s?api-version=%s", requestURL, defaultVersion)
-		task := strings.TrimPrefix(requestURL, "/v1/")
+		// https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/reasoning?tabs=gpt-5%2Cpython%2Cpy#api--feature-support
+		useResponseAPI := meta.Mode == relaymode.ResponseAPI || azureRequiresResponseAPI(meta.ActualModelName)
+		requestPath := meta.RequestURLPath
+		if idx := strings.Index(requestPath, "?"); idx >= 0 {
+			requestPath = requestPath[:idx]
+		}
+		if strings.TrimSpace(requestPath) == "" {
+			requestPath = "/v1/chat/completions"
+		}
+		if useResponseAPI {
+			requestURL := "/openai/v1/responses"
+			if strings.TrimSpace(defaultVersion) != "" {
+				requestURL = fmt.Sprintf("%s?api-version=%s", requestURL, defaultVersion)
+			}
+			return GetFullRequestURL(meta.BaseURL, requestURL, meta.ChannelType), nil
+		}
+		task := strings.TrimPrefix(requestPath, "/")
+		task = strings.TrimPrefix(task, "v1/")
 		model_ := meta.ActualModelName
-		// https://github.com/songquanpeng/one-api/issues/2235
-		// model_ = strings.Replace(model_, ".", "", -1)
-		//https://github.com/songquanpeng/one-api/issues/1191
-		// {your endpoint}/openai/deployments/{your azure_model}/chat/completions?api-version={api_version}
-		requestURL = fmt.Sprintf("/openai/deployments/%s/%s", model_, task)
+		requestURL := fmt.Sprintf("/openai/deployments/%s/%s?api-version=%s", model_, task, defaultVersion)
 		return GetFullRequestURL(meta.BaseURL, requestURL, meta.ChannelType), nil
+	case channeltype.OpenAICompatible:
+		requestPath := strings.TrimSpace(meta.RequestURLPath)
+		query := ""
+		if idx := strings.Index(requestPath, "?"); idx >= 0 {
+			query = requestPath[idx:]
+			requestPath = requestPath[:idx]
+		}
+
+		format := channeltype.NormalizeOpenAICompatibleAPIFormat(meta.Config.APIFormat)
+		isGitHub := openai_compatible.IsGitHubModelsBaseURL(meta.BaseURL)
+
+		if meta.Mode == relaymode.ChatCompletions || meta.Mode == relaymode.ClaudeMessages || meta.Mode == relaymode.ResponseAPI {
+			if format == channeltype.OpenAICompatibleAPIFormatResponse && !isGitHub {
+				requestPath = "/v1/responses"
+			} else {
+				if requestPath == "" || requestPath == "/" || requestPath == "/v1/responses" || requestPath == "/v1/messages" {
+					requestPath = "/v1/chat/completions"
+				}
+			}
+		}
+
+		if isGitHub {
+			requestPath = openai_compatible.NormalizeGitHubRequestPath(requestPath, meta.Mode)
+		} else if requestPath == "" {
+			requestPath = "/v1/chat/completions"
+		}
+
+		return GetFullRequestURL(meta.BaseURL, requestPath+query, meta.ChannelType), nil
 	case channeltype.Minimax:
 		return minimax.GetRequestURL(meta)
 	case channeltype.Doubao:
@@ -82,21 +210,32 @@ func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 	case channeltype.GeminiOpenAICompatible:
 		return geminiOpenaiCompatible.GetRequestURL(meta)
 	default:
-		// Handle Claude Messages requests - convert to OpenAI Chat Completions endpoint
-		if meta.RequestURLPath == "/v1/messages" {
-			// Claude Messages requests should use OpenAI's chat completions endpoint
+		// Handle Claude Messages requests - check if model should use Response API
+		requestPath := meta.RequestURLPath
+		if idx := strings.Index(requestPath, "?"); idx >= 0 {
+			requestPath = requestPath[:idx]
+		}
+		if requestPath == "/v1/messages" {
+			// For OpenAI channels, check if the model should use Response API
+			if meta.ChannelType == channeltype.OpenAI &&
+				!IsModelsOnlySupportedByChatCompletionAPI(meta.ActualModelName) &&
+				!meta.ResponseAPIFallback {
+				responseAPIPath := "/v1/responses"
+				return GetFullRequestURL(meta.BaseURL, responseAPIPath, meta.ChannelType), nil
+			}
+			// Otherwise, use ChatCompletion endpoint
 			chatCompletionsPath := "/v1/chat/completions"
 			return GetFullRequestURL(meta.BaseURL, chatCompletionsPath, meta.ChannelType), nil
 		}
 
-		// Convert chat completions to responses API for OpenAI only
-		// Skip conversion for models that only support ChatCompletion API
-		if meta.Mode == relaymode.ChatCompletions &&
-			meta.ChannelType == channeltype.OpenAI &&
-			!IsModelsOnlySupportedByChatCompletionAPI(meta.ActualModelName) {
+		if meta.ChannelType == channeltype.OpenAI &&
+			(meta.Mode == relaymode.ChatCompletions || meta.Mode == relaymode.ClaudeMessages) &&
+			!IsModelsOnlySupportedByChatCompletionAPI(meta.ActualModelName) &&
+			!meta.ResponseAPIFallback {
 			responseAPIPath := "/v1/responses"
 			return GetFullRequestURL(meta.BaseURL, responseAPIPath, meta.ChannelType), nil
 		}
+
 		return GetFullRequestURL(meta.BaseURL, meta.RequestURLPath, meta.ChannelType), nil
 	}
 }
@@ -120,44 +259,220 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 		return nil, errors.New("request is nil")
 	}
 
-	meta := meta.GetByContext(c)
+	metaInfo := meta.GetByContext(c)
+	// Add debug info for conversion path
+	// This helps diagnose cases where model name may be missing or conversion selects Response API unexpectedly.
+	// Note: use request.Model for origin field and meta.ActualModelName for resolved model.
+	if config.DebugEnabled {
+		// avoid heavy logs by omitting full request body here
+	}
 
 	// Handle direct Response API requests
 	if relayMode == relaymode.ResponseAPI {
-		// For direct Response API requests, the request should already be in the correct format
-		// We don't need to convert it, just pass it through
+		// Apply transformations (e.g., image URL -> base64) and pass through
+		if err := a.applyRequestTransformations(metaInfo, request); err != nil {
+			return nil, errors.Wrap(err, "apply request transformations for Response API")
+		}
+		logConvertedRequest(c, metaInfo, relayMode, request)
 		return request, nil
 	}
 
-	// Convert ChatCompletion requests to Response API format only for OpenAI
-	// Skip conversion for models that only support ChatCompletion API
-	if relayMode == relaymode.ChatCompletions &&
-		meta.ChannelType == channeltype.OpenAI &&
-		!IsModelsOnlySupportedByChatCompletionAPI(meta.ActualModelName) {
-		// Apply existing transformations first
-		if err := a.applyRequestTransformations(meta, request); err != nil {
-			return nil, err
-		}
+	// Apply existing transformations for other modes before determining conversion strategy
+	if err := a.applyRequestTransformations(metaInfo, request); err != nil {
+		return nil, errors.Wrap(err, "apply request transformations")
+	}
 
-		// Convert to Response API format
+	if (relayMode == relaymode.ChatCompletions || relayMode == relaymode.ClaudeMessages) &&
+		shouldForceResponseAPI(metaInfo) {
 		responseAPIRequest := ConvertChatCompletionToResponseAPI(request)
-
-		// Store the converted request in context to detect it later in DoResponse
 		c.Set(ctxkey.ConvertedRequest, responseAPIRequest)
-
+		metaInfo.RequestURLPath = "/v1/responses"
+		meta.Set2Context(c, metaInfo)
+		logConvertedRequest(c, metaInfo, relayMode, responseAPIRequest)
 		return responseAPIRequest, nil
 	}
 
-	// Apply existing transformations for other modes
-	if err := a.applyRequestTransformations(meta, request); err != nil {
-		return nil, err
+	logConvertedRequest(c, metaInfo, relayMode, request)
+	return request, nil
+}
+
+// isModelSupportedReasoning checks if the model supports reasoning features
+func isModelSupportedReasoning(modelName string) bool {
+	switch {
+	case strings.HasPrefix(modelName, "o"),
+		strings.HasPrefix(modelName, "gpt-5") && !strings.HasPrefix(modelName, "gpt-5-chat"):
+		return true
+	default:
+		return false
+	}
+}
+
+// isWebSearchModel returns true when the upstream OpenAI model uses the web search surface
+// and therefore rejects parameters like temperature/top_p.
+func isWebSearchModel(modelName string) bool {
+	return strings.Contains(modelName, "-search") || strings.Contains(modelName, "-search-preview")
+}
+
+func isDeepResearchModel(modelName string) bool {
+	return strings.Contains(modelName, "deep-research")
+}
+
+func defaultReasoningEffortForModel(modelName string) string {
+	if isDeepResearchModel(modelName) {
+		return "medium"
+	}
+	return "high"
+}
+
+func isReasoningEffortAllowedForModel(modelName, effort string) bool {
+	if effort == "" {
+		return false
+	}
+	if isDeepResearchModel(modelName) {
+		return effort == "medium"
+	}
+	switch effort {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeReasoningEffortForModel(modelName string, effort *string) *string {
+	defaultEffort := defaultReasoningEffortForModel(modelName)
+	if effort == nil {
+		return stringRef(defaultEffort)
+	}
+	normalized := strings.ToLower(strings.TrimSpace(*effort))
+	if !isReasoningEffortAllowedForModel(modelName, normalized) {
+		return stringRef(defaultEffort)
+	}
+	return stringRef(normalized)
+}
+
+func stringRef(value string) *string {
+	return &value
+}
+
+func generalToolSummary(tools []model.Tool) (bool, []string) {
+	if len(tools) == 0 {
+		return false, nil
+	}
+	hasWebSearch := false
+	types := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		typeName := strings.ToLower(strings.TrimSpace(tool.Type))
+		if typeName == "" && tool.Function != nil {
+			typeName = "function"
+		}
+		if typeName == "" {
+			typeName = "unknown"
+		}
+		types = append(types, typeName)
+		if typeName == "web_search" {
+			hasWebSearch = true
+		}
+	}
+	return hasWebSearch, types
+}
+
+func responseAPIToolSummary(tools []ResponseAPITool) (bool, []string) {
+	if len(tools) == 0 {
+		return false, nil
+	}
+	hasWebSearch := false
+	types := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		typeName := strings.ToLower(strings.TrimSpace(tool.Type))
+		if typeName == "" {
+			typeName = "unknown"
+		}
+		types = append(types, typeName)
+		if strings.HasPrefix(typeName, "web_search") {
+			hasWebSearch = true
+		}
+	}
+	return hasWebSearch, types
+}
+
+func logConvertedRequest(c *gin.Context, metaInfo *meta.Meta, relayMode int, payload any) {
+	if c == nil {
+		return
+	}
+	lg := gmw.GetLogger(c)
+	if lg == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.Int("relay_mode", relayMode),
+	}
+	if metaInfo != nil {
+		fields = append(fields,
+			zap.String("model", metaInfo.ActualModelName),
+			zap.Int("channel_id", metaInfo.ChannelId),
+		)
+	}
+	switch req := payload.(type) {
+	case *ResponseAPIRequest:
+		hasWebSearch, toolTypes := responseAPIToolSummary(req.Tools)
+		fields = append(fields,
+			zap.String("payload_type", "response_api"),
+			zap.Int("input_items", len(req.Input)),
+			zap.Int("tool_count", len(req.Tools)),
+			zap.Bool("has_web_search_tool", hasWebSearch),
+		)
+		if len(toolTypes) > 0 {
+			fields = append(fields, zap.Strings("tool_types", toolTypes))
+		}
+		if req.Reasoning != nil && req.Reasoning.Effort != nil {
+			fields = append(fields, zap.String("reasoning_effort", *req.Reasoning.Effort))
+		}
+		if req.MaxOutputTokens != nil {
+			fields = append(fields, zap.Int("max_output_tokens", *req.MaxOutputTokens))
+		}
+	case *model.GeneralOpenAIRequest:
+		hasWebSearch, toolTypes := generalToolSummary(req.Tools)
+		fields = append(fields,
+			zap.String("payload_type", "chat_completions"),
+			zap.Int("message_count", len(req.Messages)),
+			zap.Int("tool_count", len(req.Tools)),
+			zap.Bool("has_web_search_tool", hasWebSearch),
+		)
+		if len(toolTypes) > 0 {
+			fields = append(fields, zap.Strings("tool_types", toolTypes))
+		}
+		if req.ReasoningEffort != nil {
+			fields = append(fields, zap.String("reasoning_effort", *req.ReasoningEffort))
+		}
+		if req.MaxCompletionTokens != nil {
+			fields = append(fields, zap.Int("max_completion_tokens", *req.MaxCompletionTokens))
+		}
+	default:
+		if payload != nil {
+			fields = append(fields, zap.String("payload_type", fmt.Sprintf("%T", payload)))
+		}
 	}
 
-	return request, nil
+	lg.Debug("prepared upstream request payload", fields...)
+}
+
+func ensureWebSearchTool(request *model.GeneralOpenAIRequest) {
+	for _, tool := range request.Tools {
+		if strings.EqualFold(tool.Type, "web_search") {
+			return
+		}
+	}
+
+	request.Tools = append(request.Tools, model.Tool{Type: "web_search"})
 }
 
 // applyRequestTransformations applies the existing request transformations
 func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.GeneralOpenAIRequest) error {
+	if meta != nil {
+		meta.EnsureActualModelName(request.Model)
+	}
+
 	switch meta.ChannelType {
 	case channeltype.OpenRouter:
 		includeReasoning := true
@@ -173,11 +488,6 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 	default:
 	}
 
-	if request.Stream && !config.EnforceIncludeUsage {
-		logger.Warn(context.Background(),
-			"please set ENFORCE_INCLUDE_USAGE=true to ensure accurate billing in stream mode")
-	}
-
 	if config.EnforceIncludeUsage && request.Stream {
 		// always return usage in stream mode
 		if request.StreamOptions == nil {
@@ -186,16 +496,44 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 		request.StreamOptions.IncludeUsage = true
 	}
 
-	// o1/o3/o4 do not support system prompt/max_tokens/temperature
-	if strings.HasPrefix(meta.ActualModelName, "o") {
-		temperature := float64(1)
-		request.Temperature = &temperature // Only the default (1) value is supported
+	if request.MaxTokens != 0 {
+		// Copy value before zeroing MaxTokens. Previous code took the address of
+		// request.MaxTokens then set it to 0, so the pointer observed 0 and was
+		// replaced by the default (e.g. 2048). This preserved user intent.
+		tmpMaxTokens := request.MaxTokens
+		request.MaxCompletionTokens = &tmpMaxTokens
 		request.MaxTokens = 0
-		request.TopP = nil
-		if request.ReasoningEffort == nil {
-			effortHigh := "high"
-			request.ReasoningEffort = &effortHigh
+	}
+
+	// Set default max tokens if not set or invalid, since MaxCompletionTokens cannot be 0
+	if request.MaxCompletionTokens == nil || *request.MaxCompletionTokens <= 0 {
+		defaultMaxCompletionTokens := config.DefaultMaxToken
+		request.MaxCompletionTokens = &defaultMaxCompletionTokens
+	}
+
+	actualModel := meta.ActualModelName
+	if strings.TrimSpace(actualModel) == "" {
+		actualModel = request.Model
+	}
+	channelType := 0
+	if meta != nil {
+		channelType = meta.ChannelType
+	}
+
+	// o1/o3/o4/gpt-5 do not support system prompt/temperature variations
+	if isModelSupportedReasoning(actualModel) {
+		targetsResponseAPI := meta.Mode == relaymode.ResponseAPI ||
+			(meta.ChannelType == channeltype.OpenAI && !IsModelsOnlySupportedByChatCompletionAPI(actualModel))
+
+		if targetsResponseAPI {
+			request.Temperature = nil
+		} else {
+			temperature := float64(1)
+			request.Temperature = &temperature // Only the default (1) value is supported
 		}
+
+		request.TopP = nil
+		request.ReasoningEffort = normalizeReasoningEffortForModel(actualModel, request.ReasoningEffort)
 
 		request.Messages = func(raw []model.Message) (filtered []model.Message) {
 			for i := range raw {
@@ -206,12 +544,10 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 
 			return
 		}(request.Messages)
-	} else {
-		request.ReasoningEffort = nil
 	}
 
-	// web search do not support system prompt/max_tokens/temperature
-	if strings.HasSuffix(meta.ActualModelName, "-search") {
+	// web search models do not support system prompt/max_tokens/temperature overrides
+	if isWebSearchModel(actualModel) {
 		request.Temperature = nil
 		request.TopP = nil
 		request.PresencePenalty = nil
@@ -219,11 +555,87 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 		request.FrequencyPenalty = nil
 	}
 
+	modelName := actualModel
+
+	if isDeepResearchModel(modelName) {
+		ensureWebSearchTool(request)
+	}
+
+	if request.WebSearchOptions != nil {
+		ensureWebSearchTool(request)
+	}
+
+	if request.ToolChoice != nil {
+		normalized, _ := NormalizeToolChoice(request.ToolChoice)
+		if meta != nil && (meta.ChannelType == channeltype.OpenAI || meta.ChannelType == channeltype.Azure) {
+			flattened, _ := NormalizeToolChoiceForResponse(normalized)
+			normalized = flattened
+		}
+		request.ToolChoice = normalized
+	}
+
+	if request.ResponseFormat != nil && request.ResponseFormat.JsonSchema != nil && request.ResponseFormat.JsonSchema.Schema != nil {
+		if normalized, changed := NormalizeStructuredJSONSchema(request.ResponseFormat.JsonSchema.Schema, channelType); changed {
+			request.ResponseFormat.JsonSchema.Schema = normalized
+		}
+	}
+
+	if len(request.Functions) > 0 {
+		for idx := range request.Functions {
+			if params, ok := request.Functions[idx].Parameters.(map[string]any); ok && params != nil {
+				if normalized, changed := NormalizeStructuredJSONSchema(params, channelType); changed {
+					request.Functions[idx].Parameters = normalized
+				}
+			}
+		}
+	}
+
+	if len(request.Tools) > 0 {
+		for idx := range request.Tools {
+			if fn := request.Tools[idx].Function; fn != nil {
+				if paramMap, ok := fn.Parameters.(map[string]any); ok && paramMap != nil {
+					if normalized, changed := NormalizeStructuredJSONSchema(paramMap, channelType); changed {
+						fn.Parameters = normalized
+					}
+				}
+			}
+		}
+	}
+
 	if request.Stream && !config.EnforceIncludeUsage &&
 		strings.HasSuffix(request.Model, "-audio") {
 		// TODO: Since it is not clear how to implement billing in stream mode,
 		// it is temporarily not supported
 		return errors.New("set ENFORCE_INCLUDE_USAGE=true to enable stream mode for gpt-4o-audio")
+	}
+
+	// Transform image URLs in messages to base64 data URLs to ensure upstream receives embedded data
+	for i := range request.Messages {
+		parts := request.Messages[i].ParseContent()
+		if len(parts) == 0 {
+			continue
+		}
+		changed := false
+		for pi := range parts {
+			if parts[pi].Type == model.ContentTypeImageURL && parts[pi].ImageURL != nil {
+				url := parts[pi].ImageURL.Url
+				if url != "" && !strings.HasPrefix(url, "data:image/") {
+					if dataURL, err := toDataURL(url); err == nil && dataURL != "" {
+						parts[pi].ImageURL.Url = dataURL
+						changed = true
+					}
+				}
+				if parts[pi].ImageURL.Url != "" && strings.HasPrefix(parts[pi].ImageURL.Url, "data:image/") {
+					if err := image.ValidateDataURLImage(parts[pi].ImageURL.Url); err != nil {
+						return errors.Wrap(err, "validate inline image data")
+					}
+				}
+			}
+		}
+		if changed {
+			// Replace message content with the normalized parts
+			request.Messages[i].Content = parts
+		}
 	}
 
 	return nil
@@ -241,143 +653,109 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequ
 		return nil, errors.New("request is nil")
 	}
 
-	// Convert Claude Messages API request to OpenAI Chat Completions format
-	openaiRequest := &model.GeneralOpenAIRequest{
-		Model:       request.Model,
-		MaxTokens:   request.MaxTokens,
-		Temperature: request.Temperature,
-		TopP:        request.TopP,
-		Stream:      request.Stream != nil && *request.Stream,
-		Stop:        request.StopSequences,
-		Thinking:    request.Thinking,
+	converted, err := openai_compatible.ConvertClaudeRequest(c, request)
+	if err != nil {
+		return nil, err
 	}
 
-	// Convert system prompt
-	if request.System != nil {
-		switch system := request.System.(type) {
-		case string:
-			if system != "" {
-				openaiRequest.Messages = append(openaiRequest.Messages, model.Message{
-					Role:    "system",
-					Content: system,
-				})
-			}
-		case []any:
-			// For structured system content, extract text parts
-			var systemParts []string
-			for _, block := range system {
-				if blockMap, ok := block.(map[string]any); ok {
-					if text, exists := blockMap["text"]; exists {
-						if textStr, ok := text.(string); ok {
-							systemParts = append(systemParts, textStr)
-						}
-					}
-				}
-			}
-			if len(systemParts) > 0 {
-				systemText := strings.Join(systemParts, "\n")
-				openaiRequest.Messages = append(openaiRequest.Messages, model.Message{
-					Role:    "system",
-					Content: systemText,
-				})
-			}
-		}
+	openaiRequest, ok := converted.(*model.GeneralOpenAIRequest)
+	if !ok {
+		return converted, nil
 	}
 
-	// Convert messages
-	for _, msg := range request.Messages {
-		openaiMessage := model.Message{
-			Role: msg.Role,
+	// Propagate Claude-specific fields not handled by the shared converter.
+	openaiRequest.Thinking = request.Thinking
+
+	metaInfo := meta.GetByContext(c)
+	if shouldForceResponseAPI(metaInfo) {
+		if err := a.applyRequestTransformations(metaInfo, openaiRequest); err != nil {
+			return nil, errors.Wrap(err, "apply request transformations for Claude conversion")
 		}
 
-		// Convert content based on type
-		switch content := msg.Content.(type) {
-		case string:
-			// Simple string content
-			openaiMessage.Content = content
-		case []any:
-			// Structured content blocks - convert to OpenAI format
-			var contentParts []model.MessageContent
-			for _, block := range content {
-				if blockMap, ok := block.(map[string]any); ok {
-					if blockType, exists := blockMap["type"]; exists {
-						switch blockType {
-						case "text":
-							if text, exists := blockMap["text"]; exists {
-								if textStr, ok := text.(string); ok {
-									contentParts = append(contentParts, model.MessageContent{
-										Type: "text",
-										Text: &textStr,
-									})
-								}
-							}
-						case "image":
-							if source, exists := blockMap["source"]; exists {
-								if sourceMap, ok := source.(map[string]any); ok {
-									imageURL := model.ImageURL{}
-									if mediaType, exists := sourceMap["media_type"]; exists {
-										if data, exists := sourceMap["data"]; exists {
-											if dataStr, ok := data.(string); ok {
-												// Convert to data URL format
-												imageURL.Url = fmt.Sprintf("data:%s;base64,%s", mediaType, dataStr)
-											}
-										}
-									}
-									contentParts = append(contentParts, model.MessageContent{
-										Type:     "image_url",
-										ImageURL: &imageURL,
-									})
-								}
-							}
-						}
-					}
-				}
-			}
-			if len(contentParts) > 0 {
-				openaiMessage.Content = contentParts
-			}
-		default:
-			// Fallback: convert to string
-			if contentBytes, err := json.Marshal(content); err == nil {
-				openaiMessage.Content = string(contentBytes)
-			}
-		}
-
-		openaiRequest.Messages = append(openaiRequest.Messages, openaiMessage)
+		responseAPIRequest := ConvertChatCompletionToResponseAPI(openaiRequest)
+		c.Set(ctxkey.ConvertedRequest, responseAPIRequest)
+		return responseAPIRequest, nil
 	}
 
-	// Convert tools
-	for _, tool := range request.Tools {
-		openaiTool := model.Tool{
-			Type: "function",
-			Function: model.Function{
-				Name:        tool.Name,
-				Description: tool.Description,
-			},
-		}
-
-		// Convert input schema
-		if tool.InputSchema != nil {
-			if schemaMap, ok := tool.InputSchema.(map[string]any); ok {
-				openaiTool.Function.Parameters = schemaMap
-			}
-		}
-
-		openaiRequest.Tools = append(openaiRequest.Tools, openaiTool)
-	}
-
-	// Convert tool choice
-	if request.ToolChoice != nil {
-		openaiRequest.ToolChoice = request.ToolChoice
-	}
-
-	// Mark this as a Claude Messages conversion for response handling
-	c.Set(ctxkey.ClaudeMessagesConversion, true)
-	c.Set(ctxkey.OriginalClaudeRequest, request)
-
-	// For OpenAI adaptor, we can return the OpenAI request directly
-	// since OpenAI format is the native format
 	return openaiRequest, nil
+}
+
+// normalizeClaudeToolChoice coerces Claude tool_choice payloads into the ChatCompletion
+// format that upstream OpenAI-compatible adapters expect (type=function with function name).
+// It preserves additional fields like disable_parallel_tool_calls while trimming the legacy
+// top-level name field that Claude clients often send alongside type=tool.
+func normalizeClaudeToolChoice(choice any) any {
+	switch src := choice.(type) {
+	case map[string]any:
+		// Clone the map so we do not mutate the original request payload.
+		cloned := make(map[string]any, len(src))
+		for k, v := range src {
+			cloned[k] = v
+		}
+
+		typeVal, _ := cloned["type"].(string)
+		switch strings.ToLower(typeVal) {
+		case "tool":
+			name, _ := cloned["name"].(string)
+			var fn map[string]any
+			if existing, ok := cloned["function"].(map[string]any); ok {
+				fn = cloneMap(existing)
+			} else {
+				fn = map[string]any{}
+			}
+			if name != "" && fn["name"] == nil {
+				fn["name"] = name
+			}
+			if len(fn) > 0 {
+				cloned["function"] = fn
+			}
+			cloned["type"] = "function"
+			delete(cloned, "name")
+		case "function":
+			// Ensure function payload keeps the name inside the nested object.
+			if name, ok := cloned["name"].(string); ok && name != "" {
+				fn, _ := cloned["function"].(map[string]any)
+				if fn == nil {
+					fn = map[string]any{}
+				}
+				if fn["name"] == nil {
+					fn["name"] = name
+				}
+				cloned["function"] = fn
+				delete(cloned, "name")
+			}
+		}
+		return cloned
+	default:
+		return choice
+	}
+}
+
+// cloneMap returns a shallow copy of the provided map.
+func cloneMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(input))
+	for k, v := range input {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+// getImageFromURLFn is injectable for tests
+var getImageFromURLFn = imgutil.GetImageFromUrl
+
+// toDataURL downloads an image and returns a data URL string
+func toDataURL(url string) (string, error) {
+	mime, data, err := getImageFromURLFn(url)
+	if err != nil {
+		return "", errors.Wrap(err, "get image from url")
+	}
+	if mime == "" {
+		mime = "image/jpeg"
+	}
+	return fmt.Sprintf("data:%s;base64,%s", mime, data), nil
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context,
@@ -390,37 +768,62 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 	resp *http.Response,
 	meta *meta.Meta) (usage *model.Usage,
 	err *model.ErrorWithStatusCode) {
+	skipUsageAdjustments := false
 	if meta.IsStream {
 		var responseText string
-		// Handle different streaming modes
-		switch meta.Mode {
-		case relaymode.ResponseAPI:
-			// Direct Response API streaming - pass through without conversion
-			err, responseText, usage = ResponseAPIDirectStreamHandler(c, resp, meta.Mode)
-		default:
-			// Check if we need to handle Response API streaming response for ChatCompletion
-			if vi, ok := c.Get(ctxkey.ConvertedRequest); ok {
-				if _, ok := vi.(*ResponseAPIRequest); ok {
-					// This is a Response API streaming response that needs conversion
-					err, responseText, usage = ResponseAPIStreamHandler(c, resp, meta.Mode)
+		handledClaudeStream := false
+
+		if meta.Mode == relaymode.ClaudeMessages {
+			if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists && isClaudeConversion.(bool) {
+				handledClaudeStream = true
+				var convErr *model.ErrorWithStatusCode
+				usage, convErr = openai_compatible.ConvertOpenAIStreamToClaudeSSE(c, resp, meta.PromptTokens, meta.ActualModelName)
+				if convErr != nil {
+					return nil, convErr
+				}
+			}
+		}
+
+		if !handledClaudeStream {
+			// Handle different streaming modes
+			switch meta.Mode {
+			case relaymode.ResponseAPI:
+				// Direct Response API streaming - pass through without conversion
+				err, responseText, usage = ResponseAPIDirectStreamHandler(c, resp, meta.Mode)
+			default:
+				// Check if we need to handle Response API streaming response for ChatCompletion
+				if vi, ok := c.Get(ctxkey.ConvertedRequest); ok {
+					if _, ok := vi.(*ResponseAPIRequest); ok {
+						// This is a Response API streaming response that needs conversion
+						err, responseText, usage = ResponseAPIStreamHandler(c, resp, meta.Mode)
+					} else {
+						// Regular streaming response
+						err, responseText, usage = StreamHandler(c, resp, meta.Mode)
+					}
 				} else {
 					// Regular streaming response
 					err, responseText, usage = StreamHandler(c, resp, meta.Mode)
 				}
-			} else {
-				// Regular streaming response
-				err, responseText, usage = StreamHandler(c, resp, meta.Mode)
+			}
+
+			if usage == nil || usage.TotalTokens == 0 {
+				usage = ResponseText2Usage(responseText, meta.ActualModelName, meta.PromptTokens)
+			}
+			if usage.TotalTokens != 0 && usage.PromptTokens == 0 { // some channels don't return prompt tokens & completion tokens
+				usage.PromptTokens = meta.PromptTokens
+				usage.CompletionTokens = usage.TotalTokens - meta.PromptTokens
+			}
+		}
+	} else {
+		shouldConvertToClaude := false
+		if meta.Mode == relaymode.ChatCompletions {
+			if raw, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists {
+				if flag, ok := raw.(bool); ok && flag {
+					shouldConvertToClaude = true
+				}
 			}
 		}
 
-		if usage == nil || usage.TotalTokens == 0 {
-			usage = ResponseText2Usage(responseText, meta.ActualModelName, meta.PromptTokens)
-		}
-		if usage.TotalTokens != 0 && usage.PromptTokens == 0 { // some channels don't return prompt tokens & completion tokens
-			usage.PromptTokens = meta.PromptTokens
-			usage.CompletionTokens = usage.TotalTokens - meta.PromptTokens
-		}
-	} else {
 		switch meta.Mode {
 		case relaymode.ImagesGenerations,
 			relaymode.ImagesEdits:
@@ -432,6 +835,11 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 			// without conversion back to ChatCompletion format
 			err, usage = ResponseAPIDirectHandler(c, resp, meta.PromptTokens, meta.ActualModelName)
 		case relaymode.ChatCompletions:
+			if shouldConvertToClaude {
+				skipUsageAdjustments = true
+				// Skip Handler to keep body intact for Claude conversion.
+				break
+			}
 			// Check if we need to convert Response API response back to ChatCompletion format
 			if vi, ok := c.Get(ctxkey.ConvertedRequest); ok {
 				if _, ok := vi.(*ResponseAPIRequest); ok {
@@ -450,130 +858,83 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 		}
 	}
 
-	// -------------------------------------
-	// calculate web-search tool cost
-	// -------------------------------------
-	if usage != nil {
-		searchContextSize := "medium"
-		var req *model.GeneralOpenAIRequest
-		if vi, ok := c.Get(ctxkey.ConvertedRequest); ok {
-			if req, ok = vi.(*model.GeneralOpenAIRequest); ok {
-				if req != nil &&
-					req.WebSearchOptions != nil &&
-					req.WebSearchOptions.SearchContextSize != nil {
-					searchContextSize = *req.WebSearchOptions.SearchContextSize
-				}
-
-				switch {
-				case strings.HasPrefix(meta.ActualModelName, "gpt-4o-search"):
-					switch searchContextSize {
-					case "low":
-						usage.ToolsCost += int64(math.Ceil(30 / 1000 * ratio.QuotaPerUsd))
-					case "medium":
-						usage.ToolsCost += int64(math.Ceil(35 / 1000 * ratio.QuotaPerUsd))
-					case "high":
-						usage.ToolsCost += int64(math.Ceil(40 / 1000 * ratio.QuotaPerUsd))
-					default:
-						return nil, ErrorWrapper(
-							errors.Errorf("invalid search context size %q", searchContextSize),
-							"invalid search context size: "+searchContextSize,
-							http.StatusBadRequest)
-					}
-				case strings.HasPrefix(meta.ActualModelName, "gpt-4o-mini-search"):
-					switch searchContextSize {
-					case "low":
-						usage.ToolsCost += int64(math.Ceil(25 / 1000 * ratio.QuotaPerUsd))
-					case "medium":
-						usage.ToolsCost += int64(math.Ceil(27.5 / 1000 * ratio.QuotaPerUsd))
-					case "high":
-						usage.ToolsCost += int64(math.Ceil(30 / 1000 * ratio.QuotaPerUsd))
-					default:
-						return nil, ErrorWrapper(
-							errors.Errorf("invalid search context size %q", searchContextSize),
-							"invalid search context size: "+searchContextSize,
-							http.StatusBadRequest)
-					}
-				}
-
-				// -------------------------------------
-				// calculate structured output cost
-				// -------------------------------------
-				// Structured output with json_schema incurs additional costs
-				// Based on OpenAI's pricing, structured output typically has a multiplier applied
-				if req.ResponseFormat != nil &&
-					req.ResponseFormat.Type == "json_schema" &&
-					req.ResponseFormat.JsonSchema != nil {
-					// Apply structured output cost multiplier
-					// For structured output, there's typically an additional cost based on completion tokens
-					// Using a conservative estimate of 25% additional cost for structured output
-
-					// get channel-specific pricing if available
-					var channelModelRatio map[string]float64
-					if channelModel, ok := c.Get(ctxkey.ChannelModel); ok {
-						if channel, ok := channelModel.(*dbmodel.Channel); ok {
-							channelModelRatio = channel.GetModelRatio()
-						}
-					}
-
-					modelRatio := ratio.GetModelRatioWithChannel(meta.ActualModelName, meta.ChannelType, channelModelRatio)
-					structuredOutputCost := int64(math.Ceil(float64(usage.CompletionTokens) * 0.25 * modelRatio))
-					usage.ToolsCost += structuredOutputCost
-
-					// Log structured output cost application for debugging
-					logger.Debugf(c.Request.Context(), "Applied structured output cost: %d (completion tokens: %d, model: %s)",
-						structuredOutputCost, usage.CompletionTokens, meta.ActualModelName)
-				}
-			}
-		}
-
-		// Also check the original request in case it wasn't converted
-		if req == nil {
-			if vi, ok := c.Get(ctxkey.RequestModel); ok {
-				if req, ok = vi.(*model.GeneralOpenAIRequest); ok && req != nil {
-					if req.ResponseFormat != nil &&
-						req.ResponseFormat.Type == "json_schema" &&
-						req.ResponseFormat.JsonSchema != nil {
-						// Apply structured output cost multiplier
-
-						// get channel-specific pricing if available
-						var channelModelRatio map[string]float64
-						if channelModel, ok := c.Get(ctxkey.ChannelModel); ok {
-							if channel, ok := channelModel.(*dbmodel.Channel); ok {
-								// Get from unified ModelConfigs only (after migration)
-								channelModelRatio = channel.GetModelRatioFromConfigs()
-							}
-						}
-
-						modelRatio := ratio.GetModelRatioWithChannel(meta.ActualModelName, meta.ChannelType, channelModelRatio)
-						structuredOutputCost := int64(math.Ceil(float64(usage.CompletionTokens) * 0.25 * modelRatio))
-						usage.ToolsCost += structuredOutputCost
-
-						// Log structured output cost application for debugging
-						logger.Debugf(c.Request.Context(), "Applied structured output cost from original request: %d (completion tokens: %d, model: %s)",
-							structuredOutputCost, usage.CompletionTokens, meta.ActualModelName)
-					}
-				}
-			}
+	if !skipUsageAdjustments {
+		if errCost := applyWebSearchToolCost(c, &usage, meta); errCost != nil {
+			return nil, errCost
 		}
 	}
 
 	// Handle Claude Messages response conversion
-	if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists && isClaudeConversion.(bool) {
-		claudeResp, convertErr := a.convertToClaudeResponse(c, resp)
-		if convertErr != nil {
-			return nil, convertErr
+	// Streaming conversions are handled inline; do not re-read an already drained body.
+	if !meta.IsStream && resp != nil {
+		if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists && isClaudeConversion.(bool) {
+			claudeResp, convertErr := a.convertToClaudeResponse(c, resp)
+			if convertErr != nil {
+				return nil, convertErr
+			}
+
+			// Replace the original response with the converted Claude response
+			// We need to update the response in the context so the controller can use it
+			c.Set(ctxkey.ConvertedResponse, claudeResp)
+
+			// For Claude Messages conversion, we don't return usage separately
+			// The usage is included in the Claude response body, so return nil usage
+			return nil, nil
 		}
-
-		// Replace the original response with the converted Claude response
-		// We need to update the response in the context so the controller can use it
-		c.Set(ctxkey.ConvertedResponse, claudeResp)
-
-		// For Claude Messages conversion, we don't return usage separately
-		// The usage is included in the Claude response body, so return nil usage
-		return nil, nil
 	}
 
 	return
+}
+
+func applyWebSearchToolCost(c *gin.Context, usage **model.Usage, meta *meta.Meta) *model.ErrorWithStatusCode {
+	if usage == nil || meta == nil {
+		return nil
+	}
+
+	ensureUsage := func() *model.Usage {
+		if *usage == nil {
+			*usage = &model.Usage{}
+		}
+		return *usage
+	}
+
+	modelName := meta.ActualModelName
+	perCallQuota := webSearchCallQuotaPerInvocation(modelName)
+
+	if callCountAny, ok := c.Get(ctxkey.WebSearchCallCount); ok {
+		count := 0
+		switch v := callCountAny.(type) {
+		case int:
+			count = v
+		case int32:
+			count = int(v)
+		case int64:
+			count = int(v)
+		case float64:
+			count = int(v)
+		}
+		if count < 0 {
+			count = 0
+		}
+		if count > 0 {
+			usagePtr := ensureUsage()
+			enforceWebSearchTokenPolicy(usagePtr, modelName, count)
+			if perCallQuota > 0 {
+				usagePtr.ToolsCost += int64(count) * perCallQuota
+			}
+		}
+	}
+
+	return nil
+}
+
+func enforceWebSearchTokenPolicy(usage *model.Usage, modelName string, callCount int) {
+	if usage == nil || callCount <= 0 {
+		return
+	}
+
+	_ = modelName // model retained for possible future policy tuning
+	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 }
 
 // convertToClaudeResponse converts OpenAI response format to Claude Messages format
@@ -597,6 +958,14 @@ func (a *Adaptor) convertToClaudeResponse(c *gin.Context, resp *http.Response) (
 
 // convertNonStreamingToClaudeResponse converts a non-streaming OpenAI response to Claude format
 func (a *Adaptor) convertNonStreamingToClaudeResponse(c *gin.Context, resp *http.Response, body []byte) (*http.Response, *model.ErrorWithStatusCode) {
+	// First try to parse as Response API format
+	var responseAPIResp ResponseAPIResponse
+	if err := json.Unmarshal(body, &responseAPIResp); err == nil && responseAPIResp.Object == "response" {
+		// This is a Response API response, convert it to Claude format
+		return a.ConvertResponseAPIToClaudeResponse(c, resp, &responseAPIResp)
+	}
+
+	// Fall back to ChatCompletion API format
 	var openaiResp TextResponse
 	if err := json.Unmarshal(body, &openaiResp); err != nil {
 		// If it's an error response, pass it through
@@ -691,9 +1060,120 @@ func (a *Adaptor) convertNonStreamingToClaudeResponse(c *gin.Context, resp *http
 	}
 
 	// Copy headers but update content type
-	for k, v := range resp.Header {
-		newResp.Header[k] = v
+	maps.Copy(newResp.Header, resp.Header)
+	newResp.Header.Set("Content-Type", "application/json")
+	newResp.Header.Set("Content-Length", fmt.Sprintf("%d", len(claudeBody)))
+
+	return newResp, nil
+}
+
+// ConvertResponseAPIToClaudeResponse converts a Response API response to Claude Messages format
+func (a *Adaptor) ConvertResponseAPIToClaudeResponse(c *gin.Context, resp *http.Response, responseAPIResp *ResponseAPIResponse) (*http.Response, *model.ErrorWithStatusCode) {
+	// Convert to Claude Messages format
+	claudeResp := model.ClaudeResponse{
+		ID:         responseAPIResp.Id,
+		Type:       "message",
+		Role:       "assistant",
+		Model:      responseAPIResp.Model,
+		Content:    []model.ClaudeContent{},
+		StopReason: "end_turn",
 	}
+
+	toolUseAdded := false
+
+	// Convert usage if present
+	if responseAPIResp.Usage != nil {
+		claudeResp.Usage = model.ClaudeUsage{
+			InputTokens:  responseAPIResp.Usage.InputTokens,
+			OutputTokens: responseAPIResp.Usage.OutputTokens,
+		}
+	}
+
+	// Convert output items to Claude content
+	for _, outputItem := range responseAPIResp.Output {
+		if outputItem.Type == "reasoning" {
+			// Convert reasoning content to Claude thinking format
+			for _, summary := range outputItem.Summary {
+				if summary.Type == "summary_text" && summary.Text != "" {
+					claudeContent := model.ClaudeContent{
+						Type:     "thinking",
+						Thinking: summary.Text,
+					}
+					claudeResp.Content = append(claudeResp.Content, claudeContent)
+				}
+			}
+		} else if outputItem.Type == "message" && outputItem.Role == "assistant" {
+			// Convert message content
+			for _, content := range outputItem.Content {
+				if content.Type == "output_text" && content.Text != "" {
+					claudeContent := model.ClaudeContent{
+						Type: "text",
+						Text: content.Text,
+					}
+					claudeResp.Content = append(claudeResp.Content, claudeContent)
+				} else if content.Type == "output_json" {
+					var jsonText string
+					if len(content.JSON) > 0 {
+						jsonText = string(content.JSON)
+					} else {
+						jsonText = content.Text
+					}
+					jsonText = strings.TrimSpace(jsonText)
+					if jsonText != "" {
+						claudeResp.Content = append(claudeResp.Content, model.ClaudeContent{
+							Type: "text",
+							Text: jsonText,
+						})
+					}
+				}
+			}
+		} else if outputItem.Type == "function_call" {
+			name := strings.TrimSpace(outputItem.Name)
+			if name == "" {
+				continue
+			}
+			id := outputItem.CallId
+			if id == "" {
+				id = outputItem.Id
+			}
+			var input json.RawMessage
+			if args := strings.TrimSpace(outputItem.Arguments); args != "" {
+				raw := []byte(args)
+				if json.Valid(raw) {
+					input = json.RawMessage(raw)
+				} else if marshaled, err := json.Marshal(args); err == nil {
+					input = json.RawMessage(marshaled)
+				}
+			}
+			claudeResp.Content = append(claudeResp.Content, model.ClaudeContent{
+				Type:  "tool_use",
+				ID:    id,
+				Name:  name,
+				Input: input,
+			})
+			toolUseAdded = true
+		}
+	}
+
+	if toolUseAdded {
+		claudeResp.StopReason = "tool_use"
+	}
+
+	// Marshal the Claude response
+	claudeBody, err := json.Marshal(claudeResp)
+	if err != nil {
+		return nil, ErrorWrapper(err, "marshal_claude_response_failed", http.StatusInternalServerError)
+	}
+
+	// Create new response with Claude format
+	newResp := &http.Response{
+		StatusCode: resp.StatusCode,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(claudeBody)),
+	}
+
+	// Copy headers but update content type
+	maps.Copy(newResp.Header, resp.Header)
 	newResp.Header.Set("Content-Type", "application/json")
 	newResp.Header.Set("Content-Length", fmt.Sprintf("%d", len(claudeBody)))
 
@@ -716,8 +1196,8 @@ func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Re
 		for scanner.Scan() {
 			line := scanner.Text()
 
-			if strings.HasPrefix(line, "data: ") {
-				data := strings.TrimPrefix(line, "data: ")
+			if after, ok := strings.CutPrefix(line, "data: "); ok {
+				data := after
 
 				if data == "[DONE]" {
 					// Send Claude-style done event
@@ -736,10 +1216,10 @@ func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Re
 				if len(chunk.Choices) > 0 {
 					choice := chunk.Choices[0]
 					if choice.Delta.Content != nil {
-						claudeChunk := map[string]interface{}{
+						claudeChunk := map[string]any{
 							"type":  "content_block_delta",
 							"index": 0,
-							"delta": map[string]interface{}{
+							"delta": map[string]any{
 								"type": "text_delta",
 								"text": choice.Delta.Content,
 							},
@@ -747,7 +1227,7 @@ func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Re
 
 						claudeData, _ := json.Marshal(claudeChunk)
 						writer.Write([]byte("event: content_block_delta\n"))
-						writer.Write([]byte(fmt.Sprintf("data: %s\n\n", claudeData)))
+						writer.Write(fmt.Appendf(nil, "data: %s\n\n", claudeData))
 					}
 				}
 			}
@@ -762,9 +1242,7 @@ func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Re
 	}
 
 	// Copy headers
-	for k, v := range resp.Header {
-		newResp.Header[k] = v
-	}
+	maps.Copy(newResp.Header, resp.Header)
 
 	return newResp, nil
 }

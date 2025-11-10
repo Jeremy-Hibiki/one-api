@@ -39,19 +39,21 @@ func checkWriter(writer io.Writer) stringWriter {
 var contentType = []string{"text/event-stream"}
 var noCache = []string{"no-cache"}
 
-var fieldReplacer = strings.NewReplacer(
-	"\n", "\\n",
-	"\r", "\\r")
+// var fieldReplacer = strings.NewReplacer(
+// 	"\n", "\\n",
+// 	"\r", "\\r")
 
 var dataReplacer = strings.NewReplacer(
 	"\n", "\ndata:",
 	"\r", "\\r")
 
+// CustomEvent represents a server-sent event that can be streamed to clients.
+// The fields map directly to the SSE specification, with Data carrying the message body.
 type CustomEvent struct {
 	Event string
 	Id    string
 	Retry uint
-	Data  interface{}
+	Data  any
 }
 
 func encode(writer io.Writer, event CustomEvent) error {
@@ -59,19 +61,23 @@ func encode(writer io.Writer, event CustomEvent) error {
 	return writeData(w, event.Data)
 }
 
-func writeData(w stringWriter, data interface{}) error {
+func writeData(w stringWriter, data any) error {
 	dataReplacer.WriteString(w, fmt.Sprint(data))
 	if strings.HasPrefix(data.(string), "data") {
 		w.writeString("\n\n")
 	}
+	// No error to wrap here, but if error handling is added, wrap with errors.Wrap/Wrapf
 	return nil
 }
 
+// Render applies the SSE headers and writes the event payload to the provided ResponseWriter.
+// It returns any error produced while encoding the event data.
 func (r CustomEvent) Render(w http.ResponseWriter) error {
 	r.WriteContentType(w)
 	return encode(w, r)
 }
 
+// WriteContentType sets the Content-Type and Cache-Control headers expected for SSE responses.
 func (r CustomEvent) WriteContentType(w http.ResponseWriter) {
 	header := w.Header()
 	header["Content-Type"] = contentType

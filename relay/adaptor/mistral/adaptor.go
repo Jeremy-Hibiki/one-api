@@ -3,6 +3,7 @@ package mistral
 import (
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/songquanpeng/one-api/relay/relaymode"
 )
 
 type Adaptor struct {
@@ -53,6 +55,17 @@ func (a *Adaptor) GetCompletionRatio(modelName string) float64 {
 func (a *Adaptor) Init(meta *meta.Meta) {}
 
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
+	// Handle Claude Messages requests - convert to OpenAI Chat Completions endpoint
+	requestPath := meta.RequestURLPath
+	if idx := strings.Index(requestPath, "?"); idx >= 0 {
+		requestPath = requestPath[:idx]
+	}
+	if requestPath == "/v1/messages" {
+		// Claude Messages requests should use OpenAI's chat completions endpoint
+		chatCompletionsPath := "/v1/chat/completions"
+		return openai_compatible.GetFullRequestURL(meta.BaseURL, chatCompletionsPath, meta.ChannelType), nil
+	}
+
 	// Mistral uses OpenAI-compatible API endpoints
 	return openai_compatible.GetFullRequestURL(meta.BaseURL, meta.RequestURLPath, meta.ChannelType), nil
 }
@@ -86,11 +99,16 @@ func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Read
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (usage *model.Usage, err *model.ErrorWithStatusCode) {
-	// Use the shared OpenAI-compatible response handling
-	if meta.IsStream {
-		err, usage = openai_compatible.StreamHandler(c, resp, meta.PromptTokens, meta.ActualModelName)
-	} else {
-		err, usage = openai_compatible.Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
+	// Handle embedding requests using the openai_compatible.EmbeddingHandler
+	if meta.Mode == relaymode.Embeddings {
+		err, usage = openai_compatible.EmbeddingHandler(c, resp)
+		return usage, err
 	}
-	return
+
+	return openai_compatible.HandleClaudeMessagesResponse(c, resp, meta, func(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
+		if meta.IsStream {
+			return openai_compatible.StreamHandler(c, resp, promptTokens, modelName)
+		}
+		return openai_compatible.Handler(c, resp, promptTokens, modelName)
+	})
 }

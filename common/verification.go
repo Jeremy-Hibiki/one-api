@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	gutils "github.com/Laisky/go-utils/v6"
 )
 
 type verificationValue struct {
@@ -14,24 +14,31 @@ type verificationValue struct {
 }
 
 const (
+	// EmailVerificationPurpose tags verification codes created for email binding flows.
 	EmailVerificationPurpose = "v"
-	PasswordResetPurpose     = "r"
+	// PasswordResetPurpose tags verification codes created for password reset workflows.
+	PasswordResetPurpose = "r"
 )
 
 var verificationMutex sync.Mutex
 var verificationMap map[string]verificationValue
 var verificationMapMaxSize = 10
+
+// VerificationValidMinutes specifies how long verification codes remain valid before expiring.
 var VerificationValidMinutes = 10
 
+// GenerateVerificationCode generates a verification code of the specified length.
+// If length <= 0, it generates a full UUID (32 characters without hyphens).
+// For other lengths, it generates a random alphanumeric string of the given length.
 func GenerateVerificationCode(length int) string {
-	code := uuid.New().String()
-	code = strings.Replace(code, "-", "", -1)
-	if length == 0 {
-		return code
+	if length <= 0 {
+		return strings.ReplaceAll(gutils.UUID7(), "-", "")
 	}
-	return code[:length]
+
+	return gutils.RandomStringWithLength(length)
 }
 
+// RegisterVerificationCodeWithKey stores the verification code for the given key and purpose, replacing older entries.
 func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
@@ -44,6 +51,8 @@ func RegisterVerificationCodeWithKey(key string, code string, purpose string) {
 	}
 }
 
+// VerifyCodeWithKey checks whether the submitted code matches the stored value for the key and purpose.
+// It returns false when the code is missing or has expired.
 func VerifyCodeWithKey(key string, code string, purpose string) bool {
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()
@@ -55,6 +64,7 @@ func VerifyCodeWithKey(key string, code string, purpose string) bool {
 	return code == value.code
 }
 
+// DeleteKey removes any stored code for the provided key and purpose combination.
 func DeleteKey(key string, purpose string) {
 	verificationMutex.Lock()
 	defer verificationMutex.Unlock()

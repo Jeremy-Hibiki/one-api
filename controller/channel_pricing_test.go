@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/model"
 )
 
@@ -19,20 +20,20 @@ func TestUpdateChannelPricing_UnifiedFormat(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		requestBody    interface{}
+		requestBody    any
 		expectedStatus int
 		expectSuccess  bool
 	}{
 		{
 			name: "update with unified model_configs",
-			requestBody: map[string]interface{}{
-				"model_configs": map[string]interface{}{
-					"gpt-3.5-turbo": map[string]interface{}{
+			requestBody: map[string]any{
+				"model_configs": map[string]any{
+					"gpt-3.5-turbo": map[string]any{
 						"ratio":            0.0015,
 						"completion_ratio": 2.0,
 						"max_tokens":       65536,
 					},
-					"gpt-4": map[string]interface{}{
+					"gpt-4": map[string]any{
 						"ratio":            0.03,
 						"completion_ratio": 2.0,
 						"max_tokens":       128000,
@@ -44,12 +45,12 @@ func TestUpdateChannelPricing_UnifiedFormat(t *testing.T) {
 		},
 		{
 			name: "update with old format - separate ratios",
-			requestBody: map[string]interface{}{
-				"model_ratio": map[string]interface{}{
+			requestBody: map[string]any{
+				"model_ratio": map[string]any{
 					"gpt-3.5-turbo": 0.0015,
 					"gpt-4":         0.03,
 				},
-				"completion_ratio": map[string]interface{}{
+				"completion_ratio": map[string]any{
 					"gpt-3.5-turbo": 2.0,
 					"gpt-4":         2.0,
 				},
@@ -59,8 +60,8 @@ func TestUpdateChannelPricing_UnifiedFormat(t *testing.T) {
 		},
 		{
 			name: "update with mixed format - model_ratio only",
-			requestBody: map[string]interface{}{
-				"model_ratio": map[string]interface{}{
+			requestBody: map[string]any{
+				"model_ratio": map[string]any{
 					"gpt-3.5-turbo": 0.0015,
 				},
 			},
@@ -69,7 +70,7 @@ func TestUpdateChannelPricing_UnifiedFormat(t *testing.T) {
 		},
 		{
 			name:           "update with empty request",
-			requestBody:    map[string]interface{}{},
+			requestBody:    map[string]any{},
 			expectedStatus: http.StatusOK,
 			expectSuccess:  true,
 		},
@@ -100,7 +101,7 @@ func TestUpdateChannelPricing_UnifiedFormat(t *testing.T) {
 			c.Params = gin.Params{{Key: "id", Value: "1"}}
 
 			// Mock the channel retrieval
-			c.Set("channel", channel)
+			c.Set(ctxkey.Channel, channel)
 
 			// Note: In a real test, you would need to mock the database operations
 			// For now, we're just testing the request parsing and response structure
@@ -162,7 +163,7 @@ func TestGetChannelPricing_UnifiedFormat(t *testing.T) {
 			c.Params = gin.Params{{Key: "id", Value: "1"}}
 
 			// Mock the channel retrieval
-			c.Set("channel", tt.channel)
+			c.Set(ctxkey.Channel, tt.channel)
 
 			// Note: In a real test, you would call the actual GetChannelPricing function
 			// and verify the response structure contains all expected fields

@@ -3,6 +3,9 @@ package relay
 import (
 	"testing"
 
+	"github.com/songquanpeng/one-api/relay/adaptor/ali"
+	"github.com/songquanpeng/one-api/relay/adaptor/openrouter"
+	"github.com/songquanpeng/one-api/relay/adaptor/xai"
 	"github.com/songquanpeng/one-api/relay/apitype"
 )
 
@@ -23,6 +26,8 @@ func TestAdapterPricingImplementations(t *testing.T) {
 		{"Gemini", apitype.Gemini, "gemini-pro", false},
 		{"Xunfei", apitype.Xunfei, "Spark-Lite", false},
 		{"VertexAI", apitype.VertexAI, "gemini-pro", false},
+		{"xAI", apitype.XAI, "grok-beta", false}, // Prefer primary constant; model alias still tested
+		{"AWS Bedrock/Mistral AI", apitype.AwsClaude, "mistral-pixtral-large-2502", false},
 		// Adapters that still use DefaultPricingMethods (expected to have empty pricing)
 		{"Ollama", apitype.Ollama, "llama2", true},
 		{"Cohere", apitype.Cohere, "command", false},
@@ -78,14 +83,84 @@ func TestSpecificAdapterPricing(t *testing.T) {
 			t.Fatal("Ali adaptor not found")
 		}
 
-		// Ali uses RMB pricing with ratio.MilliTokensRmb = 3.5
+		// Verify adapter pricing matches the authoritative ModelRatios table.
+		testModels := []string{"qwen-turbo", "qwen-plus", "qwen-max"}
+
+		for _, model := range testModels {
+			expectedConfig, ok := ali.ModelRatios[model]
+			if !ok {
+				t.Fatalf("Ali model %s missing from ModelRatios", model)
+			}
+
+			ratio := adaptor.GetModelRatio(model)
+			completionRatio := adaptor.GetCompletionRatio(model)
+
+			if ratio != expectedConfig.Ratio {
+				t.Errorf("Ali %s: expected ratio %.6f, got %.6f", model, expectedConfig.Ratio, ratio)
+			}
+			if completionRatio != expectedConfig.CompletionRatio {
+				t.Errorf("Ali %s: expected completion ratio %.2f, got %.2f", model, expectedConfig.CompletionRatio, completionRatio)
+			}
+		}
+	})
+
+	// H0llyW00dzZ: I'm writing this test myself now because this codebase is too complex.
+	t.Run("OpenRouter_Pricing", func(t *testing.T) {
+		adaptor := &openrouter.Adaptor{}
+
+		// Test GetDefaultModelPricing
+		defaultPricing := adaptor.GetDefaultModelPricing()
+		if len(defaultPricing) == 0 {
+			t.Fatal("OpenRouter: GetDefaultModelPricing returned empty map")
+		}
+
+		t.Logf("OpenRouter: Found %d models with pricing", len(defaultPricing))
+
+		// Test specific OpenRouter models to ensure they have proper pricing
+		testModels := map[string]struct {
+			expectValidRatio      bool
+			expectValidCompletion bool
+		}{
+			"openai/gpt-4o":                    {true, true},
+			"anthropic/claude-3-sonnet":        {true, true},
+			"meta-llama/llama-3.1-8b-instruct": {true, true},
+		}
+
+		for model, expected := range testModels {
+			ratio := adaptor.GetModelRatio(model)
+			completionRatio := adaptor.GetCompletionRatio(model)
+
+			if expected.expectValidRatio && ratio <= 0 {
+				t.Errorf("OpenRouter %s: expected valid ratio, got %.6f", model, ratio)
+			}
+			if expected.expectValidCompletion && completionRatio <= 0 {
+				t.Errorf("OpenRouter %s: expected valid completion ratio, got %.2f", model, completionRatio)
+			}
+
+			t.Logf("OpenRouter %s: ratio=%.6f, completion_ratio=%.2f", model, ratio, completionRatio)
+		}
+	})
+
+	t.Run("xAI_Pricing", func(t *testing.T) {
+		adaptor := GetAdaptor(apitype.XAI)
+		if adaptor == nil {
+			t.Fatal("xAI_Pricing not found")
+		}
+
+		// Use values directly from xai.ModelRatios for test expectations
 		testModels := map[string]struct {
 			expectedRatio           float64
 			expectedCompletionRatio float64
+			description             string
 		}{
-			"qwen-turbo": {0.3 * 3.5, 1.0}, // 0.3 * ratio.MilliTokensRmb
-			"qwen-plus":  {0.8 * 3.5, 1.0}, // 0.8 * ratio.MilliTokensRmb
-			"qwen-max":   {2.4 * 3.5, 1.0}, // 2.4 * ratio.MilliTokensRmb
+			"grok-4-0709":      {xai.ModelRatios["grok-4-0709"].Ratio, xai.ModelRatios["grok-4-0709"].CompletionRatio, "$3.00 input, $15.00 output"},
+			"grok-3":           {xai.ModelRatios["grok-3"].Ratio, xai.ModelRatios["grok-3"].CompletionRatio, "$3.00 input, $15.00 output"},
+			"grok-3-mini":      {xai.ModelRatios["grok-3-mini"].Ratio, xai.ModelRatios["grok-3-mini"].CompletionRatio, "$0.30 input, $0.50 output"},
+			"grok-3-fast":      {xai.ModelRatios["grok-3-fast"].Ratio, xai.ModelRatios["grok-3-fast"].CompletionRatio, "$5.00 input, $25.00 output"},
+			"grok-3-mini-fast": {xai.ModelRatios["grok-3-mini-fast"].Ratio, xai.ModelRatios["grok-3-mini-fast"].CompletionRatio, "$0.60 input, $4.00 output"},
+			"grok-2-1212":      {xai.ModelRatios["grok-2-1212"].Ratio, xai.ModelRatios["grok-2-1212"].CompletionRatio, "$2.00 input, $10.00 output"},
+			// Test legacy aliases
+			"grok-beta": {xai.ModelRatios["grok-beta"].Ratio, xai.ModelRatios["grok-beta"].CompletionRatio, "Legacy alias for grok-2-1212"},
 		}
 
 		for model, expected := range testModels {
@@ -93,12 +168,39 @@ func TestSpecificAdapterPricing(t *testing.T) {
 			completionRatio := adaptor.GetCompletionRatio(model)
 
 			if ratio != expected.expectedRatio {
-				t.Errorf("Ali %s: expected ratio %.6f, got %.6f", model, expected.expectedRatio, ratio)
+				t.Errorf("xAI %s: expected ratio %.6f, got %.6f (%s)",
+					model, expected.expectedRatio, ratio, expected.description)
 			}
 			if completionRatio != expected.expectedCompletionRatio {
-				t.Errorf("Ali %s: expected completion ratio %.2f, got %.2f", model, expected.expectedCompletionRatio, completionRatio)
+				t.Errorf("xAI %s: expected completion ratio %.2f, got %.2f (%s)",
+					model, expected.expectedCompletionRatio, completionRatio, expected.description)
 			}
+
+			t.Logf("xAI %s: ratio=%.6f (expected %.6f), completion_ratio=%.2f (expected %.2f) - %s",
+				model, ratio, expected.expectedRatio, completionRatio, expected.expectedCompletionRatio,
+				expected.description)
 		}
+
+		// Special test for image model which uses QuotaPerUsd (1000)
+		imageModel := "grok-2-image-1212"
+		expectedImageRatio := xai.ModelRatios[imageModel].Ratio // $0.07 per image
+		expectedImageCompletionRatio := xai.ModelRatios[imageModel].CompletionRatio
+
+		imageModelRatio := adaptor.GetModelRatio(imageModel)
+		imageModelCompletionRatio := adaptor.GetCompletionRatio(imageModel)
+
+		if imageModelRatio != expectedImageRatio {
+			t.Errorf("xAI %s: expected ratio %.6f, got %.6f (Image model: $0.07 per image)",
+				imageModel, expectedImageRatio, imageModelRatio)
+		}
+		if imageModelCompletionRatio != expectedImageCompletionRatio {
+			t.Errorf("xAI %s: expected completion ratio %.2f, got %.2f",
+				imageModel, expectedImageCompletionRatio, imageModelCompletionRatio)
+		}
+
+		t.Logf("xAI %s: ratio=%.6f (expected %.6f), completion_ratio=%.2f (expected %.2f) - %s",
+			imageModel, imageModelRatio, expectedImageRatio, imageModelCompletionRatio, expectedImageCompletionRatio,
+			"$0.07 per image using QuotaPerUsd")
 	})
 
 	t.Run("Gemini_Pricing", func(t *testing.T) {
@@ -167,6 +269,7 @@ func TestPricingConsistency(t *testing.T) {
 		{"Gemini", apitype.Gemini},
 		{"Xunfei", apitype.Xunfei},
 		{"VertexAI", apitype.VertexAI},
+		{"xAI", apitype.XAI},
 	}
 
 	for _, adapter := range adapters {
@@ -213,6 +316,8 @@ func TestFallbackPricing(t *testing.T) {
 		{"Gemini", apitype.Gemini},
 		{"Xunfei", apitype.Xunfei},
 		{"VertexAI", apitype.VertexAI},
+		{"xAI", apitype.XAI},
+		{"AWS Bedrock", apitype.AwsClaude},
 	}
 
 	unknownModel := "unknown-test-model-12345"

@@ -3,19 +3,21 @@ package cohere
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/songquanpeng/one-api/common/render"
-
+	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/config"
+	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/model"
 )
@@ -117,7 +119,7 @@ func StreamResponseCohere2OpenAI(cohereResponse *StreamResponse) (*openai.ChatCo
 	return &openaiResponse, response
 }
 
-func ResponseCohere2OpenAI(cohereResponse *Response) *openai.TextResponse {
+func ResponseCohere2OpenAI(c *gin.Context, cohereResponse *Response) *openai.TextResponse {
 	choice := openai.TextResponseChoice{
 		Index: 0,
 		Message: model.Message{
@@ -128,7 +130,7 @@ func ResponseCohere2OpenAI(cohereResponse *Response) *openai.TextResponse {
 		FinishReason: stopReasonCohere2OpenAI(cohereResponse.FinishReason),
 	}
 	fullTextResponse := openai.TextResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", cohereResponse.ResponseID),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Model:   "model",
 		Object:  "chat.completion",
 		Created: helper.GetTimestamp(),
@@ -139,6 +141,7 @@ func ResponseCohere2OpenAI(cohereResponse *Response) *openai.TextResponse {
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	createdTime := helper.GetTimestamp()
+	lg := gmw.GetLogger(c)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
 
@@ -152,7 +155,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		var cohereResponse StreamResponse
 		err := json.Unmarshal([]byte(data), &cohereResponse)
 		if err != nil {
-			logger.SysError("error unmarshalling stream response: " + err.Error())
+			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
 		}
 
@@ -166,24 +169,25 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 			continue
 		}
 
-		response.Id = fmt.Sprintf("chatcmpl-%d", createdTime)
-		response.Model = c.GetString("original_model")
+		response.Id = tracing.GenerateChatCompletionID(c)
+		response.Model = c.GetString(ctxkey.RequestModel)
 		response.Created = createdTime
 
 		err = render.ObjectData(c, response)
 		if err != nil {
-			logger.SysError(err.Error())
+			lg.Error("error rendering response", zap.Error(err))
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
 	render.Done(c)
 
 	err := resp.Body.Close()
 	if err != nil {
+		// Let ErrorWrapper handle the logging to avoid duplicate logging
 		return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 
@@ -207,15 +211,16 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	if cohereResponse.ResponseID == "" {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: cohereResponse.Message,
-				Type:    cohereResponse.Message,
-				Param:   "",
-				Code:    resp.StatusCode,
+				Message:  cohereResponse.Message,
+				Type:     cohereResponse.Message,
+				Param:    "",
+				Code:     resp.StatusCode,
+				RawError: errors.New(cohereResponse.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
-	fullTextResponse := ResponseCohere2OpenAI(&cohereResponse)
+	fullTextResponse := ResponseCohere2OpenAI(c, &cohereResponse)
 	fullTextResponse.Model = modelName
 	usage := model.Usage{
 		PromptTokens:     cohereResponse.Meta.Tokens.InputTokens,

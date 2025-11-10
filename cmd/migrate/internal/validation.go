@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
+
 	"github.com/songquanpeng/one-api/common/logger"
 )
 
@@ -46,22 +48,22 @@ func (v *PreMigrationValidator) ValidateAll() (*ValidationResult, error) {
 
 	// Validate database connections
 	if err := v.validateConnections(result); err != nil {
-		return result, fmt.Errorf("connection validation failed: %w", err)
+		return result, errors.Wrapf(err, "connection validation failed")
 	}
 
 	// Validate source database
 	if err := v.validateSourceDatabase(result); err != nil {
-		return result, fmt.Errorf("source database validation failed: %w", err)
+		return result, errors.Wrapf(err, "source database validation failed")
 	}
 
 	// Validate target database
 	if err := v.validateTargetDatabase(result); err != nil {
-		return result, fmt.Errorf("target database validation failed: %w", err)
+		return result, errors.Wrapf(err, "target database validation failed")
 	}
 
 	// Validate migration compatibility
 	if err := v.validateMigrationCompatibility(result); err != nil {
-		return result, fmt.Errorf("migration compatibility validation failed: %w", err)
+		return result, errors.Wrapf(err, "migration compatibility validation failed")
 	}
 
 	// Check for potential issues
@@ -78,7 +80,7 @@ func (v *PreMigrationValidator) ValidateAll() (*ValidationResult, error) {
 
 // validateConnections validates database connections
 func (v *PreMigrationValidator) validateConnections(result *ValidationResult) error {
-	logger.SysLog("Validating database connections...")
+	logger.Logger.Info("Validating database connections...")
 
 	// Validate source connection
 	if err := v.migrator.sourceConn.ValidateConnection(); err != nil {
@@ -95,10 +97,10 @@ func (v *PreMigrationValidator) validateConnections(result *ValidationResult) er
 
 // validateSourceDatabase validates the source database
 func (v *PreMigrationValidator) validateSourceDatabase(result *ValidationResult) error {
-	logger.SysLog("Validating source database...")
+	logger.Logger.Info("Validating source database...")
 
 	// Check if source database has expected tables
-	expectedTables := []string{"users", "tokens", "channels", "options", "redemptions", "abilities", "logs", "user_request_costs"}
+	expectedTables := []string{"users", "tokens", "channels", "options", "redemptions", "abilities", "logs", "user_request_costs", "traces"}
 
 	for _, tableName := range expectedTables {
 		exists, err := v.migrator.sourceConn.TableExists(tableName)
@@ -125,7 +127,7 @@ func (v *PreMigrationValidator) validateSourceDatabase(result *ValidationResult)
 
 // validateTargetDatabase validates the target database
 func (v *PreMigrationValidator) validateTargetDatabase(result *ValidationResult) error {
-	logger.SysLog("Validating target database...")
+	logger.Logger.Info("Validating target database...")
 
 	// Check if target database is empty or has conflicting data
 	tables, err := v.migrator.targetConn.GetTableNames()
@@ -157,7 +159,7 @@ func (v *PreMigrationValidator) validateTargetDatabase(result *ValidationResult)
 
 // validateMigrationCompatibility validates migration compatibility
 func (v *PreMigrationValidator) validateMigrationCompatibility(result *ValidationResult) error {
-	logger.SysLog("Validating migration compatibility...")
+	logger.Logger.Info("Validating migration compatibility...")
 
 	// Check for known compatibility issues
 	sourceType := v.migrator.sourceConn.Type
@@ -183,7 +185,7 @@ func (v *PreMigrationValidator) validateMigrationCompatibility(result *Validatio
 
 // checkPotentialIssues checks for potential migration issues
 func (v *PreMigrationValidator) checkPotentialIssues(result *ValidationResult) {
-	logger.SysLog("Checking for potential issues...")
+	logger.Logger.Info("Checking for potential issues...")
 
 	// Check for large datasets
 	for _, tableInfo := range TableMigrationOrder {
@@ -221,7 +223,7 @@ func (v *PreMigrationValidator) checkPotentialIssues(result *ValidationResult) {
 
 // generateBackupRecommendations generates backup recommendations
 func (v *PreMigrationValidator) generateBackupRecommendations(result *ValidationResult) {
-	logger.SysLog("Generating backup recommendations...")
+	logger.Logger.Info("Generating backup recommendations...")
 
 	recommendations := []string{
 		"IMPORTANT: Always backup your databases before migration",
@@ -278,14 +280,14 @@ func ExtractDatabaseTypeFromDSN(dsn string) (string, error) {
 		return "sqlite", nil
 	}
 
-	return "", fmt.Errorf("unable to determine database type from DSN: %s", dsn)
+	return "", errors.Wrapf(nil, "unable to determine database type from DSN: %s", dsn)
 }
 
 // ValidateDSN validates a database connection string
 func ValidateDSN(dsn string) error {
 	dbType, err := ExtractDatabaseTypeFromDSN(dsn)
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "failed to extract database type from DSN")
 	}
 
 	switch strings.ToLower(dbType) {
@@ -296,7 +298,7 @@ func ValidateDSN(dsn string) error {
 	case "postgres", "postgresql":
 		return validatePostgresDSN(dsn)
 	default:
-		return fmt.Errorf("unsupported database type: %s", dbType)
+		return errors.Wrapf(nil, "unsupported database type: %s", dbType)
 	}
 }
 
@@ -304,8 +306,8 @@ func ValidateDSN(dsn string) error {
 func validateSQLiteDSN(dsn string) error {
 	// Handle sqlite:// scheme
 	path := dsn
-	if strings.HasPrefix(dsn, "sqlite://") {
-		path = strings.TrimPrefix(dsn, "sqlite://")
+	if after, ok := strings.CutPrefix(dsn, "sqlite://"); ok {
+		path = after
 	}
 
 	// Remove query parameters for path validation
@@ -319,7 +321,7 @@ func validateSQLiteDSN(dsn string) error {
 	dir := filepath.Dir(path)
 	if dir != "." {
 		if _, err := os.Stat(dir); os.IsNotExist(err) {
-			return fmt.Errorf("directory does not exist: %s", dir)
+			return errors.Wrapf(err, "directory does not exist: %s", dir)
 		}
 	}
 
@@ -332,14 +334,14 @@ func validateMySQLDSN(dsn string) error {
 	if strings.HasPrefix(dsn, "mysql://") {
 		// For mysql:// scheme, we expect: mysql://user:password@host:port/database
 		if !strings.Contains(dsn, "@") || !strings.Contains(dsn, "/") {
-			return fmt.Errorf("invalid MySQL DSN format - expected format: mysql://user:password@host:port/database")
+			return errors.Wrapf(nil, "invalid MySQL DSN format - expected format: mysql://user:password@host:port/database")
 		}
 		return nil
 	}
 
 	// Basic format check for traditional MySQL DSN
 	if !strings.Contains(dsn, "@tcp(") && !strings.Contains(dsn, "@unix(") {
-		return fmt.Errorf("invalid MySQL DSN format - expected format: user:password@tcp(host:port)/database or mysql://user:password@host:port/database")
+		return errors.Wrapf(nil, "invalid MySQL DSN format - expected format: user:password@tcp(host:port)/database or mysql://user:password@host:port/database")
 	}
 	return nil
 }
@@ -348,7 +350,7 @@ func validateMySQLDSN(dsn string) error {
 func validatePostgresDSN(dsn string) error {
 	// Basic format check for PostgreSQL DSN
 	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
-		return fmt.Errorf("invalid PostgreSQL DSN format - expected format: postgres://user:password@host:port/database")
+		return errors.Wrapf(nil, "invalid PostgreSQL DSN format - expected format: postgres://user:password@host:port/database")
 	}
 	return nil
 }

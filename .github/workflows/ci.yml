@@ -6,6 +6,12 @@ on:
       - "master"
       - "main"
       - "test/ci"
+    paths-ignore:
+      - 'docs/**'
+      - 'doc/**'
+      - 'tests/**'
+      - 'test/**'
+      - 'ci/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -161,7 +167,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.0"
+          go-version: "1.25.0"
 
       - name: Add SHORT_SHA env property with commit short sha
         run: echo "SHORT_SHA=`echo ${GITHUB_SHA} | cut -c1-7`" >> $GITHUB_ENV
@@ -170,7 +176,7 @@ jobs:
       - name: Build Windows executables
         run: |
           # Build the standard executable
-          go build -trimpath -ldflags "-s -w -X github.com/songquanpeng/one-api/common.Version=$(cat VERSION)" -o one-api.exe
+          go build -trimpath -ldflags "-s -w" -o one-api.exe
 
           # Make a copy with the short SHA in the name
           cp one-api.exe "one-api-${{ env.SHORT_SHA }}.exe"

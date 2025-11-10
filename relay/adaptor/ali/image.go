@@ -13,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/model"
 )
@@ -38,8 +37,8 @@ func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCo
 	}
 
 	if aliTaskResponse.Message != "" {
-		logger.SysError("aliAsyncTask err: " + string(responseBody))
-		return openai.ErrorWrapper(errors.New(aliTaskResponse.Message), "ali_async_task_failed", http.StatusInternalServerError), nil
+		// Let ErrorWrapper handle the logging to avoid duplicate logging
+		return openai.ErrorWrapper(errors.Errorf("ali async task failed: %s", aliTaskResponse.Message), "ali_async_task_failed", http.StatusInternalServerError), nil
 	}
 
 	aliResponse, _, err := asyncTaskWait(aliTaskResponse.Output.TaskId, apiKey)
@@ -50,10 +49,11 @@ func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCo
 	if aliResponse.Output.TaskStatus != "SUCCEEDED" {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: aliResponse.Output.Message,
-				Type:    "ali_error",
-				Param:   "",
-				Code:    aliResponse.Output.Code,
+				Message:  aliResponse.Output.Message,
+				Type:     "ali_error",
+				Param:    "",
+				Code:     aliResponse.Output.Code,
+				RawError: errors.New(aliResponse.Output.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
@@ -85,7 +85,7 @@ func asyncTask(taskID string, key string) (*TaskResponse, error, []byte) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.SysError("aliAsyncTask client.Do err: " + err.Error())
+		// no request context here
 		return &aliResponse, err, nil
 	}
 	defer resp.Body.Close()
@@ -95,7 +95,7 @@ func asyncTask(taskID string, key string) (*TaskResponse, error, []byte) {
 	var response TaskResponse
 	err = json.Unmarshal(responseBody, &response)
 	if err != nil {
-		logger.SysError("aliAsyncTask NewDecoder err: " + err.Error())
+		// no request context here
 		return &aliResponse, err, nil
 	}
 
@@ -138,7 +138,7 @@ func asyncTaskWait(taskID string, key string) (*TaskResponse, []byte, error) {
 		time.Sleep(time.Duration(waitSeconds) * time.Second)
 	}
 
-	return nil, nil, fmt.Errorf("aliAsyncTaskWait timeout")
+	return nil, nil, errors.Errorf("aliAsyncTaskWait timeout")
 }
 
 func responseAli2OpenAIImage(response *TaskResponse, responseFormat string) *openai.ImageResponse {
@@ -152,8 +152,7 @@ func responseAli2OpenAIImage(response *TaskResponse, responseFormat string) *ope
 			// Read the image data from data.Url and store it in b64Json
 			imageData, err := getImageData(data.Url)
 			if err != nil {
-				// Handle the case where getting image data fails
-				logger.SysError("getImageData Error getting image data: " + err.Error())
+				// no request context here
 				continue
 			}
 
@@ -176,13 +175,13 @@ func responseAli2OpenAIImage(response *TaskResponse, responseFormat string) *ope
 func getImageData(url string) ([]byte, error) {
 	response, err := http.Get(url)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "download image from url %s", url)
 	}
 	defer response.Body.Close()
 
 	imageData, err := io.ReadAll(response.Body)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "read image response body")
 	}
 
 	return imageData, nil

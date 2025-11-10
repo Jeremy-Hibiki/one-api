@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Button,
   Form,
-  Header,
   Label,
-  Pagination,
-  Segment,
-  Select,
-  Table,
   Popup,
+  Table,
+  Select,
+  Dropdown,
+  Header,
+  Segment,
+  Icon,
 } from 'semantic-ui-react';
 import {
   API,
@@ -18,136 +20,129 @@ import {
   showSuccess,
   showWarning,
   timestamp2string,
+  renderQuota,
 } from '../helpers';
-import { useTranslation } from 'react-i18next';
+import BaseTable from './shared/BaseTable';
+import TracingModal from './TracingModal';
 
 import { ITEMS_PER_PAGE } from '../constants';
-import { renderColorLabel, renderQuota } from '../helpers/render';
-import { Link } from 'react-router-dom';
 
-function renderTimestamp(timestamp, request_id) {
+function ExpandableDetail({ content, isStream, systemPromptReset }) {
+  const [expanded, setExpanded] = useState(false);
+  const maxLength = 100;
+  const shouldTruncate = content && content.length > maxLength;
+
   return (
-    <code
-      onClick={async () => {
-        if (await copy(request_id)) {
-          showSuccess(`Request ID copied: ${request_id}`);
-        } else {
-          showWarning(`Failed to copy request ID: ${request_id}`);
-        }
-      }}
-      style={{ cursor: 'pointer' }}
-    >
-      {timestamp2string(timestamp)}
-    </code>
+    <div style={{ maxWidth: '300px' }}>
+      <div style={{
+        wordBreak: 'break-word',
+        whiteSpace: expanded ? 'normal' : 'nowrap',
+        overflow: 'hidden',
+        textOverflow: shouldTruncate && !expanded ? 'ellipsis' : 'visible'
+      }}>
+        {expanded || !shouldTruncate ? content : content.slice(0, maxLength)}
+        {shouldTruncate && (
+          <Button
+            basic
+            size="mini"
+            style={{ marginLeft: '4px', padding: '2px 6px' }}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? 'Show Less' : 'Show More'}
+          </Button>
+        )}
+      </div>
+      <div style={{ marginTop: '4px' }}>
+        {isStream && (
+          <Label size="mini" color="pink" style={{ marginRight: '4px' }}>
+            Stream
+          </Label>
+        )}
+        {systemPromptReset && (
+          <Label basic size="mini" color="red">
+            System Prompt Reset
+          </Label>
+        )}
+      </div>
+    </div>
   );
 }
 
-const MODE_OPTIONS = [
-  { key: 'all', text: 'All Users', value: 'all' },
-  { key: 'self', text: 'Current User', value: 'self' },
-];
+function renderTimestamp(timestamp, request_id) {
+  const fullTimestamp = timestamp2string(timestamp);
 
-function renderType(type) {
-  switch (type) {
-    case 1:
-      return (
-        <Label basic color='green'>
-          Recharge
-        </Label>
-      );
-    case 2:
-      return (
-        <Label basic color='olive'>
-          Consumed
-        </Label>
-      );
-    case 3:
-      return (
-        <Label basic color='orange'>
-          Management
-        </Label>
-      );
-    case 4:
-      return (
-        <Label basic color='purple'>
-          System
-        </Label>
-      );
-    case 5:
-      return (
-        <Label basic color='violet'>
-          Test
-        </Label>
-      );
-    default:
-      return (
-        <Label basic color='black'>
-          Unknown
-        </Label>
-      );
-  }
-}
-
-function getColorByElapsedTime(elapsedTime) {
-  if (elapsedTime === undefined || 0) return 'black';
-  if (elapsedTime < 1000) return 'green';
-  if (elapsedTime < 3000) return 'olive';
-  if (elapsedTime < 5000) return 'yellow';
-  if (elapsedTime < 10000) return 'orange';
-  return 'red';
-}
-
-function renderDetail(log) {
   return (
-    <>
-      {log.content}
-      <br />
-      {log.elapsed_time && (
-        <Label
-          basic
-          size={'mini'}
-          color={getColorByElapsedTime(log.elapsed_time)}
+    <Popup
+      content={`${fullTimestamp}${request_id ? `\nRequest ID: ${request_id}` : ''}`}
+      trigger={
+        <code
+          onClick={async () => {
+            if (request_id && await copy(request_id)) {
+              showSuccess(`Request ID copied: ${request_id}`);
+            } else if (request_id) {
+              showWarning(`Failed to copy request ID: ${request_id}`);
+            }
+          }}
+          className="timestamp-code"
+          style={{ cursor: request_id ? 'pointer' : 'default' }}
         >
-          {log.elapsed_time} ms
-        </Label>
-      )}
-      {log.is_stream && (
-        <>
-          <Label size={'mini'} color='pink'>
-            Stream
-          </Label>
-        </>
-      )}
-      {log.system_prompt_reset && (
-        <>
-          <Label basic size={'mini'} color='red'>
-            System Prompt Reset
-          </Label>
-        </>
-      )}
-    </>
+          {fullTimestamp}
+        </code>
+      }
+    />
+  );
+}
+
+function renderLogType(type, t) {
+  const typeConfig = {
+    1: { color: 'green', text: t('log.type.topup', 'Recharge') },
+    2: { color: 'olive', text: t('log.type.usage', 'Consumed') },
+    3: { color: 'orange', text: t('log.type.admin', 'Management') },
+    4: { color: 'purple', text: t('log.type.system', 'System') },
+    5: { color: 'violet', text: t('log.type.test', 'Test') },
+  };
+
+  const config = typeConfig[type] || {
+    color: 'black',
+    text: t('common.unknown', 'Unknown')
+  };
+
+  return (
+    <Label basic color={config.color}>
+      {config.text}
+    </Label>
   );
 }
 
 const LogsTable = () => {
   const { t } = useTranslation();
   const [logs, setLogs] = useState([]);
-  const [showStat, setShowStat] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searching, setSearching] = useState(false);
+
+  // Tracing modal state
+  const [tracingModalOpen, setTracingModalOpen] = useState(false);
+  const [selectedLogId, setSelectedLogId] = useState(null);
+
+  // Advanced search filters
+  const [showStat, setShowStat] = useState(false);
   const [logType, setLogType] = useState(0);
   const isAdminUser = isAdmin();
   let now = new Date();
+  let sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
   const [inputs, setInputs] = useState({
     username: '',
     token_name: '',
     model_name: '',
-    start_timestamp: timestamp2string(0),
+    start_timestamp: timestamp2string(sevenDaysAgo.getTime() / 1000),
     end_timestamp: timestamp2string(now.getTime() / 1000 + 3600),
     channel: '',
   });
+
   const {
     username,
     token_name,
@@ -161,18 +156,72 @@ const LogsTable = () => {
     quota: 0,
     token: 0,
   });
+  const [isStatRefreshing, setIsStatRefreshing] = useState(false);
+  const [userOptions, setUserOptions] = useState([]);
+  const [userSearchLoading, setUserSearchLoading] = useState(false);
+  const [sortBy, setSortBy] = useState('');
+  const [sortOrder, setSortOrder] = useState('desc');
+  const [sortLoading, setSortLoading] = useState(false);
 
   const LOG_OPTIONS = [
-    { key: '0', text: t('log.type.all'), value: 0 },
-    { key: '1', text: t('log.type.topup'), value: 1 },
-    { key: '2', text: t('log.type.usage'), value: 2 },
-    { key: '3', text: t('log.type.admin'), value: 3 },
-    { key: '4', text: t('log.type.system'), value: 4 },
-    { key: '5', text: t('log.type.test'), value: 5 },
+    { key: '0', text: t('log.type.all', 'All'), value: 0 },
+    { key: '1', text: t('log.type.topup', 'Recharge'), value: 1 },
+    { key: '2', text: t('log.type.usage', 'Consumed'), value: 2 },
+    { key: '3', text: t('log.type.admin', 'Management'), value: 3 },
+    { key: '4', text: t('log.type.system', 'System'), value: 4 },
+    { key: '5', text: t('log.type.test', 'Test'), value: 5 },
   ];
 
-  const handleInputChange = (e, { name, value }) => {
+  const handleInputChange = (_, { name, value }) => {
     setInputs((inputs) => ({ ...inputs, [name]: value }));
+  };
+
+  const searchUsers = async (searchQuery) => {
+    if (!searchQuery.trim()) {
+      setUserOptions([]);
+      return;
+    }
+
+    setUserSearchLoading(true);
+    try {
+      const res = await API.get(`/api/user/search?keyword=${searchQuery}`);
+      const { success, data } = res.data;
+      if (success) {
+        const options = data.map(user => ({
+          key: user.id,
+          value: user.username,
+          text: `${user.display_name || user.username} (@${user.username})`,
+          content: (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <div style={{ fontWeight: 'bold' }}>
+                {user.display_name || user.username}
+              </div>
+              <div style={{ fontSize: '0.9em', color: '#666' }}>
+                @{user.username} • ID: {user.id}
+              </div>
+            </div>
+          )
+        }));
+        setUserOptions(options);
+      }
+    } catch (error) {
+      console.error('Failed to search users:', error);
+    } finally {
+      setUserSearchLoading(false);
+    }
+  };
+
+  const handleStatRefresh = async () => {
+    setIsStatRefreshing(true);
+    try {
+      if (isAdminUser) {
+        await getLogStat();
+      } else {
+        await getLogSelfStat();
+      }
+    } finally {
+      setIsStatRefreshing(false);
+    }
   };
 
   const getLogSelfStat = async () => {
@@ -218,25 +267,26 @@ const LogsTable = () => {
     return logType !== 5;
   };
 
-  const loadLogs = async (startIdx) => {
+  const loadLogs = async (page = 0) => {
+    setLoading(true);
     let url = '';
     let localStartTimestamp = Date.parse(start_timestamp) / 1000;
     let localEndTimestamp = Date.parse(end_timestamp) / 1000;
-    if (isAdminUser) {
-      url = `/api/log/?p=${startIdx}&type=${logType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}`;
-    } else {
-      url = `/api/log/self?p=${startIdx}&type=${logType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}`;
+    let sortParams = '';
+    if (sortBy) {
+      sortParams = `&sort_by=${sortBy}&sort_order=${sortOrder}`;
     }
+    if (isAdminUser) {
+      url = `/api/log/?p=${page}&type=${logType}&username=${username}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}&channel=${channel}${sortParams}`;
+    } else {
+      url = `/api/log/self?p=${page}&type=${logType}&token_name=${token_name}&model_name=${model_name}&start_timestamp=${localStartTimestamp}&end_timestamp=${localEndTimestamp}${sortParams}`;
+    }
+
     const res = await API.get(url);
-    const { success, message, data } = res.data;
+    const { success, message, data, total } = res.data;
     if (success) {
-      if (startIdx === 0) {
-        setLogs(data);
-      } else {
-        let newLogs = [...logs];
-        newLogs.splice(startIdx * ITEMS_PER_PAGE, data.length, ...data);
-        setLogs(newLogs);
-      }
+      setLogs(data);
+      setTotalPages(Math.ceil(total / ITEMS_PER_PAGE));
     } else {
       showError(message);
     }
@@ -244,34 +294,26 @@ const LogsTable = () => {
   };
 
   const onPaginationChange = (e, { activePage }) => {
-    (async () => {
-      if (activePage === Math.ceil(logs.length / ITEMS_PER_PAGE) + 1) {
-        // In this case we have to load more data and then append them.
-        await loadLogs(activePage - 1);
-      }
-      setActivePage(activePage);
-    })();
-  };
-
-  const refresh = async () => {
-    setLoading(true);
-    setActivePage(1);
-    await loadLogs(0);
+    setActivePage(activePage);
+    loadLogs(activePage - 1);
   };
 
   useEffect(() => {
-    refresh().then();
-  }, [logType]);
+    refresh();
+  }, [logType, sortBy, sortOrder]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const searchLogs = async () => {
     if (searchKeyword === '') {
-      // if keyword is blank, load files instead.
+      // if keyword is blank, load logs instead.
       await loadLogs(0);
       setActivePage(1);
       return;
     }
     setSearching(true);
-    const res = await API.get(`/api/log/self/search?keyword=${searchKeyword}`);
+    const url = isAdminUser ? '/api/log/search' : '/api/log/self/search';
+    const res = await API.get(
+      `${url}?keyword=${searchKeyword}`
+    );
     const { success, message, data } = res.data;
     if (success) {
       setLogs(data);
@@ -282,330 +324,463 @@ const LogsTable = () => {
     setSearching(false);
   };
 
-  const handleKeywordChange = async (e, { value }) => {
+  const handleKeywordChange = (e, { value }) => {
     setSearchKeyword(value.trim());
   };
 
-  const sortLog = (key) => {
-    if (logs.length === 0) return;
-    setLoading(true);
-    let sortedLogs = [...logs];
-    if (typeof sortedLogs[0][key] === 'string') {
-      sortedLogs.sort((a, b) => {
-        return ('' + a[key]).localeCompare(b[key]);
-      });
-    } else {
-      sortedLogs.sort((a, b) => {
-        if (a[key] === b[key]) return 0;
-        if (a[key] > b[key]) return -1;
-        if (a[key] < b[key]) return 1;
-      });
+  const sortLog = async (key) => {
+    // Prevent multiple sort requests
+    if (sortLoading) return;
+
+    // Toggle sort order if clicking the same column
+    let newSortOrder = 'desc';
+    if (sortBy === key && sortOrder === 'desc') {
+      newSortOrder = 'asc';
     }
-    if (sortedLogs[0].id === logs[0].id) {
-      sortedLogs.reverse();
+
+    setSortBy(key);
+    setSortOrder(newSortOrder);
+    setActivePage(1);
+    setSortLoading(true);
+
+    try {
+      // Reload data with new sorting
+      await loadLogs(0);
+    } finally {
+      setSortLoading(false);
     }
-    setLogs(sortedLogs);
-    setLoading(false);
   };
+
+  const refresh = async () => {
+    setLoading(true);
+    setActivePage(1);
+    await loadLogs(0);
+  };
+
+  const getSortIcon = (columnKey) => {
+    if (sortBy !== columnKey) {
+      return <Icon name="sort" style={{ opacity: 0.5 }} />;
+    }
+    return <Icon name={sortOrder === 'asc' ? 'sort up' : 'sort down'} />;
+  };
+
+  const handleRowClick = (logId) => {
+    setSelectedLogId(logId);
+    setTracingModalOpen(true);
+  };
+
+  const handleTracingModalClose = () => {
+    setTracingModalOpen(false);
+    setSelectedLogId(null);
+  };
+
+  const headerCells = [
+    {
+      content: (
+        <>
+          {t('log.table.time', 'Time')}{getSortIcon('created_time')}
+          {sortLoading && sortBy === 'created_time' && <span> ⏳</span>}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortLog('created_time'),
+    },
+    ...(isAdminUser ? [{
+      content: (
+        <>
+          {t('log.table.channel', 'Channel')}{getSortIcon('channel')}
+          {sortLoading && sortBy === 'channel' && <span> ⏳</span>}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortLog('channel'),
+    }] : []),
+    {
+      content: (
+        <>
+          {t('log.table.type', 'Type')}{getSortIcon('type')}
+          {sortLoading && sortBy === 'type' && <span> ⏳</span>}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortLog('type'),
+    },
+    {
+      content: (
+        <>
+          {t('log.table.model', 'Model')}{getSortIcon('model_name')}
+          {sortLoading && sortBy === 'model_name' && <span> ⏳</span>}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortLog('model_name'),
+    },
+    ...(showUserTokenQuota() ? [
+      ...(isAdminUser ? [{
+        content: (
+          <>
+            {t('log.table.username', 'Username')}{getSortIcon('username')}
+            {sortLoading && sortBy === 'username' && <span> ⏳</span>}
+          </>
+        ),
+        sortable: true,
+        onClick: () => sortLog('username'),
+      }] : []),
+      {
+        content: (
+          <>
+            {t('log.table.token_name', 'Token Name')}{getSortIcon('token_name')}
+            {sortLoading && sortBy === 'token_name' && <span> ⏳</span>}
+          </>
+        ),
+        sortable: true,
+        onClick: () => sortLog('token_name'),
+      },
+      {
+        content: (
+          <>
+            {t('log.table.prompt_tokens', 'Prompt Tokens')}{getSortIcon('prompt_tokens')}
+            {sortLoading && sortBy === 'prompt_tokens' && <span> ⏳</span>}
+          </>
+        ),
+        sortable: true,
+        onClick: () => sortLog('prompt_tokens'),
+      },
+      {
+        content: (
+          <>
+            {t('log.table.completion_tokens', 'Completion Tokens')}{getSortIcon('completion_tokens')}
+            {sortLoading && sortBy === 'completion_tokens' && <span> ⏳</span>}
+          </>
+        ),
+        sortable: true,
+        onClick: () => sortLog('completion_tokens'),
+      },
+      {
+        content: (
+          <>
+            {t('log.table.quota', 'Quota')}{getSortIcon('quota')}
+            {sortLoading && sortBy === 'quota' && <span> ⏳</span>}
+          </>
+        ),
+        sortable: true,
+        onClick: () => sortLog('quota'),
+      },
+      {
+        content: (
+          <>
+            {t('log.table.latency', 'Latency')}{getSortIcon('elapsed_time')}
+            {sortLoading && sortBy === 'elapsed_time' && <span> ⏳</span>}
+          </>
+        ),
+        sortable: true,
+        onClick: () => sortLog('elapsed_time'),
+      },
+    ] : []),
+    {
+      content: (
+        <>
+          {t('log.table.detail', 'Detail')}{getSortIcon('content')}
+          {sortLoading && sortBy === 'content' && <span> ⏳</span>}
+        </>
+      ),
+      sortable: true,
+      onClick: () => sortLog('content'),
+    },
+  ];
+
+  const footerButtons = [
+    {
+      content: t('log.buttons.refresh', 'Refresh'),
+      onClick: refresh,
+      loading: loading,
+    },
+    {
+      content: t('log.buttons.search', 'Search'),
+      onClick: searchLogs,
+      loading: searching,
+    },
+    ...(isAdmin() ? [{
+      content: t('log.buttons.clear', 'Clear'),
+      onClick: async () => {
+        try {
+          const res = await API.delete('/api/log');
+          const { success, message } = res.data;
+          if (success) {
+            showSuccess('Clear successful');
+            await refresh();
+          } else {
+            showError(message);
+          }
+        } catch (error) {
+          showError('Clear failed');
+        }
+      },
+      loading: false,
+    }] : []),
+  ];
+
+  // Calculate column span based on visible columns
+  const colSpan = headerCells.length;
 
   return (
     <>
       <Header as='h3'>
-        {t('log.usage_details')}（{t('log.total_quota')}：
-        {showStat && renderQuota(stat.quota, t)}
+        {t('log.usage_details', 'Usage Details')}（{t('log.total_quota', 'Total Quota')}：
+        {showStat && (
+          <>
+            {renderQuota(stat.quota, t)}
+            <Button
+              size='mini'
+              circular
+              icon='refresh'
+              onClick={handleStatRefresh}
+              loading={isStatRefreshing}
+              disabled={isStatRefreshing}
+              style={{
+                marginLeft: '8px',
+                padding: '4px',
+                minHeight: '20px',
+                minWidth: '20px',
+                fontSize: '10px'
+              }}
+              title={t('log.refresh_quota', 'Refresh quota data')}
+            />
+          </>
+        )}
         {!showStat && (
           <span
             onClick={handleEyeClick}
             style={{ cursor: 'pointer', color: 'gray' }}
           >
-            {t('log.click_to_view')}
+            {t('log.click_to_view', 'Click to view')}
           </span>
         )}
         ）
       </Header>
-      <Form>
-        <Form.Group>
-          <Form.Input
-            fluid
-            label={t('log.table.token_name')}
-            size={'small'}
-            width={3}
-            value={token_name}
-            placeholder={t('log.table.token_name_placeholder')}
-            name='token_name'
-            onChange={handleInputChange}
-          />
-          <Form.Input
-            fluid
-            label={t('log.table.model_name')}
-            size={'small'}
-            width={3}
-            value={model_name}
-            placeholder={t('log.table.model_name_placeholder')}
-            name='model_name'
-            onChange={handleInputChange}
-          />
-          <Form.Input
-            fluid
-            label={t('log.table.start_time')}
-            size={'small'}
-            width={4}
-            value={start_timestamp}
-            type='datetime-local'
-            name='start_timestamp'
-            onChange={handleInputChange}
-          />
-          <Form.Input
-            fluid
-            label={t('log.table.end_time')}
-            size={'small'}
-            width={4}
-            value={end_timestamp}
-            type='datetime-local'
-            name='end_timestamp'
-            onChange={handleInputChange}
-          />
-          <Form.Button
-            fluid
-            label={t('log.buttons.query')}
-            size={'small'}
-            width={2}
-            onClick={refresh}
-          >
-            {t('log.buttons.submit')}
-          </Form.Button>
-        </Form.Group>
-        {isAdminUser && (
-          <>
-            <Form.Group>
-              <Form.Input
-                fluid
-                label={t('log.table.channel_id')}
-                size={'small'}
-                width={3}
-                value={channel}
-                placeholder={t('log.table.channel_id_placeholder')}
-                name='channel'
-                onChange={handleInputChange}
-              />
-              <Form.Input
-                fluid
-                label={t('log.table.username')}
-                size={'small'}
-                width={3}
-                value={username}
-                placeholder={t('log.table.username_placeholder')}
-                name='username'
-                onChange={handleInputChange}
-              />
-            </Form.Group>
-          </>
-        )}
-        <Form.Input
-          icon='search'
-          placeholder={t('log.search')}
-          value={searchKeyword}
-          onChange={(e, { value }) => setSearchKeyword(value)}
-        />
-      </Form>
-      <Table basic={'very'} compact size='small'>
-        <Table.Header>
-          <Table.Row>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortLog('created_time');
-              }}
-              width={3}
-            >
-              {t('log.table.time')}
-            </Table.HeaderCell>
-            {isAdminUser && (
-              <Table.HeaderCell
-                style={{ cursor: 'pointer' }}
-                onClick={() => {
-                  sortLog('channel');
-                }}
-                width={1}
-              >
-                {t('log.table.channel')}
-              </Table.HeaderCell>
-            )}
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortLog('type');
-              }}
-              width={1}
-            >
-              {t('log.table.type')}
-            </Table.HeaderCell>
-            <Table.HeaderCell
-              style={{ cursor: 'pointer' }}
-              onClick={() => {
-                sortLog('model_name');
-              }}
-              width={2}
-            >
-              {t('log.table.model')}
-            </Table.HeaderCell>
-            {showUserTokenQuota() && (
-              <>
-                {isAdminUser && (
-                  <Table.HeaderCell
-                    style={{ cursor: 'pointer' }}
-                    onClick={() => {
-                      sortLog('username');
-                    }}
-                    width={2}
-                  >
-                    {t('log.table.username')}
-                  </Table.HeaderCell>
-                )}
-                <Table.HeaderCell
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    sortLog('token_name');
-                  }}
-                  width={2}
-                >
-                  {t('log.table.token_name')}
-                </Table.HeaderCell>
-                <Table.HeaderCell
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    sortLog('prompt_tokens');
-                  }}
-                  width={1}
-                >
-                  {t('log.table.prompt_tokens')}
-                </Table.HeaderCell>
-                <Table.HeaderCell
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    sortLog('completion_tokens');
-                  }}
-                  width={1}
-                >
-                  {t('log.table.completion_tokens')}
-                </Table.HeaderCell>
-                <Table.HeaderCell
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => {
-                    sortLog('quota');
-                  }}
-                  width={1}
-                >
-                  {t('log.table.quota')}
-                </Table.HeaderCell>
-              </>
-            )}
-            <Table.HeaderCell>{t('log.table.detail')}</Table.HeaderCell>
-          </Table.Row>
-        </Table.Header>
 
-        <Table.Body>
-          {logs
-            .slice(
-              (activePage - 1) * ITEMS_PER_PAGE,
-              activePage * ITEMS_PER_PAGE
-            )
-            .map((log, idx) => {
-              if (log.deleted) return <></>;
-              return (
-                <Table.Row key={log.id}>
-                  <Table.Cell>
-                    {renderTimestamp(log.created_at, log.request_id)}
-                  </Table.Cell>
+      <Segment>
+        <Form onSubmit={searchLogs}>
+          <Form.Group>
+            <Form.Input
+              fluid
+              label={t('log.table.token_name', 'Token Name')}
+              size={'small'}
+              width={3}
+              value={token_name}
+              placeholder={t('log.table.token_name_placeholder', 'Search by token name')}
+              name='token_name'
+              onChange={handleInputChange}
+            />
+            <Form.Input
+              fluid
+              label={t('log.table.model_name', 'Model Name')}
+              size={'small'}
+              width={3}
+              value={model_name}
+              placeholder={t('log.table.model_name_placeholder', 'Search by model name')}
+              name='model_name'
+              onChange={handleInputChange}
+            />
+            <Form.Input
+              fluid
+              label={t('log.table.start_time', 'Start Time')}
+              size={'small'}
+              width={4}
+              value={start_timestamp}
+              type='datetime-local'
+              name='start_timestamp'
+              onChange={handleInputChange}
+            />
+            <Form.Input
+              fluid
+              label={t('log.table.end_time', 'End Time')}
+              size={'small'}
+              width={4}
+              value={end_timestamp}
+              type='datetime-local'
+              name='end_timestamp'
+              onChange={handleInputChange}
+            />
+            <Form.Button
+              fluid
+              label={t('log.buttons.query', 'Query')}
+              size={'small'}
+              width={2}
+              onClick={refresh}
+            >
+              {t('log.buttons.submit', 'Submit')}
+            </Form.Button>
+          </Form.Group>
+          {isAdminUser && (
+            <>
+              <Form.Group>
+                <Form.Input
+                  fluid
+                  label={t('log.table.channel_id', 'Channel ID')}
+                  size={'small'}
+                  width={3}
+                  value={channel}
+                  placeholder={t('log.table.channel_id_placeholder', 'Search by channel ID')}
+                  name='channel'
+                  onChange={handleInputChange}
+                />
+                <Form.Field width={3}>
+                  <label>{t('log.table.username', 'Username')}</label>
+                  <Dropdown
+                    fluid
+                    selection
+                    search
+                    clearable
+                    allowAdditions
+                    value={username}
+                    placeholder={t('log.table.username_placeholder', 'Search by username')}
+                    options={userOptions}
+                    onSearchChange={(_, { searchQuery }) => searchUsers(searchQuery)}
+                    onChange={(_, { value }) => handleInputChange(_, { name: 'username', value })}
+                    loading={userSearchLoading}
+                    noResultsMessage={t('log.no_users_found', 'No users found')}
+                    additionLabel={t('log.use_username', 'Use username: ')}
+                    onAddItem={(_, { value }) => {
+                      const newOption = {
+                        key: value,
+                        value: value,
+                        text: value
+                      };
+                      setUserOptions([...userOptions, newOption]);
+                    }}
+                  />
+                </Form.Field>
+              </Form.Group>
+            </>
+          )}
+          <Form.Input
+            icon='search'
+            placeholder={t('log.search', 'Search logs')}
+            value={searchKeyword}
+            onChange={handleKeywordChange}
+          />
+        </Form>
+      </Segment>
+
+      <Segment>
+        <Form>
+          <Form.Group>
+            <Form.Field width={4}>
+              <label>{t('log.type.select', 'Select log type')}</label>
+              <Select
+                placeholder={t('log.type.select', 'Select log type')}
+                options={LOG_OPTIONS}
+                name='logType'
+                value={logType}
+                onChange={(_, { value }) => {
+                  setLogType(value);
+                }}
+                fluid
+              />
+            </Form.Field>
+          </Form.Group>
+        </Form>
+      </Segment>
+
+      <BaseTable
+        loading={loading}
+        activePage={activePage}
+        totalPages={totalPages}
+        onPageChange={onPaginationChange}
+        headerCells={headerCells}
+        footerButtons={footerButtons}
+        colSpan={colSpan}
+        size="small"
+      >
+        {logs.map((log, idx) => {
+          if (log.deleted) return null;
+          return (
+            <Table.Row
+              key={log.id}
+              data-label={`Log ${log.id}`}
+              style={{ cursor: 'pointer' }}
+              onClick={() => handleRowClick(log.id)}
+            >
+              <Table.Cell data-label={t('log.table.time', 'Time')}>
+                {renderTimestamp(log.created_at, log.request_id)}
+              </Table.Cell>
+              {isAdminUser && (
+                <Table.Cell data-label={t('log.table.channel', 'Channel')}>
+                  {log.channel ? (
+                    <Label basic>
+                      {log.channel}
+                    </Label>
+                  ) : (
+                    ''
+                  )}
+                </Table.Cell>
+              )}
+              <Table.Cell data-label={t('log.table.type', 'Type')}>
+                {renderLogType(log.type, t)}
+              </Table.Cell>
+              <Table.Cell data-label={t('log.table.model', 'Model')}>
+                {log.model_name ? (
+                  <Label basic color='blue'>
+                    {log.model_name}
+                  </Label>
+                ) : (
+                  ''
+                )}
+              </Table.Cell>
+              {showUserTokenQuota() && (
+                <>
                   {isAdminUser && (
-                    <Table.Cell>
-                      {log.channel ? (
-                        <Label
-                          basic
-                          as={Link}
-                          to={`/channel/edit/${log.channel}`}
-                        >
-                          {log.channel}
+                    <Table.Cell data-label={t('log.table.username', 'Username')}>
+                      {log.username ? (
+                        <Label basic>
+                          {log.username}
                         </Label>
                       ) : (
                         ''
                       )}
                     </Table.Cell>
                   )}
-                  <Table.Cell>{renderType(log.type)}</Table.Cell>
-                  <Table.Cell>
-                    {log.model_name ? renderColorLabel(log.model_name) : ''}
+                  <Table.Cell data-label={t('log.table.token_name', 'Token Name')}>
+                    {log.token_name ? (
+                      <Label basic color='teal'>
+                        {log.token_name}
+                      </Label>
+                    ) : (
+                      ''
+                    )}
                   </Table.Cell>
-                  {showUserTokenQuota() && (
-                    <>
-                      {isAdminUser && (
-                        <Table.Cell>
-                          {log.username ? (
-                            <Label
-                              basic
-                              as={Link}
-                              to={`/user/edit/${log.user_id}`}
-                            >
-                              {log.username}
-                            </Label>
-                          ) : (
-                            ''
-                          )}
-                        </Table.Cell>
-                      )}
-                      <Table.Cell>
-                        {log.token_name ? renderColorLabel(log.token_name) : ''}
-                      </Table.Cell>
+                  <Table.Cell data-label={t('log.table.prompt_tokens', 'Prompt Tokens')}>
+                    {log.prompt_tokens || ''}
+                  </Table.Cell>
+                  <Table.Cell data-label={t('log.table.completion_tokens', 'Completion Tokens')}>
+                    {log.completion_tokens || ''}
+                  </Table.Cell>
+                  <Table.Cell data-label={t('log.table.quota', 'Quota')}>
+                    {log.quota ? renderQuota(log.quota, t, 6) : 'free'}
+                  </Table.Cell>
+                  <Table.Cell data-label={t('log.table.latency', 'Latency')}>
+                    {log.elapsed_time ? `${log.elapsed_time} ms` : ''}
+                  </Table.Cell>
+                </>
+              )}
+              <Table.Cell data-label={t('log.table.detail', 'Detail')}>
+                <ExpandableDetail
+                  content={log.content}
+                  isStream={log.is_stream}
+                  systemPromptReset={log.system_prompt_reset}
+                />
+              </Table.Cell>
+            </Table.Row>
+          );
+        })}
+      </BaseTable>
 
-                      <Table.Cell>
-                        {log.prompt_tokens ? log.prompt_tokens : ''}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {log.completion_tokens ? log.completion_tokens : ''}
-                      </Table.Cell>
-                      <Table.Cell>
-                        {log.quota ? renderQuota(log.quota, t, 6) : 'free'}
-                      </Table.Cell>
-                    </>
-                  )}
-
-                  <Table.Cell>{renderDetail(log)}</Table.Cell>
-                </Table.Row>
-              );
-            })}
-        </Table.Body>
-
-        <Table.Footer>
-          <Table.Row>
-            <Table.HeaderCell colSpan={'10'}>
-              <Select
-                placeholder={t('log.type.select')}
-                options={LOG_OPTIONS}
-                style={{ marginRight: '8px' }}
-                name='logType'
-                value={logType}
-                onChange={(e, { name, value }) => {
-                  setLogType(value);
-                }}
-              />
-              <Button size='small' onClick={refresh} loading={loading}>
-                {t('log.buttons.refresh')}
-              </Button>
-              <Pagination
-                floated='right'
-                activePage={activePage}
-                onPageChange={onPaginationChange}
-                size='small'
-                siblingRange={1}
-                totalPages={
-                  Math.ceil(logs.length / ITEMS_PER_PAGE) +
-                  (logs.length % ITEMS_PER_PAGE === 0 ? 1 : 0)
-                }
-              />
-            </Table.HeaderCell>
-          </Table.Row>
-        </Table.Footer>
-      </Table>
+      <TracingModal
+        open={tracingModalOpen}
+        onClose={handleTracingModalClose}
+        logId={selectedLogId}
+      />
     </>
   );
 };

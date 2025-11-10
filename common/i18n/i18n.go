@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,14 +15,15 @@ var localesFS embed.FS
 var (
 	translations = make(map[string]map[string]string)
 	defaultLang  = "en"
-	ContextKey   = "i18n"
+	// ContextKey stores the gin context key where the resolved language code is cached.
+	ContextKey = "i18n"
 )
 
 // Init loads all translation files from embedded filesystem
 func Init() error {
 	entries, err := localesFS.ReadDir("locales")
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "failed to read locales directory")
 	}
 
 	for _, entry := range entries {
@@ -32,12 +34,12 @@ func Init() error {
 		langCode := strings.TrimSuffix(entry.Name(), ".json")
 		content, err := localesFS.ReadFile("locales/" + entry.Name())
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "failed to read locale file: %s", entry.Name())
 		}
 
 		var translation map[string]string
 		if err := json.Unmarshal(content, &translation); err != nil {
-			return err
+			return errors.Wrapf(err, "failed to unmarshal locale file: %s", entry.Name())
 		}
 		translations[langCode] = translation
 	}
@@ -45,6 +47,7 @@ func Init() error {
 	return nil
 }
 
+// GetLang returns the active language code for the request, defaulting to English when unset.
 func GetLang(c *gin.Context) string {
 	rawLang, ok := c.Get(ContextKey)
 	if !ok {
@@ -57,6 +60,7 @@ func GetLang(c *gin.Context) string {
 	return defaultLang
 }
 
+// Translate resolves the localized message for the current request context, falling back to the original string.
 func Translate(c *gin.Context, message string) string {
 	lang := GetLang(c)
 	return translateHelper(lang, message)

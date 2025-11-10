@@ -8,11 +8,12 @@ import (
 	"time"
 
 	"github.com/Laisky/errors/v2"
-	gutils "github.com/Laisky/go-utils/v5"
+	gutils "github.com/Laisky/go-utils/v6"
 	"gorm.io/gorm"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/utils"
+	"github.com/songquanpeng/one-api/dto"
 )
 
 type Ability struct {
@@ -22,13 +23,19 @@ type Ability struct {
 	Enabled      bool       `json:"enabled"`
 	Priority     *int64     `json:"priority" gorm:"bigint;default:0;index"`
 	SuspendUntil *time.Time `json:"suspend_until,omitempty" gorm:"index"`
+	CreatedAt    int64      `json:"created_at" gorm:"bigint;autoCreateTime:milli"`
+	UpdatedAt    int64      `json:"updated_at" gorm:"bigint;autoUpdateTime:milli"`
 }
 
 func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority bool) (*Channel, error) {
+	if DB == nil {
+		return nil, errors.New("database not initialized")
+	}
+
 	ability := Ability{}
 	groupCol := "`group`"
 	trueVal := "1"
-	if common.UsingPostgreSQL {
+	if common.UsingPostgreSQL.Load() {
 		groupCol = `"group"`
 		trueVal = "true"
 	}
@@ -42,7 +49,7 @@ func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority b
 		maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(groupCol+" = ? AND model = ? AND enabled = "+trueVal+" AND (suspend_until IS NULL OR suspend_until < ?)", group, model, now)
 		channelQuery = DB.Where(groupCol+" = ? AND model = ? AND enabled = "+trueVal+" AND priority = (?) AND (suspend_until IS NULL OR suspend_until < ?)", group, model, maxPrioritySubQuery, now)
 	}
-	if common.UsingSQLite || common.UsingPostgreSQL {
+	if common.UsingSQLite.Load() || common.UsingPostgreSQL.Load() {
 		err = channelQuery.Order("RANDOM()").First(&ability).Error
 	} else {
 		err = channelQuery.Order("RAND()").First(&ability).Error
@@ -54,7 +61,13 @@ func GetRandomSatisfiedChannel(group string, model string, ignoreFirstPriority b
 	channel := Channel{}
 	channel.Id = ability.ChannelId
 	err = DB.First(&channel, "id = ?", ability.ChannelId).Error
-	return &channel, err
+	if err != nil {
+		return nil, errors.Wrapf(err, "load channel %d for ability", ability.ChannelId)
+	}
+	if !channel.SupportsModel(model) {
+		return nil, errors.Errorf("channel #%d does not list support for model %s", channel.Id, model)
+	}
+	return &channel, nil
 }
 
 func (channel *Channel) AddAbilities() error {
@@ -89,12 +102,12 @@ func (channel *Channel) UpdateAbilities() error {
 	// First delete all abilities of this channel
 	err := channel.DeleteAbilities()
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "delete abilities for channel %d", channel.Id)
 	}
 	// Then add new abilities
 	err = channel.AddAbilities()
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "add abilities for channel %d", channel.Id)
 	}
 	return nil
 }
@@ -106,28 +119,23 @@ func UpdateAbilityStatus(channelId int, status bool) error {
 func GetGroupModels(ctx context.Context, group string) ([]string, error) {
 	groupCol := "`group`"
 	trueVal := "1"
-	if common.UsingPostgreSQL {
+	if common.UsingPostgreSQL.Load() {
 		groupCol = `"group"`
 		trueVal = "true"
 	}
 	var models []string
 	err := DB.Model(&Ability{}).Distinct("model").Where(groupCol+" = ? AND enabled = "+trueVal+" AND (suspend_until IS NULL OR suspend_until < ?)", group, time.Now()).Pluck("model", &models).Error
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "get group models")
 	}
 	sort.Strings(models)
 	return models, err
 }
 
-var getGroupModelsV2Cache = gutils.NewExpCache[[]EnabledAbility](context.Background(), time.Second*10)
-
-type EnabledAbility struct {
-	Model       string `json:"model" gorm:"model"`
-	ChannelType int    `json:"channel_type" gorm:"channel_type"`
-}
+var getGroupModelsV2Cache = gutils.NewExpCache[[]dto.EnabledAbility](context.Background(), time.Second*10)
 
 // GetGroupModelsV2 returns all enabled models for this group with their channel names.
-func GetGroupModelsV2(ctx context.Context, group string) ([]EnabledAbility, error) {
+func GetGroupModelsV2(ctx context.Context, group string) ([]dto.EnabledAbility, error) {
 	// get from cache first
 	if models, ok := getGroupModelsV2Cache.Load(group); ok {
 		return models, nil
@@ -136,16 +144,16 @@ func GetGroupModelsV2(ctx context.Context, group string) ([]EnabledAbility, erro
 	// prepare query based on database type
 	groupCol := "`group`"
 	trueVal := "1"
-	if common.UsingPostgreSQL {
+	if common.UsingPostgreSQL.Load() {
 		groupCol = `"group"`
 		trueVal = "true"
 	}
 	now := time.Now()
 
-	// query with JOIN to get model and channel name in a single query
-	var models []EnabledAbility
+	// query with JOIN to get model, channel type, and channel ID in a single query
+	var models []dto.EnabledAbility
 	query := DB.Model(&Ability{}).
-		Select("DISTINCT abilities.model AS model, channels.type AS channel_type").
+		Select("DISTINCT abilities.model AS model, channels.type AS channel_type, abilities.channel_id AS channel_id").
 		Joins("JOIN channels ON abilities.channel_id = channels.id").
 		Where("abilities."+groupCol+" = ? AND abilities.enabled = "+trueVal+" AND (abilities.suspend_until IS NULL OR abilities.suspend_until < ?)", group, now).
 		Order("abilities.model")
@@ -172,7 +180,7 @@ func SuspendAbility(ctx context.Context, group string, modelName string, channel
 	groupCol := "`group`"
 	modelCol := "`model`"
 	channelCol := "`channel_id`"
-	if common.UsingPostgreSQL {
+	if common.UsingPostgreSQL.Load() {
 		groupCol = `"group"`
 		modelCol = `"model"`
 		channelCol = `"channel_id"`
@@ -185,10 +193,13 @@ func SuspendAbility(ctx context.Context, group string, modelName string, channel
 }
 
 func GetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstPriority bool, excludeChannelIds map[int]bool) (*Channel, error) {
+	if DB == nil {
+		return nil, errors.New("database not initialized")
+	}
 	ability := Ability{}
 	groupCol := "`group`"
 	trueVal := "1"
-	if common.UsingPostgreSQL {
+	if common.UsingPostgreSQL.Load() {
 		groupCol = `"group"`
 		trueVal = "true"
 	}
@@ -271,7 +282,7 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstP
 		}
 	}
 
-	if common.UsingSQLite || common.UsingPostgreSQL {
+	if common.UsingSQLite.Load() || common.UsingPostgreSQL.Load() {
 		err = channelQuery.Order("RANDOM()").First(&ability).Error
 	} else {
 		err = channelQuery.Order("RAND()").First(&ability).Error
@@ -283,5 +294,11 @@ func GetRandomSatisfiedChannelExcluding(group string, model string, ignoreFirstP
 	channel := Channel{}
 	channel.Id = ability.ChannelId
 	err = DB.First(&channel, "id = ?", ability.ChannelId).Error
-	return &channel, err
+	if err != nil {
+		return nil, errors.Wrapf(err, "load channel %d for ability exclusion check", ability.ChannelId)
+	}
+	if !channel.SupportsModel(model) {
+		return nil, errors.Errorf("channel #%d does not list support for model %s", channel.Id, model)
+	}
+	return &channel, nil
 }

@@ -1,21 +1,17 @@
 package openai
 
 import (
-	"context"
-	"fmt"
-
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
 	"github.com/songquanpeng/one-api/relay/model"
 )
 
 func ErrorWrapper(err error, code string, statusCode int) *model.ErrorWithStatusCode {
-	logger.Error(context.TODO(), fmt.Sprintf("[%s]%+v", code, err))
-
+	// Avoid using global logger here; callers should log with request-scoped logger.
 	Error := model.Error{
-		Message: err.Error(),
-		Type:    "one_api_error",
-		Code:    code,
+		Message:  err.Error(),
+		Type:     "one_api_error",
+		Code:     code,
+		RawError: err,
 	}
 	return &model.ErrorWithStatusCode{
 		Error:      Error,

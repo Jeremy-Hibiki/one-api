@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/ctxkey"
@@ -31,12 +32,13 @@ type Meta struct {
 	// OriginModelName is the model name from the raw user request
 	OriginModelName string
 	// ActualModelName is the model name after mapping
-	ActualModelName    string
-	RequestURLPath     string
-	PromptTokens       int // only for DoResponse
-	ChannelRatio       float64
-	ForcedSystemPrompt string
-	StartTime          time.Time
+	ActualModelName     string
+	RequestURLPath      string
+	ResponseAPIFallback bool
+	PromptTokens        int // only for DoResponse
+	ChannelRatio        float64
+	ForcedSystemPrompt  string
+	StartTime           time.Time
 }
 
 // GetMappedModelName returns the mapped model name and a bool indicating if the model name is mapped
@@ -60,7 +62,7 @@ func GetByContext(c *gin.Context) *Meta {
 		currentChannelId := c.GetInt(ctxkey.ChannelId)
 		if existingMeta.ChannelId != currentChannelId && currentChannelId != 0 {
 			// Channel has changed, update the cached meta with new channel information
-			logger.Infof(c.Request.Context(), "Channel changed during retry: %d -> %d, updating meta", existingMeta.ChannelId, currentChannelId)
+			logger.Logger.Info("Channel changed during retry", zap.Int("from", existingMeta.ChannelId), zap.Int("to", currentChannelId), zap.String("action", "updating meta"))
 			existingMeta.ChannelType = c.GetInt(ctxkey.Channel)
 			existingMeta.ChannelId = currentChannelId
 			existingMeta.BaseURL = c.GetString(ctxkey.BaseURL)
@@ -82,6 +84,7 @@ func GetByContext(c *gin.Context) *Meta {
 			// Update API type and actual model name
 			existingMeta.APIType = channeltype.ToAPIType(existingMeta.ChannelType)
 			existingMeta.ActualModelName = GetMappedModelName(existingMeta.OriginModelName, existingMeta.ModelMapping)
+			existingMeta.EnsureActualModelName(existingMeta.OriginModelName)
 
 			// Update the cached meta in context
 			Set2Context(c, existingMeta)
@@ -117,6 +120,7 @@ func GetByContext(c *gin.Context) *Meta {
 	meta.APIType = channeltype.ToAPIType(meta.ChannelType)
 
 	meta.ActualModelName = GetMappedModelName(meta.OriginModelName, meta.ModelMapping)
+	meta.EnsureActualModelName(meta.OriginModelName)
 
 	Set2Context(c, &meta)
 	return &meta
@@ -124,4 +128,31 @@ func GetByContext(c *gin.Context) *Meta {
 
 func Set2Context(c *gin.Context, meta *Meta) {
 	c.Set(ctxkey.Meta, meta)
+}
+
+// EnsureActualModelName guarantees that ActualModelName is populated with either the mapped
+// model name or the provided raw model fallback. It also backfills OriginModelName when absent.
+// This should be invoked whenever a downstream component parses a request payload that carries
+// the user's explicit model selection.
+func (m *Meta) EnsureActualModelName(fallback string) {
+	if m == nil {
+		return
+	}
+	fallback = strings.TrimSpace(fallback)
+	if fallback == "" {
+		return
+	}
+
+	if strings.TrimSpace(m.OriginModelName) == "" {
+		m.OriginModelName = fallback
+	}
+	if strings.TrimSpace(m.ActualModelName) != "" {
+		return
+	}
+
+	mapped := GetMappedModelName(fallback, m.ModelMapping)
+	if strings.TrimSpace(mapped) == "" {
+		mapped = fallback
+	}
+	m.ActualModelName = mapped
 }

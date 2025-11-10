@@ -13,7 +13,7 @@ type Request struct {
 	Temperature      *float64      `json:"temperature,omitempty"` // default to 0.3
 	MaxTokens        int           `json:"max_tokens,omitempty"`
 	MaxInputTokens   int           `json:"max_input_tokens,omitempty"`
-	K                int           `json:"k,omitempty"` // default to 0
+	K                *int          `json:"k,omitempty"` // default to 0
 	P                *float64      `json:"p,omitempty"` // default to 0.75
 	Seed             int           `json:"seed,omitempty"`
 	StopSequences    []string      `json:"stop_sequences,omitempty"`
@@ -41,13 +41,13 @@ type ParameterSpec struct {
 }
 
 type ToolResult struct {
-	Call    ToolCall                 `json:"call"`
-	Outputs []map[string]interface{} `json:"outputs"`
+	Call    ToolCall         `json:"call"`
+	Outputs []map[string]any `json:"outputs"`
 }
 
 type ToolCall struct {
-	Name       string                 `json:"name" required:"true"`
-	Parameters map[string]interface{} `json:"parameters" required:"true"`
+	Name       string         `json:"name" required:"true"`
+	Parameters map[string]any `json:"parameters" required:"true"`
 }
 
 type StreamResponse struct {

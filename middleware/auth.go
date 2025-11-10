@@ -25,12 +25,12 @@ import (
 	"strings"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/blacklist"
 	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/network"
 	"github.com/songquanpeng/one-api/model"
 )
@@ -50,16 +50,12 @@ func authHelper(c *gin.Context, minRole int) {
 
 	// First, try to authenticate using session data (cookies)
 	if username == nil {
-		logger.SysLog("no user session found, try to use access token")
+		gmw.GetLogger(c).Info("no user session found, try to use access token")
 		// If no session exists, try to authenticate using the Authorization header
 		accessToken := c.Request.Header.Get("Authorization")
 		if accessToken == "" {
 			// No authentication method available - reject request
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"message": "No permission to perform this operation, not logged in and no access token provided",
-			})
-			c.Abort()
+			respondAuthError(c, http.StatusUnauthorized, "No permission to perform this operation, not logged in and no access token provided")
 			return
 		}
 
@@ -73,36 +69,24 @@ func authHelper(c *gin.Context, minRole int) {
 			status = user.Status
 		} else {
 			// Invalid token - reject request
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "No permission to perform this operation, access token is invalid",
-			})
-			c.Abort()
+			respondAuthError(c, http.StatusUnauthorized, "No permission to perform this operation, access token is invalid")
 			return
 		}
 	}
 
 	// Check if user is disabled or banned
 	if status.(int) == model.UserStatusDisabled || blacklist.IsUserBanned(id.(int)) {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "User has been banned",
-		})
+		respondAuthError(c, http.StatusForbidden, "User has been banned")
 		// Clear session data for banned users
 		session := sessions.Default(c)
 		session.Clear()
 		_ = session.Save()
-		c.Abort()
 		return
 	}
 
 	// Check if user has sufficient role permissions
 	if role.(int) < minRole {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "No permission to perform this operation, insufficient permissions",
-		})
-		c.Abort()
+		respondAuthError(c, http.StatusForbidden, "No permission to perform this operation, insufficient permissions")
 		return
 	}
 
@@ -153,14 +137,14 @@ func RootAuth() func(c *gin.Context) {
 // Use this for API endpoints that will be accessed programmatically with API tokens.
 func TokenAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		ctx := c.Request.Context()
+		ctx := gmw.Ctx(c)
 		// Parse the token key from the request (could include channel specification)
 		// Parse the token key from the request (could include channel specification)
 		parts := GetTokenKeyParts(c)
 		key := parts[0]
 
 		// Validate the API token against the database
-		token, err := model.ValidateUserToken(key)
+		token, err := model.ValidateUserToken(ctx, key)
 		if err != nil {
 			AbortWithError(c, http.StatusUnauthorized, err)
 			return
@@ -175,7 +159,7 @@ func TokenAuth() func(c *gin.Context) {
 		}
 
 		// Verify the token owner (user) is still enabled and not banned
-		userEnabled, err := model.CacheIsUserEnabled(token.UserId)
+		userEnabled, err := model.CacheIsUserEnabled(ctx, token.UserId)
 		if err != nil {
 			AbortWithError(c, http.StatusInternalServerError, err)
 			return
@@ -252,6 +236,9 @@ func shouldCheckModel(c *gin.Context) bool {
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/chat/completions") {
 		return true
 	}
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+		return true
+	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/images") {
 		return true
 	}
@@ -259,4 +246,10 @@ func shouldCheckModel(c *gin.Context) bool {
 		return true
 	}
 	return false
+}
+
+// respondAuthError centralizes error responses for auth failures (DRY, KISS)
+func respondAuthError(c *gin.Context, status int, message string) {
+	c.JSON(status, gin.H{"success": false, "message": message})
+	c.Abort()
 }

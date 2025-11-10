@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,7 @@ import (
 	"github.com/songquanpeng/one-api/model"
 )
 
+// GetStatus returns application metadata and feature toggles for the public status endpoint.
 func GetStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -46,9 +48,9 @@ func GetStatus(c *gin.Context) {
 			"oidc_userinfo_endpoint":      config.OidcUserinfoEndpoint,
 		},
 	})
-	return
 }
 
+// GetNotice returns the configured notice content for the UI.
 func GetNotice(c *gin.Context) {
 	config.OptionMapRWMutex.RLock()
 	defer config.OptionMapRWMutex.RUnlock()
@@ -57,9 +59,9 @@ func GetNotice(c *gin.Context) {
 		"message": "",
 		"data":    config.OptionMap["Notice"],
 	})
-	return
 }
 
+// GetAbout returns the configured about content for the UI.
 func GetAbout(c *gin.Context) {
 	config.OptionMapRWMutex.RLock()
 	defer config.OptionMapRWMutex.RUnlock()
@@ -68,9 +70,9 @@ func GetAbout(c *gin.Context) {
 		"message": "",
 		"data":    config.OptionMap["About"],
 	})
-	return
 }
 
+// GetHomePageContent returns the configured homepage content block.
 func GetHomePageContent(c *gin.Context) {
 	config.OptionMapRWMutex.RLock()
 	defer config.OptionMapRWMutex.RUnlock()
@@ -79,9 +81,9 @@ func GetHomePageContent(c *gin.Context) {
 		"message": "",
 		"data":    config.OptionMap["HomePageContent"],
 	})
-	return
 }
 
+// SendEmailVerification issues a verification code to the provided email address.
 func SendEmailVerification(c *gin.Context) {
 	email := c.Query("email")
 	if err := common.Validate.Var(email, "required,email"); err != nil {
@@ -116,7 +118,7 @@ func SendEmailVerification(c *gin.Context) {
 	}
 	code := common.GenerateVerificationCode(6)
 	common.RegisterVerificationCodeWithKey(email, code, common.EmailVerificationPurpose)
-	subject := fmt.Sprintf("%s 邮箱验证邮件", config.SystemName)
+	subject := fmt.Sprintf("%s Email Verification", config.SystemName)
 	content := message.EmailTemplate(
 		subject,
 		fmt.Sprintf(`
@@ -139,9 +141,9 @@ func SendEmailVerification(c *gin.Context) {
 		"success": true,
 		"message": "",
 	})
-	return
 }
 
+// SendPasswordResetEmail sends a password reset link to the supplied email address when registered.
 func SendPasswordResetEmail(c *gin.Context) {
 	email := c.Query("email")
 	if err := common.Validate.Var(email, "required,email"); err != nil {
@@ -188,7 +190,6 @@ func SendPasswordResetEmail(c *gin.Context) {
 		"success": true,
 		"message": "",
 	})
-	return
 }
 
 type PasswordResetRequest struct {
@@ -196,6 +197,7 @@ type PasswordResetRequest struct {
 	Token string `json:"token"`
 }
 
+// ResetPassword validates the reset token and assigns a new random password to the account.
 func ResetPassword(c *gin.Context) {
 	var req PasswordResetRequest
 	err := json.NewDecoder(c.Request.Body).Decode(&req)
@@ -228,5 +230,86 @@ func ResetPassword(c *gin.Context) {
 		"message": "",
 		"data":    password,
 	})
-	return
+}
+
+// GetChannelStatus returns a paginated view of channel health and recent test metrics.
+func GetChannelStatus(c *gin.Context) {
+	// Parse pagination parameters
+	p, _ := strconv.Atoi(c.Query("p"))
+	if p < 0 {
+		p = 0
+	}
+
+	// Get page size from query parameter, default to 6 as requested
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = 6 // Default to 6 channels per page as requested
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+
+	// Get channels with pagination for monitoring
+	channels, err := model.GetAllChannels(p*size, size, "all", "", "")
+	if err != nil {
+		// Return a generic "Internal Server Error" as per best practices,
+		// since database errors are rare and typically indicate an internal issue.
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Get total count for pagination
+	totalCount, err := model.GetChannelCount()
+	if err != nil {
+		// Return a generic "Internal Server Error" as per best practices,
+		// since database errors are rare and typically indicate an internal issue.
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Format channels for monitoring
+	var channelStatuses []gin.H
+	for _, channel := range channels {
+		var status string
+		var enabled bool
+
+		switch channel.Status {
+		case 1: // ChannelStatusEnabled
+			status = "enabled"
+			enabled = true
+		case 2: // ChannelStatusManuallyDisabled
+			status = "manually_disabled"
+			enabled = false
+		case 3: // ChannelStatusAutoDisabled
+			status = "auto_disabled"
+			enabled = false
+		default: // ChannelStatusUnknown
+			status = "unknown"
+			enabled = false
+		}
+
+		channelStatus := gin.H{
+			"name":    channel.Name,
+			"status":  status,
+			"enabled": enabled,
+			"response": gin.H{
+				"response_time_ms": channel.ResponseTime,
+				"test_time":        channel.TestTime,
+				"created_time":     channel.CreatedTime,
+			},
+		}
+		channelStatuses = append(channelStatuses, channelStatus)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    channelStatuses,
+		"total":   totalCount,
+	})
 }

@@ -13,16 +13,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Laisky/zap"
+
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/conv"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
 	"github.com/songquanpeng/one-api/common/render"
+	"github.com/songquanpeng/one-api/common/tracing"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/constant"
 	"github.com/songquanpeng/one-api/relay/model"
@@ -75,8 +77,9 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStat
 	if tencentResponse.Error.Code != "" {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: tencentResponse.Error.Message,
-				Code:    tencentResponse.Error.Code,
+				Message:  tencentResponse.Error.Message,
+				Code:     tencentResponse.Error.Code,
+				RawError: errors.New(tencentResponse.Error.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
@@ -139,9 +142,9 @@ func responseTencent2OpenAI(response *ChatResponse) *openai.TextResponse {
 	return &fullTextResponse
 }
 
-func streamResponseTencent2OpenAI(TencentResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
+func streamResponseTencent2OpenAI(c *gin.Context, TencentResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
 	response := openai.ChatCompletionsStreamResponse{
-		Id:      fmt.Sprintf("chatcmpl-%s", random.GetUUID()),
+		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion.chunk",
 		Created: helper.GetTimestamp(),
 		Model:   "tencent-hunyuan",
@@ -168,6 +171,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 	common.SetEventStreamHeaders(c)
 
+	lg := gmw.GetLogger(c)
 	for scanner.Scan() {
 		data := scanner.Text()
 		if len(data) < 5 || !strings.HasPrefix(data, "data:") {
@@ -178,23 +182,23 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		var tencentResponse ChatResponse
 		err := json.Unmarshal([]byte(data), &tencentResponse)
 		if err != nil {
-			logger.SysError("error unmarshalling stream response: " + err.Error())
+			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
 		}
 
-		response := streamResponseTencent2OpenAI(&tencentResponse)
+		response := streamResponseTencent2OpenAI(c, &tencentResponse)
 		if len(response.Choices) != 0 {
 			responseText += conv.AsString(response.Choices[0].Delta.Content)
 		}
 
 		err = render.ObjectData(c, response)
 		if err != nil {
-			logger.SysError(err.Error())
+			lg.Error("error rendering stream response", zap.Error(err))
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		logger.SysError("error reading stream: " + err.Error())
+		lg.Error("error reading stream", zap.Error(err))
 	}
 
 	render.Done(c)
@@ -226,8 +230,9 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 	if TencentResponse.Error.Code != "" {
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
-				Message: TencentResponse.Error.Message,
-				Code:    TencentResponse.Error.Code,
+				Message:  TencentResponse.Error.Message,
+				Code:     TencentResponse.Error.Code,
+				RawError: errors.New(TencentResponse.Error.Message),
 			},
 			StatusCode: resp.StatusCode,
 		}, nil
@@ -242,7 +247,8 @@ func Handler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, err = c.Writer.Write(jsonResponse)
 	if err != nil {
-		return openai.ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), nil
+		// Return usage even on write failure so billing can proceed for forwarded requests
+		return openai.ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), &fullTextResponse.Usage
 	}
 	return nil, &fullTextResponse.Usage
 }

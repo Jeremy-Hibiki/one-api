@@ -1,33 +1,32 @@
 package middleware
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/Laisky/errors/v2"
-	gmw "github.com/Laisky/gin-middlewares/v6"
+	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common"
+	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
 )
-
-func abortWithMessage(c *gin.Context, statusCode int, message string) {
-	c.JSON(statusCode, gin.H{
-		"error": gin.H{
-			"message": helper.MessageWithRequestId(message, c.GetString(helper.RequestIdKey)),
-			"type":    "one_api_error",
-		},
-	})
-	c.Abort()
-	logger.Error(c.Request.Context(), message)
-}
 
 // AbortWithError aborts the request with an error message
 func AbortWithError(c *gin.Context, statusCode int, err error) {
 	logger := gmw.GetLogger(c)
-	logger.Error("server abort", zap.Error(err))
+	if ignoreServerError(err) {
+		logger.Warn("server abort",
+			zap.Int("status_code", statusCode),
+			zap.Error(err))
+	} else {
+		logger.Error("server abort",
+			zap.Int("status_code", statusCode),
+			zap.Error(err))
+	}
+
 	c.JSON(statusCode, gin.H{
 		"error": gin.H{
 			"message": helper.MessageWithRequestId(err.Error(), c.GetString(helper.RequestIdKey)),
@@ -37,7 +36,25 @@ func AbortWithError(c *gin.Context, statusCode int, err error) {
 	c.Abort()
 }
 
+func ignoreServerError(err error) bool {
+	switch {
+	case strings.Contains(err.Error(), "token not found for key:"):
+		return true
+	default:
+		return false
+	}
+}
+
 func getRequestModel(c *gin.Context) (string, error) {
+	// Realtime WS uses model in query string
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+		m := c.Query("model")
+		if m == "" {
+			return "", errors.New("missing required query parameter: model")
+		}
+		return m, nil
+	}
+
 	var modelRequest ModelRequest
 	err := common.UnmarshalBodyReusable(c, &modelRequest)
 	if err != nil {
@@ -70,12 +87,7 @@ func getRequestModel(c *gin.Context) (string, error) {
 
 func isModelInList(modelName string, models string) bool {
 	modelList := strings.Split(models, ",")
-	for _, model := range modelList {
-		if modelName == model {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(modelList, modelName)
 }
 
 // GetTokenKeyParts extracts the token key parts from the Authorization header
@@ -83,7 +95,18 @@ func isModelInList(modelName string, models string) bool {
 // key like `sk-{token}[-{channelid}]`
 func GetTokenKeyParts(c *gin.Context) []string {
 	key := c.Request.Header.Get("Authorization")
+	if key == "" {
+		// compatible with Anthropic
+		key = c.Request.Header.Get("X-Api-Key")
+	}
+
 	key = strings.TrimPrefix(key, "Bearer ")
-	key = strings.TrimPrefix(strings.TrimPrefix(key, "sk-"), "laisky-")
+	// Trim current configured prefix first
+	if p := config.TokenKeyPrefix; p != "" {
+		key = strings.TrimPrefix(key, p)
+	}
+	// Backward compatibility with historical prefixes
+	key = strings.TrimPrefix(key, "sk-")
+	key = strings.TrimPrefix(key, "laisky-")
 	return strings.Split(key, "-")
 }
