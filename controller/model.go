@@ -386,14 +386,6 @@ func ListModels(c *gin.Context) {
 		return
 	}
 
-	// fix(#39): Previously, to fix #31, I concatenated model_name with adaptor name to return models.
-	// But this caused an issue with OpenAI-compatible channels (including legacy custom entries), where the returned adaptor is "openai",
-	// resulting in adaptor name and ownedBy field mismatches when matching against allModels.
-	// For deepseek example, the adaptor is "openai" but ownedBy is "deepseek", causing mismatch.
-	// Our current solution: for models from OpenAI-compatible channels, don't concatenate adaptor name,
-	// just match by model name only. However, this may reintroduce the duplicate models bug
-	// mentioned in #31. A complete fix would require significant changes, so I'll leave it for now.
-
 	// Create ability maps for both exact matches and model-only matches
 	exactMatches := make(map[string]bool)
 	modelMatches := make(map[string]bool)
@@ -409,12 +401,15 @@ func ListModels(c *gin.Context) {
 	}
 
 	userAvailableModels := make([]OpenAIModels, 0)
+	addedModels := make(map[string]bool) // Track which model:owner combinations have been added
+
 	for _, model := range allModels {
 		key := model.Id + ":" + model.OwnedBy
 
 		// Check for exact match first
 		if exactMatches[key] {
 			userAvailableModels = append(userAvailableModels, model)
+			addedModels[key] = true
 			continue
 		}
 
@@ -432,6 +427,30 @@ func ListModels(c *gin.Context) {
 
 			if !hasExactMatch {
 				userAvailableModels = append(userAvailableModels, model)
+				addedModels[key] = true
+			}
+		}
+	}
+
+	// Add models that are in user permissions but not in allModels (e.g., custom models)
+	// This is important for OpenAI-compatible channels where users can configure arbitrary model names
+	for exactKey := range exactMatches {
+		if !addedModels[exactKey] {
+			// Parse the key to get model name and owner
+			parts := strings.SplitN(exactKey, ":", 2)
+			if len(parts) == 2 {
+				modelName := parts[0]
+				owner := parts[1]
+
+				userAvailableModels = append(userAvailableModels, OpenAIModels{
+					Id:         modelName,
+					Object:     "model",
+					Created:    1626777600,
+					OwnedBy:    owner,
+					Permission: []OpenAIModelPermission{},
+					Root:       modelName,
+					Parent:     nil,
+				})
 			}
 		}
 	}
