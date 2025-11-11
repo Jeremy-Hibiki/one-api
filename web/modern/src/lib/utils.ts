@@ -22,9 +22,8 @@ export function formatTimestamp(timestamp: number): string {
 }
 
 export function toDateTimeLocal(timestamp: number | undefined): string {
-  if (!timestamp) return ''
-  const date = new Date(timestamp * 1000)
-  return date.toISOString().slice(0, 16)
+  if (!timestamp || timestamp <= 0) return ''
+  return formatTimestamp(timestamp).slice(0, 16)
 }
 
 export function fromDateTimeLocal(dateTimeLocal: string): number {
