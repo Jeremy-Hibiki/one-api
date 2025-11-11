@@ -121,6 +121,11 @@ type TextResponse struct {
 	model.Usage `json:"usage"`
 }
 
+type TextResponseWithErrorInfo struct {
+	TextResponse
+	Error *model.Error `json:"error,omitempty"`
+}
+
 type EmbeddingResponseItem struct {
 	Object    string    `json:"object"`
 	Index     int       `json:"index"`

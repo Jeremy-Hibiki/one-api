@@ -357,7 +357,7 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	}
 
 	// Parse the response JSON
-	var textResponse SlimTextResponse
+	var textResponse TextResponseWithErrorInfo
 	if err = json.Unmarshal(responseBody, &textResponse); err != nil {
 		return ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
 	}
@@ -407,6 +407,11 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 
 	// Forward all response headers (not just first value of each)
 	for k, values := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") ||
+			strings.EqualFold(k, "Transfer-Encoding") ||
+			strings.EqualFold(k, "Content-Encoding") {
+			continue
+		}
 		for _, v := range values {
 			c.Writer.Header().Add(k, v)
 		}
@@ -460,7 +465,7 @@ func processReasoningContent(msg *TextResponseChoice) string {
 }
 
 // Helper function to calculate token usage
-func calculateTokenUsage(response *SlimTextResponse, promptTokens int, modelName string) {
+func calculateTokenUsage(response *TextResponseWithErrorInfo, promptTokens int, modelName string) {
 	// Calculate tokens if not provided by the API
 	if response.Usage.TotalTokens == 0 ||
 		(response.Usage.PromptTokens == 0 && response.Usage.CompletionTokens == 0) {
@@ -498,13 +503,13 @@ func calculateTokenUsage(response *SlimTextResponse, promptTokens int, modelName
 }
 
 // Helper function to check if response has audio tokens
-func hasAudioTokens(response *SlimTextResponse) bool {
+func hasAudioTokens(response *TextResponseWithErrorInfo) bool {
 	return (response.PromptTokensDetails != nil && response.PromptTokensDetails.AudioTokens > 0) ||
 		(response.CompletionTokensDetails != nil && response.CompletionTokensDetails.AudioTokens > 0)
 }
 
 // Helper function to calculate audio token usage
-func calculateAudioTokens(response *SlimTextResponse, modelName string) {
+func calculateAudioTokens(response *TextResponseWithErrorInfo, modelName string) {
 	// Convert audio tokens for prompt
 	if response.PromptTokensDetails != nil {
 		response.Usage.PromptTokens = response.PromptTokensDetails.TextTokens +
