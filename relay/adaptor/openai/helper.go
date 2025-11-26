@@ -2,6 +2,7 @@ package openai
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/songquanpeng/one-api/relay/channeltype"
@@ -23,11 +24,12 @@ func GetFullRequestURL(baseURL string, requestURL string, channelType int) strin
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path
 		}
-		if strings.HasSuffix(trimmedBase, "/v1") {
-			// Preserve legacy custom-channel behaviour: if the stored base already contains /v1,
+		versionPattern := regexp.MustCompile(`/v\d+$`)
+		if match := versionPattern.FindString(trimmedBase); match != "" {
+			// Preserve legacy custom-channel behaviour: if the stored base already contains /vN,
 			// avoid duplicating the segment. Otherwise leave the path untouched so providers that
-			// expect /v1 in the request keep working.
-			path = strings.TrimPrefix(path, "/v1")
+			// expect /vN in the request keep working.
+			path = strings.TrimPrefix(path, match)
 			if path == "" {
 				path = "/"
 			}
