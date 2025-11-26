@@ -105,8 +105,9 @@ type GeneralOpenAIRequest struct {
 	WebSearchOptions *WebSearchOptions `json:"web_search_options,omitempty"`
 
 	// Others
-	Instruction string `json:"instruction,omitempty"`
-	NumCtx      int    `json:"num_ctx,omitempty"`
+	Instruction       string   `json:"instruction,omitempty"`
+	NumCtx            int      `json:"num_ctx,omitempty"`
+	RepetitionPenalty *float64 `json:"repetition_penalty,omitempty"`
 	// Duration is the length of the audio/video in seconds
 	Duration *int `json:"duration,omitempty"`
 	// -------------------------------------
