@@ -21,6 +21,7 @@ import (
 	"github.com/songquanpeng/one-api/common/helper"
 	"github.com/songquanpeng/one-api/common/random"
 	channelhelper "github.com/songquanpeng/one-api/relay/adaptor"
+	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/meta"
@@ -36,9 +37,9 @@ func (a *Adaptor) Init(meta *meta.Meta) {
 
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 	defaultVersion := config.GeminiVersion
-	if strings.Contains(meta.ActualModelName, "gemini-2") ||
-		strings.Contains(meta.ActualModelName, "gemini-1.5") ||
-		strings.Contains(meta.ActualModelName, "gemma-3") {
+	modelName := strings.ToLower(meta.ActualModelName)
+	if geminiOpenaiCompatible.GeminiVersionAtLeast(modelName, 1.5) ||
+		strings.Contains(modelName, "gemma-3") {
 		defaultVersion = "v1beta"
 	}
 
@@ -643,6 +644,12 @@ func (a *Adaptor) GetModelList() []string {
 
 func (a *Adaptor) GetChannelName() string {
 	return "google gemini"
+}
+
+// DefaultToolingConfig exposes Google's default grounded web search tooling
+// metadata so channel policy builders can merge in provider pricing.
+func (a *Adaptor) DefaultToolingConfig() channelhelper.ChannelToolConfig {
+	return GeminiToolingDefaults
 }
 
 func mapGeminiFinishReason(reason string) string {

@@ -11,9 +11,9 @@ import (
 var ModelRatios = map[string]adaptor.ModelConfig{
 	// GLM-4.6 (tiered)
 	"glm-4.6": {
-		Ratio:            2 * ratio.MilliTokensRmb,   // ¥2/1M input tokens (input length [0,32], output [0,0.2])
-		CompletionRatio:  4,                          // ¥8/1M output tokens
-		CachedInputRatio: 0.4 * ratio.MilliTokensRmb, // ¥0.4/1M cached input
+		Ratio:            2 * ratio.MilliTokensRmb,   // CNY 2/1M input tokens (input length [0,32], output [0,0.2])
+		CompletionRatio:  4,                          // CNY 8/1M output tokens
+		CachedInputRatio: 0.4 * ratio.MilliTokensRmb, // CNY 0.4/1M cached input
 		Tiers: []adaptor.ModelRatioTier{
 			{Ratio: 3 * ratio.MilliTokensRmb, CompletionRatio: 14.0 / 3.0, CachedInputRatio: 0.6 * ratio.MilliTokensRmb, InputTokenThreshold: 0},  // input [0,32], output [0.2+]
 			{Ratio: 4 * ratio.MilliTokensRmb, CompletionRatio: 16.0 / 4.0, CachedInputRatio: 0.8 * ratio.MilliTokensRmb, InputTokenThreshold: 32}, // input [32,200]
@@ -42,7 +42,7 @@ var ModelRatios = map[string]adaptor.ModelConfig{
 	// GLM-4.5-Air (tiered)
 	"glm-4.5-air": {
 		Ratio:            0.8 * ratio.MilliTokensRmb,
-		CompletionRatio:  2.5, // ¥2/0.8 = 2.5
+		CompletionRatio:  2.5, // CNY 2/0.8 = 2.5
 		CachedInputRatio: 0.16 * ratio.MilliTokensRmb,
 		Tiers: []adaptor.ModelRatioTier{
 			{Ratio: 0.8 * ratio.MilliTokensRmb, CompletionRatio: 6.0 / 0.8, CachedInputRatio: 0.16 * ratio.MilliTokensRmb, InputTokenThreshold: 0},
@@ -91,4 +91,15 @@ var ModelRatios = map[string]adaptor.ModelConfig{
 	// Embedding Models
 	"embedding-3": {Ratio: 0.0005 * ratio.MilliTokensRmb, CompletionRatio: 1},
 	"embedding-2": {Ratio: 0.0005 * ratio.MilliTokensRmb, CompletionRatio: 1},
+}
+
+// ZhipuToolingDefaults captures Open BigModel's published search-tool pricing tiers (retrieved 2025-11-12).
+// Source: https://r.jina.ai/https://open.bigmodel.cn/pricing
+var ZhipuToolingDefaults = adaptor.ChannelToolConfig{
+	Pricing: map[string]adaptor.ToolPricingConfig{
+		"search_std":       {UsdPerCall: 0.01},
+		"search_pro":       {UsdPerCall: 0.03},
+		"search_pro_sogou": {UsdPerCall: 0.05},
+		"search_pro_quark": {UsdPerCall: 0.05},
+	},
 }

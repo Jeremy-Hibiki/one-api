@@ -11,9 +11,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/songquanpeng/one-api/relay/model"
 )
 
 func TestEmbeddingHandler_Success(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -84,6 +87,7 @@ func TestEmbeddingHandler_Success(t *testing.T) {
 }
 
 func TestEmbeddingHandler_ErrorResponse(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -113,11 +117,12 @@ func TestEmbeddingHandler_ErrorResponse(t *testing.T) {
 	require.NotNil(t, errResp)
 	require.Nil(t, usage)
 	assert.Equal(t, http.StatusUnauthorized, errResp.StatusCode)
-	assert.Equal(t, "authentication_error", errResp.Error.Type)
+	assert.Equal(t, model.ErrorTypeAuthentication, errResp.Error.Type)
 	assert.Equal(t, "Invalid API key", errResp.Error.Message)
 }
 
 func TestEmbeddingHandler_EmptyResponseBody(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -139,6 +144,7 @@ func TestEmbeddingHandler_EmptyResponseBody(t *testing.T) {
 }
 
 func TestEmbeddingHandler_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -160,6 +166,7 @@ func TestEmbeddingHandler_InvalidJSON(t *testing.T) {
 }
 
 func TestEmbeddingHandler_NoEmbeddingData(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -196,6 +203,7 @@ func TestEmbeddingHandler_NoEmbeddingData(t *testing.T) {
 }
 
 func TestEmbeddingHandler_UsageTotalTokensCalculation(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -241,6 +249,7 @@ func TestEmbeddingHandler_UsageTotalTokensCalculation(t *testing.T) {
 }
 
 func TestEmbeddingHandler_ReadBodyError(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

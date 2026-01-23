@@ -20,6 +20,7 @@ func init() {
 }
 
 func TestApplyThinkingQueryToChatRequestSetsReasoningEffort(t *testing.T) {
+	t.Parallel()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?thinking=true", nil)
@@ -34,7 +35,24 @@ func TestApplyThinkingQueryToChatRequestSetsReasoningEffort(t *testing.T) {
 	require.Equal(t, "high", *payload.ReasoningEffort)
 }
 
+func TestApplyThinkingQueryClampsMediumOnlyReasoningModels(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?thinking=true&reasoning_effort=high", nil)
+	c.Request = req
+
+	meta := &metalib.Meta{ActualModelName: "o4-mini", APIType: apitype.OpenAI, ChannelType: channeltype.OpenAI}
+	payload := &relaymodel.GeneralOpenAIRequest{Model: "o4-mini"}
+
+	applyThinkingQueryToChatRequest(c, payload, meta)
+
+	require.NotNil(t, payload.ReasoningEffort)
+	require.Equal(t, "medium", *payload.ReasoningEffort)
+}
+
 func TestApplyThinkingQueryRespectsUserProvidedEffort(t *testing.T) {
+	t.Parallel()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?thinking=true", nil)
@@ -50,6 +68,7 @@ func TestApplyThinkingQueryRespectsUserProvidedEffort(t *testing.T) {
 }
 
 func TestApplyThinkingQueryHonorsReasoningEffortOverride(t *testing.T) {
+	t.Parallel()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?thinking=true&reasoning_effort=medium", nil)
@@ -65,6 +84,7 @@ func TestApplyThinkingQueryHonorsReasoningEffortOverride(t *testing.T) {
 }
 
 func TestApplyThinkingQuerySetsIncludeReasoningForOpenRouter(t *testing.T) {
+	t.Parallel()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions?thinking=true", nil)
@@ -80,6 +100,7 @@ func TestApplyThinkingQuerySetsIncludeReasoningForOpenRouter(t *testing.T) {
 }
 
 func TestApplyThinkingQueryToResponseRequest(t *testing.T) {
+	t.Parallel()
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses?thinking=true", nil)
@@ -93,4 +114,21 @@ func TestApplyThinkingQueryToResponseRequest(t *testing.T) {
 	require.NotNil(t, payload.Reasoning)
 	require.NotNil(t, payload.Reasoning.Effort)
 	require.Equal(t, "high", *payload.Reasoning.Effort)
+}
+
+func TestApplyThinkingQueryToResponseRequestClampsMediumOnlyModels(t *testing.T) {
+	t.Parallel()
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses?thinking=true&reasoning_effort=high", nil)
+	c.Request = req
+
+	meta := &metalib.Meta{ActualModelName: "gpt-5.1-chat-latest", APIType: apitype.OpenAI, ChannelType: channeltype.OpenAI}
+	payload := &openaipayload.ResponseAPIRequest{Model: "gpt-5.1-chat-latest"}
+
+	applyThinkingQueryToResponseRequest(c, payload, meta)
+
+	require.NotNil(t, payload.Reasoning)
+	require.NotNil(t, payload.Reasoning.Effort)
+	require.Equal(t, "medium", *payload.Reasoning.Effort)
 }

@@ -1,34 +1,39 @@
-import { useEffect, useState, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
-import type { ColumnDef } from '@tanstack/react-table'
-import { EnhancedDataTable } from '@/components/ui/enhanced-data-table'
-import { SearchableDropdown, type SearchOption } from '@/components/ui/searchable-dropdown'
-import { ResponsivePageContainer } from '@/components/ui/responsive-container'
-import { useResponsive } from '@/hooks/useResponsive'
-import { api } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { formatTimestamp, cn } from '@/lib/utils'
-import { Plus, TestTube, RefreshCw, Trash2, Settings, AlertCircle } from 'lucide-react'
-import { useNotifications } from '@/components/ui/notifications'
-import { ResponsiveActionGroup } from '@/components/ui/responsive-action-group'
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { EnhancedDataTable } from '@/components/ui/enhanced-data-table';
+import { ListActionButton } from '@/components/ui/list-action-button';
+import { useNotifications } from '@/components/ui/notifications';
+import { ResponsiveActionGroup } from '@/components/ui/responsive-action-group';
+import { ResponsivePageContainer } from '@/components/ui/responsive-container';
+import { type SearchOption } from '@/components/ui/searchable-dropdown';
+import { TimestampDisplay } from '@/components/ui/timestamp';
+import { STORAGE_KEYS, usePageSize } from '@/hooks/usePersistentState';
+import { useResponsive } from '@/hooks/useResponsive';
+import { api } from '@/lib/api';
+import { cn, formatTimestamp } from '@/lib/utils';
+import type { ColumnDef } from '@tanstack/react-table';
+import { Ban, CheckCircle, FlaskConical, Plus, RefreshCw, Settings, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { resolveChannelColor } from './utils/colorGenerator';
 
 interface Channel {
-  id: number
-  name: string
-  type: number
-  status: number
-  response_time?: number
-  created_time: number
-  updated_time?: number
-  priority?: number
-  weight?: number
-  models?: string
-  group?: string
-  used_quota?: number
-  test_time?: number
-  testing_model?: string | null
+  id: number;
+  name: string;
+  type: number;
+  status: number;
+  response_time?: number;
+  created_time: number;
+  updated_time?: number;
+  priority?: number;
+  weight?: number;
+  models?: string;
+  group?: string;
+  used_quota?: number;
+  test_time?: number;
+  testing_model?: string | null;
 }
 
 /**
@@ -77,91 +82,113 @@ const CHANNEL_TYPES: Record<number, { name: string; color: string }> = {
   22: { name: 'FastGPT', color: 'blue' },
   21: { name: 'AI Proxy KB', color: 'purple' },
   20: { name: 'OpenRouter', color: 'black' },
-}
-
-const getChannelTypeBadge = (type: number) => {
-  const channelType = CHANNEL_TYPES[type] || { name: `Type ${type}`, color: 'gray' }
-  return (
-    <Badge variant="outline" className={`text-xs`}>
-      {channelType.name}
-    </Badge>
-  )
-}
-
-const getStatusBadge = (status: number, priority?: number) => {
-  if (status === 2) {
-    return <Badge variant="destructive">Disabled</Badge>
-  }
-  if ((priority ?? 0) < 0) {
-    return <Badge variant="secondary" className="bg-yellow-100 text-yellow-800">Paused</Badge>
-  }
-  return <Badge variant="default" className="bg-green-100 text-green-800">Active</Badge>
-}
+};
 
 const formatResponseTime = (time?: number) => {
-  if (!time) return '-'
-  const color = time < 1000 ? 'text-green-600' : time < 3000 ? 'text-yellow-600' : 'text-red-600'
-  return <span className={cn('font-mono text-sm', color)}>{time}ms</span>
-}
+  if (!time) return '-';
+  const color = time < 1000 ? 'text-green-600' : time < 3000 ? 'text-yellow-600' : 'text-red-600';
+  return <span className={cn('font-mono text-sm', color)}>{time}ms</span>;
+};
 
 export function ChannelsPage() {
-  const navigate = useNavigate()
-  const { isMobile } = useResponsive()
-  const { notify } = useNotifications()
-  const [data, setData] = useState<Channel[]>([])
-  const [loading, setLoading] = useState(false)
-  const [pageIndex, setPageIndex] = useState(0)
-  const [pageSize, setPageSize] = useState(10)
-  const [total, setTotal] = useState(0)
-  const [searchKeyword, setSearchKeyword] = useState('')
-  const [searchOptions, setSearchOptions] = useState<SearchOption[]>([])
-  const [searchLoading, setSearchLoading] = useState(false)
-  const [sortBy, setSortBy] = useState('id')
-  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
-  const [bulkTesting, setBulkTesting] = useState(false)
-  const initializedRef = useRef(false)
-  const skipFirstSortEffect = useRef(true)
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { isMobile } = useResponsive();
+  const { notify } = useNotifications();
+  const { t } = useTranslation();
+  const [data, setData] = useState<Channel[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [pageIndex, setPageIndex] = useState(Math.max(0, parseInt(searchParams.get('p') || '1') - 1));
+  const [pageSize, setPageSize] = usePageSize(STORAGE_KEYS.PAGE_SIZE);
+  const [total, setTotal] = useState(0);
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [searchOptions, setSearchOptions] = useState<SearchOption[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [sortBy, setSortBy] = useState('id');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [bulkTesting, setBulkTesting] = useState(false);
+  const initializedRef = useRef(false);
+  const skipFirstSortEffect = useRef(true);
+
+  const renderChannelTypeBadge = (type: number) => {
+    const channelType = CHANNEL_TYPES[type] || {
+      name: t('channels.type_unknown', { type }),
+      color: undefined,
+    };
+    const colorValue = resolveChannelColor(channelType.color, type);
+    return (
+      <Badge variant="outline" className="text-xs gap-1.5">
+        <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: colorValue }} />
+        {channelType.name}
+      </Badge>
+    );
+  };
+
+  const renderStatusBadge = (status: number, priority?: number) => {
+    if (status === 2) {
+      return <Badge variant="destructive">{t('channels.status.disabled')}</Badge>;
+    }
+    if ((priority ?? 0) < 0) {
+      return (
+        <Badge variant="secondary" className="bg-yellow-100 text-yellow-800">
+          {t('channels.status.paused')}
+        </Badge>
+      );
+    }
+    return (
+      <Badge variant="default" className="bg-green-100 text-green-800">
+        {t('channels.status.active')}
+      </Badge>
+    );
+  };
+  const updateSearchParamPage = (nextPageIndex: number) => {
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      params.set('p', (nextPageIndex + 1).toString());
+      return params;
+    });
+  };
 
   const load = async (p = 0, size = pageSize) => {
-    setLoading(true)
+    setLoading(true);
     try {
       // Unified API call - complete URL with /api prefix
-      let url = `/api/channel/?p=${p}&size=${size}`
-      if (sortBy) url += `&sort=${sortBy}&order=${sortOrder}`
+      let url = `/api/channel/?p=${p}&size=${size}`;
+      if (sortBy) url += `&sort=${sortBy}&order=${sortOrder}`;
 
-      const res = await api.get(url)
-      const { success, data: responseData, total: responseTotal } = res.data
+      const res = await api.get(url);
+      const { success, data: responseData, total: responseTotal } = res.data;
 
       if (success) {
-        setData(responseData || [])
-        setTotal(responseTotal || 0)
-        setPageIndex(p)
-        setPageSize(size)
+        setData(responseData || []);
+        setTotal(responseTotal || 0);
+        setPageIndex(p);
+        setPageSize(size);
       }
     } catch (error) {
-      console.error('Failed to load channels:', error)
-      setData([])
-      setTotal(0)
+      console.error('Failed to load channels:', error);
+      setData([]);
+      setTotal(0);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   const searchChannels = async (query: string) => {
     if (!query.trim()) {
-      setSearchOptions([])
-      return
+      setSearchOptions([]);
+      return;
     }
 
-    setSearchLoading(true)
+    setSearchLoading(true);
     try {
       // Unified API call - complete URL with /api prefix
-      let url = `/api/channel/search?keyword=${encodeURIComponent(query)}`
-      if (sortBy) url += `&sort=${sortBy}&order=${sortOrder}`
-      url += `&size=${pageSize}`
+      let url = `/api/channel/search?keyword=${encodeURIComponent(query)}`;
+      if (sortBy) url += `&sort=${sortBy}&order=${sortOrder}`;
+      url += `&size=${pageSize}`;
 
-      const res = await api.get(url)
-      const { success, data: responseData } = res.data
+      const res = await api.get(url);
+      const { success, data: responseData } = res.data;
 
       if (success && Array.isArray(responseData)) {
         const options: SearchOption[] = responseData.map((channel: Channel) => ({
@@ -172,255 +199,296 @@ export function ChannelsPage() {
             <div className="flex flex-col">
               <div className="font-medium">{channel.name}</div>
               <div className="text-sm text-muted-foreground flex items-center gap-2">
-                ID: {channel.id} • {getChannelTypeBadge(channel.type)} • {getStatusBadge(channel.status, channel.priority)}
+                {t('channels.search.id_label')}: {channel.id} • {renderChannelTypeBadge(channel.type)} •{' '}
+                {renderStatusBadge(channel.status, channel.priority)}
               </div>
             </div>
-          )
-        }))
-        setSearchOptions(options)
+          ),
+        }));
+        setSearchOptions(options);
       }
     } catch (error) {
-      console.error('Search failed:', error)
-      setSearchOptions([])
+      console.error('Search failed:', error);
+      setSearchOptions([]);
     } finally {
-      setSearchLoading(false)
+      setSearchLoading(false);
     }
-  }
+  };
 
   const performSearch = async () => {
     if (!searchKeyword.trim()) {
-      return load(0, pageSize)
+      return load(0, pageSize);
     }
 
-    setLoading(true)
+    setLoading(true);
     try {
       // Unified API call - complete URL with /api prefix
-      let url = `/api/channel/search?keyword=${encodeURIComponent(searchKeyword)}`
-      if (sortBy) url += `&sort=${sortBy}&order=${sortOrder}`
-      url += `&size=${pageSize}`
+      let url = `/api/channel/search?keyword=${encodeURIComponent(searchKeyword)}`;
+      if (sortBy) url += `&sort=${sortBy}&order=${sortOrder}`;
+      url += `&size=${pageSize}`;
 
-      const res = await api.get(url)
-      const { success, data: responseData } = res.data
+      const res = await api.get(url);
+      const { success, data: responseData } = res.data;
 
       if (success) {
-        setData(responseData || [])
-        setPageIndex(0)
-        setTotal(responseData?.length || 0)
+        setData(responseData || []);
+        setPageIndex(0);
+        setTotal(responseData?.length || 0);
       }
     } catch (error) {
-      console.error('Search failed:', error)
+      console.error('Search failed:', error);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   // Load initial data
   useEffect(() => {
-    load(0, pageSize)
-    initializedRef.current = true
-  }, [])
+    load(pageIndex, pageSize);
+    initializedRef.current = true;
+  }, []);
 
   // Handle sort changes (only after initialization)
   useEffect(() => {
     // Skip the very first run to avoid duplicating the initial load
     if (skipFirstSortEffect.current) {
-      skipFirstSortEffect.current = false
-      return
+      skipFirstSortEffect.current = false;
+      return;
     }
 
-    if (!initializedRef.current) return
+    if (!initializedRef.current) return;
 
     if (searchKeyword.trim()) {
-      performSearch()
+      performSearch();
     } else {
-      load(pageIndex, pageSize)
+      load(pageIndex, pageSize);
     }
-  }, [sortBy, sortOrder])
+  }, [sortBy, sortOrder]);
 
   const manage = async (id: number, action: 'enable' | 'disable' | 'delete' | 'test', index?: number) => {
     try {
       if (action === 'delete') {
-        if (!confirm('Are you sure you want to delete this channel?')) return
+        if (!confirm(t('channels.confirm.delete'))) return;
         // Unified API call - complete URL with /api prefix
-        const res = await api.delete(`/api/channel/${id}`)
+        const res = await api.delete(`/api/channel/${id}`);
         if (res.data?.success) {
           if (searchKeyword.trim()) {
-            performSearch()
+            performSearch();
           } else {
-            load(pageIndex, pageSize)
+            load(pageIndex, pageSize);
           }
         }
-        return
+        return;
       }
 
       if (action === 'test') {
         // Unified API call - complete URL with /api prefix
-        const res = await api.get(`/api/channel/test/${id}`)
-        const { success, time, message } = res.data
+        const res = await api.get(`/api/channel/test/${id}`);
+        const { success, time, message } = res.data;
         if (index !== undefined) {
-          const newData = [...data]
-          newData[index] = { ...newData[index], response_time: time, test_time: Date.now() }
-          setData(newData)
+          const newData = [...data];
+          newData[index] = {
+            ...newData[index],
+            response_time: time,
+            test_time: Date.now(),
+          };
+          setData(newData);
         }
         if (success) {
-          notify({ type: 'success', message: 'Channel test successful.' })
+          notify({
+            type: 'success',
+            message: t('channels.notifications.test_success'),
+          });
         } else {
-          notify({ type: 'error', title: 'Channel test failed', message: message || 'Unknown error' })
+          notify({
+            type: 'error',
+            title: t('channels.notifications.test_failed_title'),
+            message: message || t('channels.notifications.test_failed_message'),
+          });
         }
-        return
+        return;
       }
 
       // Enable/disable - send status_only to avoid overwriting other fields
-      const payload = { id, status: action === 'enable' ? 1 : 2 }
-      const res = await api.put('/api/channel/?status_only=1', payload)
+      const payload = { id, status: action === 'enable' ? 1 : 2 };
+      const res = await api.put('/api/channel/?status_only=1', payload);
       if (res.data?.success) {
         if (searchKeyword.trim()) {
-          performSearch()
+          performSearch();
         } else {
-          load(pageIndex, pageSize)
+          load(pageIndex, pageSize);
         }
       }
     } catch (error) {
-      console.error(`Failed to ${action} channel:`, error)
+      console.error(`Failed to ${action} channel:`, error);
     }
-  }
+  };
 
   const updateTestingModel = async (id: number, testingModel: string | null) => {
     try {
-      const current = data.find((c) => c.id === id)
-      const payload: any = { id, name: current?.name }
+      const current = data.find((c) => c.id === id);
+      const payload: any = { id, name: current?.name };
       // When null, let backend clear it (auto-cheapest)
       if (testingModel === null) {
-        payload.testing_model = null
+        payload.testing_model = null;
       } else {
-        payload.testing_model = testingModel
+        payload.testing_model = testingModel;
       }
       // Unified API call - complete URL with /api prefix
-      const res = await api.put('/api/channel/', payload)
+      const res = await api.put('/api/channel/', payload);
       if (res.data?.success) {
         // Update local row to reflect change
-        setData((prev) => prev.map((ch) => (ch.id === id ? { ...ch, testing_model: testingModel } : ch)))
-        notify({ type: 'success', message: 'Testing model saved.' })
+        setData((prev) => prev.map((ch) => (ch.id === id ? { ...ch, testing_model: testingModel } : ch)));
+        notify({
+          type: 'success',
+          message: t('channels.notifications.testing_model_saved'),
+        });
       } else {
-        const msg = res.data?.message || 'Failed to save testing model'
-        notify({ type: 'error', title: 'Save failed', message: msg })
+        const msg = res.data?.message || t('channels.notifications.testing_model_failed_message');
+        notify({
+          type: 'error',
+          title: t('channels.notifications.testing_model_failed_title'),
+          message: msg,
+        });
       }
     } catch (error) {
-      console.error('Failed to update testing model:', error)
-      notify({ type: 'error', title: 'Save failed', message: 'Failed to update testing model' })
+      console.error('Failed to update testing model:', error);
+      notify({
+        type: 'error',
+        title: t('channels.notifications.testing_model_failed_title'),
+        message: t('channels.notifications.testing_model_failed_message'),
+      });
     }
-  }
+  };
 
   const handleBulkTest = async () => {
-    setBulkTesting(true)
+    setBulkTesting(true);
     try {
       // Unified API call - complete URL with /api prefix
-      await api.get('/api/channel/test')
-      load(pageIndex, pageSize)
-      notify({ type: 'info', message: 'Bulk channel test started.' })
+      await api.get('/api/channel/test');
+      load(pageIndex, pageSize);
+      notify({
+        type: 'info',
+        message: t('channels.notifications.bulk_test_started'),
+      });
     } catch (error) {
-      console.error('Bulk test failed:', error)
-      notify({ type: 'error', title: 'Bulk test failed', message: error instanceof Error ? error.message : 'Unknown error' })
+      console.error('Bulk test failed:', error);
+      notify({
+        type: 'error',
+        title: t('channels.notifications.bulk_test_failed_title'),
+        message: error instanceof Error ? error.message : t('channels.notifications.test_failed_message'),
+      });
     } finally {
-      setBulkTesting(false)
+      setBulkTesting(false);
     }
-  }
+  };
 
   const handleDeleteDisabled = async () => {
-    if (!confirm('Are you sure you want to delete all disabled channels? This action cannot be undone.')) return
+    if (!confirm(t('channels.confirm.delete_disabled'))) return;
 
     try {
       // Unified API call - complete URL with /api prefix
-      await api.delete('/api/channel/disabled')
-      load(pageIndex, pageSize)
-      notify({ type: 'success', message: 'Disabled channels deleted.' })
+      await api.delete('/api/channel/disabled');
+      load(pageIndex, pageSize);
+      notify({
+        type: 'success',
+        message: t('channels.notifications.delete_disabled_success'),
+      });
     } catch (error) {
-      console.error('Failed to delete disabled channels:', error)
-      notify({ type: 'error', title: 'Delete failed', message: error instanceof Error ? error.message : 'Unknown error' })
+      console.error('Failed to delete disabled channels:', error);
+      notify({
+        type: 'error',
+        title: t('channels.notifications.delete_failed_title'),
+        message: error instanceof Error ? error.message : t('channels.notifications.delete_failed_message'),
+      });
     }
-  }
+  };
 
   const columns: ColumnDef<Channel>[] = [
     {
       accessorKey: 'id',
-      header: 'ID',
-      cell: ({ row }) => (
-        <span className="font-mono text-sm">{row.original.id}</span>
-      ),
+      header: t('channels.columns.id'),
+      cell: ({ row }) => <span className="font-mono text-sm">{row.original.id}</span>,
     },
     {
       accessorKey: 'name',
-      header: 'Name',
-      cell: ({ row }) => (
-        <div className="font-medium">{row.original.name}</div>
-      ),
+      header: t('channels.columns.name'),
+      cell: ({ row }) => <div className="font-medium">{row.original.name}</div>,
     },
     {
       accessorKey: 'type',
-      header: 'Type',
-      cell: ({ row }) => getChannelTypeBadge(row.original.type),
+      header: t('channels.columns.type'),
+      cell: ({ row }) => renderChannelTypeBadge(row.original.type),
     },
     {
       accessorKey: 'status',
-      header: 'Status',
-      cell: ({ row }) => getStatusBadge(row.original.status, row.original.priority),
+      header: t('channels.columns.status'),
+      cell: ({ row }) => renderStatusBadge(row.original.status, row.original.priority),
     },
     {
       accessorKey: 'group',
-      header: 'Group',
-      cell: ({ row }) => (
-        <span className="text-sm">{row.original.group || 'default'}</span>
-      ),
+      header: t('channels.columns.group'),
+      cell: ({ row }) => <span className="text-sm">{row.original.group || t('channels.group_default')}</span>,
     },
     {
       accessorKey: 'priority',
-      header: 'Priority',
-      cell: ({ row }) => (
-        <span className="font-mono text-sm">{row.original.priority || 0}</span>
-      ),
+      header: t('channels.columns.priority'),
+      cell: ({ row }) => <span className="font-mono text-sm">{row.original.priority || 0}</span>,
     },
     {
       accessorKey: 'weight',
-      header: 'Weight',
-      cell: ({ row }) => (
-        <span className="font-mono text-sm">{row.original.weight || 0}</span>
-      ),
+      header: t('channels.columns.weight'),
+      cell: ({ row }) => <span className="font-mono text-sm">{row.original.weight || 0}</span>,
     },
     {
       accessorKey: 'response_time',
-      header: 'Response',
-      cell: ({ row }) => (
-        <div className="text-center" title={`Response time: ${row.original.response_time ? `${row.original.response_time}ms` : 'Not tested'}${row.original.test_time ? ` (Tested: ${formatTimestamp(row.original.test_time)})` : ''}`}>
-          {formatResponseTime(row.original.response_time)}
-          {row.original.test_time && (
-            <div className="text-xs text-muted-foreground">
-              {formatTimestamp(row.original.test_time)}
-            </div>
-          )}
-        </div>
-      ),
+      header: t('channels.columns.response'),
+      cell: ({ row }) => {
+        const responseTime = row.original.response_time;
+        const testTime = row.original.test_time;
+        const responseTitle = `${t('channels.response.prefix')} ${responseTime ? `${responseTime}ms` : t('channels.response.not_tested')}${
+          testTime
+            ? ` (${t('channels.response.tested_at', {
+                local: formatTimestamp(testTime),
+                utc: formatTimestamp(testTime, { timeZone: 'UTC' }),
+              })})`
+            : ''
+        }`;
+        return (
+          <div className="text-center" title={responseTitle}>
+            {formatResponseTime(responseTime)}
+            {testTime && (
+              <div className="text-xs text-muted-foreground">
+                <TimestampDisplay timestamp={testTime} className="font-mono" />
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       accessorKey: 'testing_model',
-      header: 'Testing Model',
+      header: t('channels.columns.testing_model'),
       cell: ({ row }) => {
-        const ch = row.original
+        const ch = row.original;
         const models = (ch.models || '')
           .split(',')
           .map((m) => m.trim())
           .filter(Boolean)
-        const value = ch.testing_model ?? '' // empty => Auto (cheapest)
+          .sort();
+        const value = ch.testing_model ?? ''; // empty => Auto (cheapest)
         return (
           <div className="w-[140px] md:w-[160px] max-w-[220px]">
             <select
               className="w-full border rounded px-2 py-1 text-sm bg-background"
               value={value}
+              aria-label={t('channels.columns.testing_model')}
               onChange={(e) => {
-                const v = e.target.value
-                updateTestingModel(ch.id, v === '' ? null : v)
+                const v = e.target.value;
+                updateTestingModel(ch.id, v === '' ? null : v);
               }}
             >
-              <option value="">CHEAPEST</option>
+              <option value="">{t('channels.testing.auto')}</option>
               {models.map((m) => (
                 <option key={m} value={m}>
                   {m}
@@ -428,153 +496,163 @@ export function ChannelsPage() {
               ))}
             </select>
           </div>
-        )
+        );
       },
     },
     {
       accessorKey: 'created_time',
-      header: 'Created',
-      cell: ({ row }) => (
-        <span className="text-sm">{formatTimestamp(row.original.created_time)}</span>
-      ),
+      header: t('channels.columns.created'),
+      cell: ({ row }) => <TimestampDisplay timestamp={row.original.created_time} className="text-sm font-mono" />,
     },
     {
-      header: 'Actions',
+      header: t('channels.columns.actions'),
       cell: ({ row }) => {
-        const channel = row.original
+        const channel = row.original;
         return (
           <ResponsiveActionGroup className="sm:items-center">
-            <Button
+            <ListActionButton
               variant="outline"
               size="sm"
               onClick={() => navigate(`/channels/edit/${channel.id}`)}
               className="gap-1"
+              icon={<Settings className="h-3 w-3" />}
             >
-              <Settings className="h-3 w-3" />
-              Edit
-            </Button>
-            <Button
+              {t('channels.actions.edit')}
+            </ListActionButton>
+            <ListActionButton
               variant="outline"
               size="sm"
               onClick={() => manage(channel.id, channel.status === 1 ? 'disable' : 'enable')}
               className={cn(
                 'gap-1',
-                channel.status === 1
-                  ? 'text-orange-600 hover:text-orange-700'
-                  : 'text-green-600 hover:text-green-700'
+                channel.status === 1 ? 'text-orange-600 hover:text-orange-700' : 'text-green-600 hover:text-green-700'
               )}
             >
-              {channel.status === 1 ? 'Disable' : 'Enable'}
-            </Button>
-            <Button
+              {channel.status === 1 ? t('channels.actions.disable') : t('channels.actions.enable')}
+            </ListActionButton>
+            <ListActionButton
               variant="outline"
               size="sm"
               onClick={() => manage(channel.id, 'test', row.index)}
               className="gap-1"
+              icon={<FlaskConical className="h-3 w-3" />}
             >
-              <TestTube className="h-3 w-3" />
-              Test
-            </Button>
-            <Button
+              {t('channels.actions.test')}
+            </ListActionButton>
+            <ListActionButton
               variant="destructive"
               size="sm"
               onClick={() => manage(channel.id, 'delete')}
               className="gap-1"
+              icon={<Trash2 className="h-3 w-3" />}
             >
-              <Trash2 className="h-3 w-3" />
-              Delete
-            </Button>
+              {t('channels.actions.delete')}
+            </ListActionButton>
           </ResponsiveActionGroup>
-        )
+        );
       },
     },
-  ]
+  ];
 
   const handlePageChange = (newPageIndex: number, newPageSize: number) => {
-    load(newPageIndex, newPageSize)
-  }
+    updateSearchParamPage(newPageIndex);
+    load(newPageIndex, newPageSize);
+  };
 
   const handlePageSizeChange = (newPageSize: number) => {
-    setPageSize(newPageSize)
+    setPageSize(newPageSize);
     // Don't call load here - let onPageChange handle it to avoid duplicate API calls
-    setPageIndex(0)
-  }
+    setPageIndex(0);
+  };
 
   const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc') => {
-    setSortBy(newSortBy)
-    setSortOrder(newSortOrder)
+    setSortBy(newSortBy);
+    setSortOrder(newSortOrder);
+    updateSearchParamPage(0);
+    setPageIndex(0);
     // Let useEffect handle the reload to avoid double requests
-  }
+  };
 
   const refresh = () => {
     if (searchKeyword.trim()) {
-      performSearch()
+      performSearch();
     } else {
-      load(pageIndex, pageSize)
+      load(pageIndex, pageSize);
     }
-  }
+  };
 
   const toolbarActions = (
-    <div className={cn(
-      "flex gap-2 flex-wrap max-w-full",
-      isMobile ? "flex-col w-full" : "items-center"
-    )}>
-      <Button
-        variant="outline"
-        onClick={handleBulkTest}
-        disabled={bulkTesting || loading}
-        className={cn(
-          "gap-2",
-          isMobile ? "w-full touch-target" : ""
-        )}
-        size="sm"
-      >
-        {bulkTesting ? (
-          <RefreshCw className="h-4 w-4 animate-spin" />
-        ) : (
-          <TestTube className="h-4 w-4" />
-        )}
-        {isMobile ? "Test All Channels" : "Test All"}
-      </Button>
-      <Button
-        variant="destructive"
-        onClick={handleDeleteDisabled}
-        className={cn(
-          "gap-2",
-          isMobile ? "w-full touch-target" : ""
-        )}
-        size="sm"
-      >
-        <Trash2 className="h-4 w-4" />
-        {isMobile ? "Delete All Disabled" : "Delete Disabled"}
-      </Button>
+    <div className={cn('flex gap-2 flex-wrap max-w-full', isMobile ? 'flex-col w-full' : 'items-center')}>
+      <div className="flex gap-2 w-full md:w-auto">
+        <Button
+          variant="outline"
+          onClick={handleBulkTest}
+          disabled={bulkTesting || loading}
+          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          size="sm"
+        >
+          {bulkTesting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+          {isMobile ? t('channels.toolbar.test_all_mobile') : t('channels.toolbar.test_all')}
+        </Button>
+        <Button
+          variant="destructive"
+          onClick={handleDeleteDisabled}
+          className={cn('gap-2 flex-1 md:flex-none whitespace-nowrap', isMobile ? 'touch-target' : '')}
+          size="sm"
+        >
+          <Trash2 className="h-4 w-4" />
+          {isMobile ? t('channels.toolbar.delete_disabled_mobile') : t('channels.toolbar.delete_disabled')}
+        </Button>
+      </div>
     </div>
-  )
+  );
 
   return (
     <ResponsivePageContainer
-      title="Channels"
-      description="Configure and manage API routing channels"
+      title={t('channels.title')}
+      description={t('channels.description')}
       actions={
         <Button
           onClick={() => navigate('/channels/add')}
-          className={cn(
-            "gap-2",
-            isMobile ? "w-full touch-target" : ""
-          )}
+          className={cn('gap-2 whitespace-nowrap', isMobile ? 'w-full touch-target' : '')}
+          size={isMobile ? 'sm' : 'md'}
         >
           <Plus className="h-4 w-4" />
-          {isMobile ? "Add New Channel" : "Add Channel"}
+          {isMobile ? t('channels.actions.add_mobile') : t('channels.actions.add')}
         </Button>
       }
     >
-      <Card>
-        <CardContent className={cn(
-          isMobile ? "p-4" : "p-6"
-        )}>
+      <Card className="border-0 md:border shadow-none md:shadow-sm">
+        <CardContent className={cn(isMobile ? 'p-2' : 'p-6')}>
           <EnhancedDataTable
             columns={columns}
             data={data}
+            floatingRowActions={(row) => (
+              <div className="flex items-center gap-1">
+                <ListActionButton
+                  onClick={() => navigate(`/channels/edit/${row.id}`)}
+                  title={t('channels.actions.edit')}
+                  aria-label={t('channels.actions.edit')}
+                  icon={<Settings className="h-4 w-4" />}
+                />
+                <ListActionButton
+                  onClick={() => manage(row.id, row.status === 1 ? 'disable' : 'enable')}
+                  title={row.status === 1 ? t('channels.actions.disable') : t('channels.actions.enable')}
+                  aria-label={row.status === 1 ? t('channels.actions.disable') : t('channels.actions.enable')}
+                  className={row.status === 1 ? 'text-orange-600 hover:text-orange-700' : 'text-green-600 hover:text-green-700'}
+                  icon={row.status === 1 ? <Ban className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
+                />
+                <ListActionButton
+                  onClick={() => {
+                    const idx = data.findIndex((c) => c.id === row.id);
+                    manage(row.id, 'test', idx !== -1 ? idx : undefined);
+                  }}
+                  title={t('channels.actions.test')}
+                  aria-label={t('channels.actions.test')}
+                  icon={<FlaskConical className="h-4 w-4" />}
+                />
+              </div>
+            )}
             pageIndex={pageIndex}
             pageSize={pageSize}
             total={total}
@@ -589,12 +667,12 @@ export function ChannelsPage() {
             onSearchChange={searchChannels}
             onSearchValueChange={setSearchKeyword}
             onSearchSubmit={performSearch}
-            searchPlaceholder="Search channels by name, type, or group..."
+            searchPlaceholder={t('channels.search.placeholder')}
             allowSearchAdditions={true}
             toolbarActions={toolbarActions}
             onRefresh={refresh}
             loading={loading}
-            emptyMessage="No channels found. Create your first channel to get started."
+            emptyMessage={t('channels.empty')}
             mobileCardLayout={true}
             hideColumnsOnMobile={['created_time', 'response_time']}
             compactMode={isMobile}
@@ -602,5 +680,5 @@ export function ChannelsPage() {
         </CardContent>
       </Card>
     </ResponsivePageContainer>
-  )
+  );
 }

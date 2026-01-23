@@ -217,14 +217,17 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 		}
 
 		params, ok := tool.Function.Parameters.(map[string]any)
-		if !ok {
-			return nil, errors.New("tool function parameters is not a map")
+		if !ok || params == nil {
+			params = map[string]any{}
 		}
 
 		var schema InputSchema
 		// Guarded extraction for 'type'
-		if t, ok := params["type"].(string); ok {
+		if t, ok := params["type"].(string); ok && strings.TrimSpace(t) != "" {
 			schema.Type = t
+		}
+		if schema.Type == "" {
+			schema.Type = "object"
 		}
 
 		// Assign 'properties' and 'required' directly if present
@@ -447,14 +450,15 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 		openaiContent := message.ParseContent()
 		for _, part := range openaiContent {
 			var content Content
-			if part.Type == model.ContentTypeText {
+			switch part.Type {
+			case model.ContentTypeText:
 				content.Type = "text"
 				if part.Text != nil && *part.Text != "" {
 					// Only add text content if it's not empty
 					content.Text = *part.Text
 					contents = append(contents, content)
 				}
-			} else if part.Type == model.ContentTypeImageURL {
+			case model.ContentTypeImageURL:
 				content.Type = "image"
 				content.Source = &ImageSource{
 					Type: "base64",
@@ -1080,7 +1084,7 @@ func ClaudeNativeHandler(c *gin.Context, resp *http.Response, promptTokens int, 
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
 				Message:  claudeResponse.Error.Message,
-				Type:     claudeResponse.Error.Type,
+				Type:     model.ErrorType(claudeResponse.Error.Type),
 				Param:    "",
 				Code:     claudeResponse.Error.Type,
 				RawError: errors.New(claudeResponse.Error.Message),
@@ -1147,7 +1151,7 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		return &model.ErrorWithStatusCode{
 			Error: model.Error{
 				Message:  claudeResponse.Error.Message,
-				Type:     claudeResponse.Error.Type,
+				Type:     model.ErrorType(claudeResponse.Error.Type),
 				Param:    "",
 				Code:     claudeResponse.Error.Type,
 				RawError: errors.New(claudeResponse.Error.Message),

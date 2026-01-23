@@ -3,10 +3,13 @@ package controller
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
 
 func TestClaudeStructuredOutputCost_NoSurcharge(t *testing.T) {
+	t.Parallel()
 	completionTokens := 1000
 	modelRatio := 0.25
 
@@ -19,7 +22,6 @@ func TestClaudeStructuredOutputCost_NoSurcharge(t *testing.T) {
 	costBase := calculateClaudeStructuredOutputCost(req, completionTokens, modelRatio, 1.0)
 	costDouble := calculateClaudeStructuredOutputCost(req, completionTokens, modelRatio, 2.0)
 
-	if costBase != 0 || costDouble != 0 {
-		t.Fatalf("expected no structured output surcharge, got base=%d double=%d", costBase, costDouble)
-	}
+	require.Equal(t, int64(0), costBase, "expected no structured output surcharge for base")
+	require.Equal(t, int64(0), costDouble, "expected no structured output surcharge for double")
 }

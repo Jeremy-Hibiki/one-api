@@ -23,7 +23,6 @@ import (
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/i18n"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/common/random"
 	"github.com/songquanpeng/one-api/common/utils"
@@ -63,7 +62,7 @@ func Login(c *gin.Context) {
 	err := json.NewDecoder(c.Request.Body).Decode(&loginRequest)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 			"success": false,
 		})
 		return
@@ -72,7 +71,7 @@ func Login(c *gin.Context) {
 	password := loginRequest.Password
 	if username == "" || password == "" {
 		c.JSON(http.StatusOK, gin.H{
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 			"success": false,
 		})
 		return
@@ -214,14 +213,14 @@ func Register(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
 	if err := common.Validate.Struct(&user); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_input"),
+			"message": invalidInputMessage,
 		})
 		return
 	}
@@ -653,13 +652,97 @@ func GetAffCode(c *gin.Context) {
 	})
 }
 
-// GetSelfByToken get user by openai api token
+// GetSelfByToken returns the authenticated user and token metadata for API key calls.
 func GetSelfByToken(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"uid":      c.GetInt("id"),
-		"token_id": c.GetInt("token_id"),
-		"username": c.GetString("username"),
-	})
+	userID := c.GetInt(ctxkey.Id)
+	tokenID := c.GetInt(ctxkey.TokenId)
+	if userID == 0 || tokenID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "missing token context",
+		})
+		return
+	}
+
+	user, err := model.GetUserById(userID, false)
+	if err != nil {
+		helper.RespondError(c, err)
+		return
+	}
+
+	token, err := model.GetTokenByIds(tokenID, userID)
+	if err != nil {
+		helper.RespondError(c, err)
+		return
+	}
+
+	userData := gin.H{
+		"id":           user.Id,
+		"username":     user.Username,
+		"display_name": user.DisplayName,
+		"role":         user.Role,
+		"status":       user.Status,
+		"group":        user.Group,
+		"quota":        user.Quota,
+		"used_quota":   user.UsedQuota,
+		"created_at":   user.CreatedAt,
+		"updated_at":   user.UpdatedAt,
+	}
+
+	var models any
+	if token.Models != nil {
+		if trimmed := strings.TrimSpace(*token.Models); trimmed != "" {
+			models = trimmed
+		}
+	}
+
+	var subnet any
+	if token.Subnet != nil {
+		if trimmed := strings.TrimSpace(*token.Subnet); trimmed != "" {
+			subnet = trimmed
+		}
+	}
+
+	tokenData := gin.H{
+		"id":               token.Id,
+		"name":             token.Name,
+		"status":           token.Status,
+		"remain_quota":     token.RemainQuota,
+		"used_quota":       token.UsedQuota,
+		"unlimited_quota":  token.UnlimitedQuota,
+		"expired_time":     token.ExpiredTime,
+		"accessed_time":    token.AccessedTime,
+		"created_time":     token.CreatedTime,
+		"created_at":       token.CreatedAt,
+		"updated_at":       token.UpdatedAt,
+		"models":           models,
+		"subnet":           subnet,
+		"available_models": c.GetString(ctxkey.AvailableModels),
+	}
+
+	response := gin.H{
+		"success": true,
+		"message": "",
+		"data": gin.H{
+			"user":  userData,
+			"token": tokenData,
+		},
+		"uid":                    user.Id,
+		"username":               user.Username,
+		"token_id":               token.Id,
+		"token_name":             token.Name,
+		"token_status":           token.Status,
+		"token_used_quota":       token.UsedQuota,
+		"token_remain_quota":     token.RemainQuota,
+		"token_unlimited_quota":  token.UnlimitedQuota,
+		"token_created_time":     token.CreatedTime,
+		"token_updated_at":       token.UpdatedAt,
+		"token_accessed_time":    token.AccessedTime,
+		"token_expired_time":     token.ExpiredTime,
+		"token_available_models": tokenData["available_models"],
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 func GetSelf(c *gin.Context) {
@@ -686,7 +769,7 @@ func UpdateUser(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -695,7 +778,7 @@ func UpdateUser(c *gin.Context) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -704,7 +787,7 @@ func UpdateUser(c *gin.Context) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -712,7 +795,7 @@ func UpdateUser(c *gin.Context) {
 	if payload.Id == 0 {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -752,7 +835,7 @@ func UpdateUser(c *gin.Context) {
 		if err := json.Unmarshal(raw["username"], &username); err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"success": false,
-				"message": i18n.Translate(c, "invalid_parameter"),
+				"message": invalidParameterMessage,
 			})
 			return
 		}
@@ -780,7 +863,7 @@ func UpdateUser(c *gin.Context) {
 			if err := json.Unmarshal(raw["display_name"], &displayName); err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": i18n.Translate(c, "invalid_parameter"),
+					"message": invalidParameterMessage,
 				})
 				return
 			}
@@ -801,7 +884,7 @@ func UpdateUser(c *gin.Context) {
 			if err := json.Unmarshal(raw["email"], &email); err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": i18n.Translate(c, "invalid_parameter"),
+					"message": invalidParameterMessage,
 				})
 				return
 			}
@@ -828,7 +911,7 @@ func UpdateUser(c *gin.Context) {
 			if err := json.Unmarshal(raw["group"], &group); err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": i18n.Translate(c, "invalid_parameter"),
+					"message": invalidParameterMessage,
 				})
 				return
 			}
@@ -843,6 +926,22 @@ func UpdateUser(c *gin.Context) {
 			}
 			updates["group"] = group
 		}
+
+		if rawFieldPresent(raw, "mcp_tool_blacklist") {
+			if jsonRawIsNull(raw["mcp_tool_blacklist"]) {
+				updates["mcp_tool_blacklist"] = nil
+			} else {
+				var blacklist []string
+				if err := json.Unmarshal(raw["mcp_tool_blacklist"], &blacklist); err != nil {
+					c.JSON(http.StatusOK, gin.H{
+						"success": false,
+						"message": invalidParameterMessage,
+					})
+					return
+				}
+				updates["mcp_tool_blacklist"] = blacklist
+			}
+		}
 	}
 
 	if rawFieldPresent(raw, "quota") {
@@ -854,7 +953,7 @@ func UpdateUser(c *gin.Context) {
 				if err := json.Unmarshal(raw["quota"], &quotaValue); err != nil {
 					c.JSON(http.StatusOK, gin.H{
 						"success": false,
-						"message": i18n.Translate(c, "invalid_parameter"),
+						"message": invalidParameterMessage,
 					})
 					return
 				}
@@ -878,7 +977,7 @@ func UpdateUser(c *gin.Context) {
 			if err := json.Unmarshal(raw["password"], &password); err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": i18n.Translate(c, "invalid_parameter"),
+					"message": invalidParameterMessage,
 				})
 				return
 			}
@@ -910,7 +1009,7 @@ func UpdateUser(c *gin.Context) {
 			} else if err := json.Unmarshal(raw["role"], &roleValue); err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": i18n.Translate(c, "invalid_parameter"),
+					"message": invalidParameterMessage,
 				})
 				return
 			}
@@ -935,7 +1034,7 @@ func UpdateUser(c *gin.Context) {
 			} else if err := json.Unmarshal(raw["status"], &statusValue); err != nil {
 				c.JSON(http.StatusOK, gin.H{
 					"success": false,
-					"message": i18n.Translate(c, "invalid_parameter"),
+					"message": invalidParameterMessage,
 				})
 				return
 			}
@@ -993,7 +1092,7 @@ func UpdateSelf(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -1111,14 +1210,14 @@ func CreateUser(c *gin.Context) {
 	if err != nil || user.Username == "" || user.Password == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
 	if err := common.Validate.Struct(&user); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_input"),
+			"message": invalidInputMessage,
 		})
 		return
 	}
@@ -1175,7 +1274,7 @@ func ManageUser(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -1367,7 +1466,7 @@ func AdminTopUp(c *gin.Context) {
 		})
 		return
 	}
-	err = model.IncreaseUserQuota(req.UserId, int64(req.Quota))
+	err = model.IncreaseUserQuota(ctx, req.UserId, int64(req.Quota))
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -1484,7 +1583,7 @@ func ConfirmTotp(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -1568,7 +1667,7 @@ func DisableTotp(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}
@@ -1620,13 +1719,17 @@ func verifyTotpCode(ctx context.Context, uid int, secret, code string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	lg := gmw.GetLogger(ctx)
+	if lg == nil {
+		lg = logger.Logger
+	}
 	if code == "" || secret == "" {
 		return false
 	}
 
 	// Check if this TOTP code has been used recently (replay protection)
 	if common.IsTotpCodeUsed(ctx, uid, code) {
-		logger.Logger.Warn(fmt.Sprintf("TOTP code replay attempt detected for user %d", uid))
+		lg.Warn(fmt.Sprintf("TOTP code replay attempt detected for user %d", uid))
 		return false
 	}
 
@@ -1646,7 +1749,7 @@ func verifyTotpCode(ctx context.Context, uid int, secret, code string) bool {
 	// Mark the code as used to prevent replay attacks
 	err = common.MarkTotpCodeAsUsed(ctx, uid, code)
 	if err != nil {
-		logger.Logger.Error("Failed to mark TOTP code as used", zap.Error(err))
+		lg.Error("Failed to mark TOTP code as used", zap.Error(err))
 		// Don't fail the verification if we can't mark it as used
 		// This ensures the system remains functional even if Redis/cache fails
 	}
@@ -1682,7 +1785,7 @@ func AdminDisableUserTotp(c *gin.Context) {
 	if targetUserId == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": i18n.Translate(c, "invalid_parameter"),
+			"message": invalidParameterMessage,
 		})
 		return
 	}

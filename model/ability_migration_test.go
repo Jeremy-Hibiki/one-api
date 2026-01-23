@@ -14,6 +14,7 @@ import (
 )
 
 func TestParseLegacySuspendUntil(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		input  []byte
@@ -69,6 +70,7 @@ func TestParseLegacySuspendUntil(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got, ok := parseLegacySuspendUntil(tt.input)
 			require.Equal(t, tt.ok, ok)
 			if tt.ok {
@@ -228,4 +230,104 @@ func TestMigrateAbilitySuspendUntilColumnSQLiteIntegration(t *testing.T) {
 
 	require.Equal(t, "m4", rows[3].Model)
 	require.False(t, rows[3].Parsed.Valid)
+}
+
+func TestMigrateAbilitySuspendUntilColumnWithoutColumn(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	originalDB := DB
+	DB = db
+	t.Cleanup(func() { DB = originalDB })
+
+	originalSQLite := common.UsingSQLite.Load()
+	originalMySQL := common.UsingMySQL.Load()
+	originalPostgres := common.UsingPostgreSQL.Load()
+	common.UsingSQLite.Store(true)
+	common.UsingMySQL.Store(false)
+	common.UsingPostgreSQL.Store(false)
+	t.Cleanup(func() {
+		common.UsingSQLite.Store(originalSQLite)
+		common.UsingMySQL.Store(originalMySQL)
+		common.UsingPostgreSQL.Store(originalPostgres)
+	})
+
+	// Simulate an older schema where suspend_until column does not exist yet.
+	require.NoError(t, DB.Exec("CREATE TABLE abilities (`group` TEXT, model TEXT, channel_id INTEGER)").Error)
+
+	require.NoError(t, MigrateAbilitySuspendUntilColumn())
+	require.True(t, DB.Migrator().HasColumn(&Ability{}, "suspend_until"))
+}
+
+func TestAbilitySuspendUntilColumnExistsSQLite(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	originalDB := DB
+	DB = db
+	t.Cleanup(func() { DB = originalDB })
+
+	originalSQLite := common.UsingSQLite.Load()
+	originalMySQL := common.UsingMySQL.Load()
+	originalPostgres := common.UsingPostgreSQL.Load()
+	common.UsingSQLite.Store(true)
+	common.UsingMySQL.Store(false)
+	common.UsingPostgreSQL.Store(false)
+	t.Cleanup(func() {
+		common.UsingSQLite.Store(originalSQLite)
+		common.UsingMySQL.Store(originalMySQL)
+		common.UsingPostgreSQL.Store(originalPostgres)
+	})
+
+	exists, err := abilitySuspendUntilColumnExists()
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	require.NoError(t, DB.Exec("CREATE TABLE abilities (`group` TEXT, model TEXT, channel_id INTEGER)").Error)
+	exists, err = abilitySuspendUntilColumnExists()
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	require.NoError(t, DB.Exec("ALTER TABLE abilities ADD COLUMN suspend_until TEXT").Error)
+	exists, err = abilitySuspendUntilColumnExists()
+	require.NoError(t, err)
+	require.True(t, exists)
+}
+
+func TestNormalizeAbilitySuspendUntilValuesWithoutColumn(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+
+	originalDB := DB
+	DB = db
+	t.Cleanup(func() { DB = originalDB })
+
+	originalSQLite := common.UsingSQLite.Load()
+	originalMySQL := common.UsingMySQL.Load()
+	originalPostgres := common.UsingPostgreSQL.Load()
+	common.UsingSQLite.Store(true)
+	common.UsingMySQL.Store(false)
+	common.UsingPostgreSQL.Store(false)
+	t.Cleanup(func() {
+		common.UsingSQLite.Store(originalSQLite)
+		common.UsingMySQL.Store(originalMySQL)
+		common.UsingPostgreSQL.Store(originalPostgres)
+	})
+
+	// Table intentionally omits suspend_until to mimic very old versions.
+	require.NoError(t, DB.Exec("CREATE TABLE abilities (`group` TEXT, model TEXT, channel_id INTEGER)").Error)
+
+	require.NoError(t, normalizeAbilitySuspendUntilValues())
 }

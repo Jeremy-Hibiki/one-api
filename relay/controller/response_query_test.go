@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 
 	metalib "github.com/songquanpeng/one-api/relay/meta"
 )
 
 func TestApplyResponseAPIStreamParams(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
@@ -44,6 +46,7 @@ func TestApplyResponseAPIStreamParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)
 			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
@@ -52,17 +55,11 @@ func TestApplyResponseAPIStreamParams(t *testing.T) {
 			meta := &metalib.Meta{}
 			err := applyResponseAPIStreamParams(c, meta)
 			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error but got nil")
-				}
+				require.Error(t, err, "expected error but got nil")
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if meta.IsStream != tt.want {
-				t.Fatalf("unexpected IsStream value: got %v, want %v", meta.IsStream, tt.want)
-			}
+			require.NoError(t, err, "unexpected error")
+			require.Equal(t, tt.want, meta.IsStream, "unexpected IsStream value")
 		})
 	}
 }

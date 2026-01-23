@@ -12,6 +12,9 @@ import (
 // GetChannelMetadata returns server-side metadata about a channel type
 // Currently includes:
 // - default_base_url: string (may be empty if unknown)
+// - base_url_editable: bool (whether the user can modify the base URL)
+// - default_endpoints: []string (list of default supported endpoint names)
+// - all_endpoints: []EndpointInfo (list of all available endpoints with metadata)
 // This endpoint is designed to be extended with more metadata later.
 func GetChannelMetadata(c *gin.Context) {
 	typeStr := c.Query("type")
@@ -32,16 +35,18 @@ func GetChannelMetadata(c *gin.Context) {
 		return
 	}
 
-	defaultBaseURL := ""
-	if channelType >= 0 && channelType < len(channeltype.ChannelBaseURLs) {
-		defaultBaseURL = channeltype.ChannelBaseURLs[channelType]
-	}
+	config := channeltype.GetChannelBaseURLConfig(channelType)
+	defaultEndpoints := channeltype.DefaultEndpointNamesForChannelType(channelType)
+	allEndpoints := channeltype.AllEndpoints()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": gin.H{
-			"default_base_url": defaultBaseURL,
+			"default_base_url":  config.URL,
+			"base_url_editable": config.Editable,
+			"default_endpoints": defaultEndpoints,
+			"all_endpoints":     allEndpoints,
 		},
 	})
 }

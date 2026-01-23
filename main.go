@@ -21,19 +21,21 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/joho/godotenv/autoload"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/client"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/i18n"
 	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/songquanpeng/one-api/common/telemetry"
 	"github.com/songquanpeng/one-api/controller"
 	"github.com/songquanpeng/one-api/middleware"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/monitor"
 	"github.com/songquanpeng/one-api/relay"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
+	"github.com/songquanpeng/one-api/relay/mcp"
 	"github.com/songquanpeng/one-api/router"
 )
 
@@ -51,10 +53,22 @@ func main() {
 	// Setup enhanced logger with alertPusher integration
 	logger.SetupEnhancedLogger(ctx)
 
+	var (
+		err           error
+		otelProviders *telemetry.ProviderBundle
+	)
+
 	logger.Logger.Info("One API started", zap.String("version", common.Version))
 
 	if config.GinMode != gin.DebugMode {
 		gin.SetMode(gin.ReleaseMode)
+	}
+
+	if config.OpenTelemetryEnabled {
+		otelProviders, err = telemetry.InitOpenTelemetry(ctx)
+		if err != nil {
+			logger.Logger.Fatal("failed to initialize OpenTelemetry", zap.Error(err))
+		}
 	}
 
 	// check theme
@@ -67,8 +81,7 @@ func main() {
 	model.InitDB()
 	model.InitLogDB()
 	model.StartTraceRetentionCleaner(ctx, config.TraceRetentionDays)
-
-	var err error
+	model.StartAsyncTaskRetentionCleaner(ctx, config.AsyncTaskRetentionDays)
 	err = model.CreateRootAccountIfNeed()
 	if err != nil {
 		logger.Logger.Fatal("database init error", zap.Error(err))
@@ -100,6 +113,7 @@ func main() {
 		go model.SyncOptions(config.SyncFrequency)
 		go model.SyncChannelCache(config.SyncFrequency)
 	}
+	mcp.StartAutoSync(ctx)
 	if config.ChannelTestFrequency > 0 {
 		go controller.AutomaticallyTestChannels(config.ChannelTestFrequency)
 	}
@@ -111,13 +125,13 @@ func main() {
 		logger.Logger.Info("metric enabled, will disable channel if too much request failed")
 	}
 
-	// Initialize Prometheus monitoring
-	if config.EnablePrometheusMetrics {
+	// Initialize monitoring
+	if config.EnablePrometheusMetrics || config.OpenTelemetryEnabled {
 		startTime := time.Unix(common.StartTime, 0)
-		if err := monitor.InitPrometheusMonitoring(common.Version, startTime.Format(time.RFC3339), runtime.Version(), startTime); err != nil {
-			logger.Logger.Fatal("failed to initialize Prometheus monitoring", zap.Error(err))
+		if err := monitor.InitMonitoring(common.Version, startTime.Format(time.RFC3339), runtime.Version(), startTime); err != nil {
+			logger.Logger.Fatal("failed to initialize monitoring", zap.Error(err))
 		}
-		logger.Logger.Info("Prometheus monitoring initialized")
+		logger.Logger.Info("monitoring initialized")
 
 		// Initialize database monitoring
 		if err := model.InitPrometheusDBMonitoring(); err != nil {
@@ -136,11 +150,6 @@ func main() {
 	// Initialize global pricing manager
 	relay.InitializeGlobalPricing()
 
-	// Initialize i18n
-	if err := i18n.Init(); err != nil {
-		logger.Logger.Fatal("failed to initialize i18n", zap.Error(err))
-	}
-
 	logLevel := glog.LevelInfo
 	if config.DebugEnabled {
 		logLevel = glog.LevelDebug
@@ -149,19 +158,26 @@ func main() {
 	// Initialize HTTP server
 	server := gin.New()
 	server.RedirectTrailingSlash = false
-	server.Use(
+	middlewares := []gin.HandlerFunc{
 		gin.Recovery(),
+	}
+
+	if otelProviders != nil {
+		middlewares = append(middlewares, otelgin.Middleware(config.OpenTelemetryServiceName))
+	}
+
+	middlewares = append(middlewares,
 		gmw.NewLoggerMiddleware(
 			gmw.WithLoggerMwColored(),
 			gmw.WithLevel(logLevel.String()),
 			gmw.WithLogger(logger.Logger.Named("gin")),
 		),
 	)
+	server.Use(middlewares...)
 	// This will cause SSE not to work!!!
 	//server.Use(gzip.Gzip(gzip.DefaultCompression))
 	server.Use(middleware.RequestId())
 	server.Use(middleware.TracingMiddleware())
-	server.Use(middleware.Language())
 
 	// Add Prometheus middleware if enabled
 	if config.EnablePrometheusMetrics {
@@ -232,9 +248,21 @@ func main() {
 		logger.Logger.Error("server shutdown error", zap.Error(err))
 	}
 
+	// Stop batch updater and flush pending changes before draining other tasks.
+	// This is critical because batch updater holds uncommitted quota changes in memory.
+	if config.BatchUpdateEnabled {
+		model.StopBatchUpdater(shutdownCtx)
+	}
+
 	// Drain critical background tasks (billing, refunds, etc.)
 	if err := graceful.Drain(shutdownCtx); err != nil {
 		logger.Logger.Error("graceful drain finished with timeout/error", zap.Error(err))
+	}
+
+	if otelProviders != nil {
+		if err := otelProviders.Shutdown(shutdownCtx); err != nil {
+			logger.Logger.Error("failed to shutdown OpenTelemetry", zap.Error(err))
+		}
 	}
 
 	// Close DB after all drains complete

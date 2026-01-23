@@ -2,16 +2,20 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -19,6 +23,7 @@ import (
 	"github.com/songquanpeng/one-api/common/client"
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/common/graceful"
 	"github.com/songquanpeng/one-api/common/logger"
 	"github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
@@ -28,15 +33,23 @@ import (
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 )
 
+var (
+	responseFallbackDBOnce      sync.Once
+	responseFallbackMigrateOnce sync.Once
+	responseFallbackFixtureMu   sync.Mutex
+)
+
 const (
 	fallbackUserID              = 99001
 	fallbackTokenID             = 99002
 	fallbackChannelID           = 99003
 	fallbackCompatibleChannelID = 99004
 	fallbackAnthropicChannelID  = 99005
+	fallbackOpenAIChannelID     = 99006
 )
 
 func TestRenderChatResponseAsResponseAPI(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -56,36 +69,22 @@ func TestRenderChatResponseAsResponseAPI(t *testing.T) {
 	request := &openai.ResponseAPIRequest{ParallelToolCalls: &parallel}
 	meta := &metalib.Meta{ActualModelName: "gpt-fallback"}
 
-	if err := renderChatResponseAsResponseAPI(c, http.StatusOK, textResp, request, meta); err != nil {
-		t.Fatalf("unexpected error rendering response: %v", err)
-	}
+	err := renderChatResponseAsResponseAPI(c, http.StatusOK, textResp, request, meta)
+	require.NoError(t, err, "unexpected error rendering response")
 
 	var resp openai.ResponseAPIResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("failed to unmarshal response body: %v", err)
-	}
+	err = json.Unmarshal(recorder.Body.Bytes(), &resp)
+	require.NoError(t, err, "failed to unmarshal response body")
 
-	if resp.Model != "gpt-fallback" {
-		t.Fatalf("expected model gpt-fallback, got %s", resp.Model)
-	}
-	if resp.Status != "completed" {
-		t.Fatalf("expected status completed, got %s", resp.Status)
-	}
-	if len(resp.Output) != 1 {
-		t.Fatalf("expected single output item, got %d", len(resp.Output))
-	}
-	if resp.Output[0].Type != "message" {
-		t.Fatalf("expected message output, got %s", resp.Output[0].Type)
-	}
-	if len(resp.Output[0].Content) == 0 || resp.Output[0].Content[0].Text != "Hello there" {
-		t.Fatalf("expected message content preserved, got %#v", resp.Output[0].Content)
-	}
-	if resp.Usage == nil || resp.Usage.TotalTokens != 20 {
-		t.Fatalf("expected usage to be carried over, got %#v", resp.Usage)
-	}
-	if !resp.ParallelToolCalls {
-		t.Fatalf("expected parallel tool calls to be true")
-	}
+	require.Equal(t, "gpt-fallback", resp.Model, "expected model gpt-fallback")
+	require.Equal(t, "completed", resp.Status, "expected status completed")
+	require.Len(t, resp.Output, 1, "expected single output item")
+	require.Equal(t, "message", resp.Output[0].Type, "expected message output")
+	require.NotEmpty(t, resp.Output[0].Content, "expected message content")
+	require.Equal(t, "Hello there", resp.Output[0].Content[0].Text, "expected message content preserved")
+	require.NotNil(t, resp.Usage, "expected usage to be carried over")
+	require.Equal(t, 20, resp.Usage.TotalTokens, "expected total tokens to be 20")
+	require.True(t, resp.ParallelToolCalls, "expected parallel tool calls to be true")
 }
 
 func TestRelayResponseAPIHelper_FallbackAzure(t *testing.T) {
@@ -111,9 +110,7 @@ func TestRelayResponseAPIHelper_FallbackAzure(t *testing.T) {
 			upstreamPath += "?" + r.URL.RawQuery
 		}
 		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("failed to read upstream body: %v", err)
-		}
+		require.NoError(t, err, "failed to read upstream body")
 		upstreamBody = body
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -167,66 +164,197 @@ func TestRelayResponseAPIHelper_FallbackAzure(t *testing.T) {
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackChannelID, Type: channeltype.Azure})
 	c.Set(ctxkey.Config, model.ChannelConfig{APIVersion: "2024-02-15-preview"})
 
-	if err := RelayResponseAPIHelper(c); err != nil {
-		t.Fatalf("RelayResponseAPIHelper returned error: %v", err)
-	}
+	apiErr := RelayResponseAPIHelper(c)
+	require.Nil(t, apiErr, "RelayResponseAPIHelper returned error")
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("unexpected status code: %d", recorder.Code)
-	}
-	if !upstreamCalled {
-		t.Fatalf("expected upstream to be called")
-	}
-	if !strings.Contains(upstreamPath, "/openai/deployments/gpt-4o-mini/chat/completions") {
-		t.Fatalf("unexpected upstream path: %s", upstreamPath)
-	}
-	if !strings.Contains(upstreamPath, "api-version=") {
-		t.Fatalf("expected api-version query parameter in upstream path: %s", upstreamPath)
-	}
+	require.Equal(t, http.StatusOK, recorder.Code, "unexpected status code")
+	require.True(t, upstreamCalled, "expected upstream to be called")
+	require.Contains(t, upstreamPath, "/openai/deployments/gpt-4o-mini/chat/completions", "unexpected upstream path")
+	require.Contains(t, upstreamPath, "api-version=", "expected api-version query parameter in upstream path")
 
 	var fallbackResp openai.ResponseAPIResponse
-	if err := json.Unmarshal(recorder.Body.Bytes(), &fallbackResp); err != nil {
-		t.Fatalf("failed to unmarshal fallback response body: %v", err)
-	}
-	if fallbackResp.Status != "completed" {
-		t.Fatalf("expected response status completed, got %s", fallbackResp.Status)
-	}
-	if len(fallbackResp.Output) != 1 {
-		t.Fatalf("expected single output item, got %d", len(fallbackResp.Output))
-	}
+	err := json.Unmarshal(recorder.Body.Bytes(), &fallbackResp)
+	require.NoError(t, err, "failed to unmarshal fallback response body")
+	require.Equal(t, "completed", fallbackResp.Status, "expected response status completed")
+	require.Len(t, fallbackResp.Output, 1, "expected single output item")
 	output := fallbackResp.Output[0]
-	if output.Type != "message" {
-		t.Fatalf("expected message output type, got %s", output.Type)
-	}
-	if len(output.Content) == 0 || output.Content[0].Text != "Hi there!" {
-		t.Fatalf("unexpected output content: %#v", output.Content)
-	}
-	if fallbackResp.Usage == nil || fallbackResp.Usage.TotalTokens != 13 {
-		t.Fatalf("unexpected usage: %#v", fallbackResp.Usage)
-	}
-	if fallbackResp.RequiredAction != nil {
-		t.Fatalf("did not expect required_action for non-tool response, got %#v", fallbackResp.RequiredAction)
-	}
-	if !fallbackResp.ParallelToolCalls {
-		t.Fatalf("expected parallel tool calls to remain true")
-	}
+	require.Equal(t, "message", output.Type, "expected message output type")
+	require.NotEmpty(t, output.Content, "expected output content")
+	require.Equal(t, "Hi there!", output.Content[0].Text, "unexpected output content")
+	require.NotNil(t, fallbackResp.Usage, "expected usage")
+	require.Equal(t, 13, fallbackResp.Usage.TotalTokens, "unexpected usage total tokens")
+	require.Nil(t, fallbackResp.RequiredAction, "did not expect required_action for non-tool response")
+	require.True(t, fallbackResp.ParallelToolCalls, "expected parallel tool calls to remain true")
 
 	var chatReq relaymodel.GeneralOpenAIRequest
-	if err := json.Unmarshal(upstreamBody, &chatReq); err != nil {
-		t.Fatalf("failed to unmarshal upstream chat request: %v", err)
-	}
-	if chatReq.Model != "gpt-4o-mini" {
-		t.Fatalf("expected chat request model gpt-4o-mini, got %s", chatReq.Model)
-	}
-	if len(chatReq.Messages) != 2 {
-		t.Fatalf("expected two messages (system + user), got %d", len(chatReq.Messages))
-	}
-	if chatReq.Messages[0].Role != "system" || chatReq.Messages[0].StringContent() != "You are helpful." {
-		t.Fatalf("system message not preserved: %#v", chatReq.Messages[0])
-	}
-	if chatReq.Messages[1].Role != "user" || chatReq.Messages[1].StringContent() != "Hello via response API" {
-		t.Fatalf("user message not preserved: %#v", chatReq.Messages[1])
-	}
+	err = json.Unmarshal(upstreamBody, &chatReq)
+	require.NoError(t, err, "failed to unmarshal upstream chat request")
+	require.Equal(t, "gpt-4o-mini", chatReq.Model, "expected chat request model gpt-4o-mini")
+	require.Len(t, chatReq.Messages, 2, "expected two messages (system + user)")
+	require.Equal(t, "system", chatReq.Messages[0].Role, "expected system role")
+	require.Equal(t, "You are helpful.", chatReq.Messages[0].StringContent(), "system message not preserved")
+	require.Equal(t, "user", chatReq.Messages[1].Role, "expected user role")
+	require.Equal(t, "Hello via response API", chatReq.Messages[1].StringContent(), "user message not preserved")
+}
+
+func TestRelayResponseAPIHelper_FallbackSearchPreviewModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ensureResponseFallbackFixtures(t)
+
+	prevRedis := common.IsRedisEnabled()
+	common.SetRedisEnabled(false)
+	t.Cleanup(func() { common.SetRedisEnabled(prevRedis) })
+
+	prevLogConsume := config.IsLogConsumeEnabled()
+	config.SetLogConsumeEnabled(false)
+	t.Cleanup(func() { config.SetLogConsumeEnabled(prevLogConsume) })
+
+	upstreamCalled := false
+	var upstreamPath string
+	var upstreamBody []byte
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		upstreamPath = r.URL.Path
+		if r.URL.RawQuery != "" {
+			upstreamPath += "?" + r.URL.RawQuery
+		}
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err, "failed to read upstream body")
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "id": "chatcmpl-fallback-search",
+		  "object": "chat.completion",
+		  "created": 1741036800,
+		  "model": "gpt-4o-mini-search-preview",
+		  "choices": [
+		    {
+		      "index": 0,
+		      "message": {"role": "assistant", "content": "search fallback ok"},
+		      "finish_reason": "stop"
+		    }
+		  ],
+		  "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+		}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	prevClient := client.HTTPClient
+	client.HTTPClient = upstream.Client()
+	t.Cleanup(func() { client.HTTPClient = prevClient })
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	requestPayload := `{"model":"gpt-4o-mini-search-preview","stream":false,"instructions":"You are helpful.","input":[{"role":"user","content":[{"type":"input_text","text":"Hello via response API"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(requestPayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer openai-key")
+	c.Request = req
+
+	gmw.SetLogger(c, logger.Logger)
+
+	c.Set(ctxkey.Channel, channeltype.OpenAI)
+	c.Set(ctxkey.ChannelId, fallbackOpenAIChannelID)
+	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackOpenAIChannelID, Type: channeltype.OpenAI})
+	c.Set(ctxkey.TokenId, fallbackTokenID)
+	c.Set(ctxkey.TokenName, "fallback-token")
+	c.Set(ctxkey.Id, fallbackUserID)
+	c.Set(ctxkey.Group, "default")
+	c.Set(ctxkey.ModelMapping, map[string]string{})
+	c.Set(ctxkey.ChannelRatio, 1.0)
+	c.Set(ctxkey.RequestModel, "gpt-4o-mini-search-preview")
+	c.Set(ctxkey.BaseURL, upstream.URL)
+	c.Set(ctxkey.ContentType, "application/json")
+	c.Set(ctxkey.RequestId, "req_fallback_search_preview")
+	c.Set(ctxkey.TokenQuotaUnlimited, true)
+	c.Set(ctxkey.TokenQuota, int64(0))
+	c.Set(ctxkey.Username, "response-fallback")
+	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.Config, model.ChannelConfig{})
+
+	apiErr := RelayResponseAPIHelper(c)
+	require.Nil(t, apiErr, "RelayResponseAPIHelper returned error")
+
+	require.Equal(t, http.StatusOK, recorder.Code, "unexpected status code")
+	require.True(t, upstreamCalled, "expected upstream to be called")
+	require.Equal(t, "/v1/chat/completions", upstreamPath, "expected chat completions fallback for search-preview model")
+
+	var chatReq relaymodel.GeneralOpenAIRequest
+	err := json.Unmarshal(upstreamBody, &chatReq)
+	require.NoError(t, err, "failed to unmarshal upstream chat request")
+	require.Equal(t, "gpt-4o-mini-search-preview", chatReq.Model, "expected chat request model unchanged")
+	require.Len(t, chatReq.Messages, 2, "expected system+user messages")
+	require.Equal(t, "You are helpful.", chatReq.Messages[0].StringContent())
+	require.Equal(t, "Hello via response API", chatReq.Messages[1].StringContent())
+
+	var fallbackResp openai.ResponseAPIResponse
+	err = json.Unmarshal(recorder.Body.Bytes(), &fallbackResp)
+	require.NoError(t, err, "failed to unmarshal fallback response body")
+	require.Equal(t, "completed", fallbackResp.Status, "expected response status completed")
+	require.Len(t, fallbackResp.Output, 1, "expected single output item")
+	require.Equal(t, "message", fallbackResp.Output[0].Type)
+	require.Equal(t, "search fallback ok", fallbackResp.Output[0].Content[0].Text, "unexpected output content")
+	require.NotNil(t, fallbackResp.Usage)
+	require.Equal(t, 14, fallbackResp.Usage.TotalTokens, "unexpected usage total tokens")
+}
+
+func TestRelayResponseAPIHelper_FallbackBlocksDisallowedWebSearch(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	ensureResponseFallbackFixtures(t)
+
+	prevRedis := common.IsRedisEnabled()
+	common.SetRedisEnabled(false)
+	t.Cleanup(func() { common.SetRedisEnabled(prevRedis) })
+
+	prevLogConsume := config.IsLogConsumeEnabled()
+	config.SetLogConsumeEnabled(false)
+	t.Cleanup(func() { config.SetLogConsumeEnabled(prevLogConsume) })
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	requestPayload := `{"model":"gpt-4o-mini","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],"tools":[{"type":"web_search"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(requestPayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer azure-key")
+	c.Request = req
+
+	gmw.SetLogger(c, logger.Logger)
+
+	channel := &model.Channel{Id: fallbackChannelID, Type: channeltype.Azure, Name: "azure-fallback", Status: model.ChannelStatusEnabled}
+	err := channel.SetToolingConfig(&model.ChannelToolingConfig{
+		Whitelist: []string{"code_interpreter"},
+		Pricing: map[string]model.ToolPricingLocal{
+			"code_interpreter": {UsdPerCall: 0.03},
+		},
+	})
+	require.NoError(t, err, "failed to set channel tooling")
+
+	c.Set(ctxkey.Channel, channeltype.Azure)
+	c.Set(ctxkey.ChannelId, fallbackChannelID)
+	c.Set(ctxkey.ChannelModel, channel)
+	c.Set(ctxkey.TokenId, fallbackTokenID)
+	c.Set(ctxkey.TokenName, "fallback-token")
+	c.Set(ctxkey.Id, fallbackUserID)
+	c.Set(ctxkey.Group, "default")
+	c.Set(ctxkey.ModelMapping, map[string]string{})
+	c.Set(ctxkey.ChannelRatio, 1.0)
+	c.Set(ctxkey.RequestModel, "gpt-4o-mini")
+	c.Set(ctxkey.BaseURL, "https://example.azure.com")
+	c.Set(ctxkey.ContentType, "application/json")
+	c.Set(ctxkey.TokenQuotaUnlimited, true)
+	c.Set(ctxkey.TokenQuota, int64(0))
+	c.Set(ctxkey.Username, "response-fallback")
+	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.Config, model.ChannelConfig{})
+
+	apiErr := RelayResponseAPIHelper(c)
+	require.NotNil(t, apiErr, "expected error when web_search tool is not whitelisted")
+	require.Equal(t, http.StatusBadRequest, apiErr.StatusCode, "expected status 400")
+	require.Contains(t, apiErr.Message, "web_search", "expected error mentioning web_search")
 }
 
 func TestRelayResponseAPIHelper_FallbackStreaming(t *testing.T) {
@@ -252,16 +380,12 @@ func TestRelayResponseAPIHelper_FallbackStreaming(t *testing.T) {
 			upstreamPath += "?" + r.URL.RawQuery
 		}
 		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("failed to read upstream body: %v", err)
-		}
+		require.NoError(t, err, "failed to read upstream body")
 		upstreamBody = body
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Fatalf("response writer does not support flushing")
-		}
+		require.True(t, ok, "response writer does not support flushing")
 
 		chunks := []string{
 			`{"id":"chatcmpl-123","object":"chat.completion.chunk","created":1741036800,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}`,
@@ -311,37 +435,24 @@ func TestRelayResponseAPIHelper_FallbackStreaming(t *testing.T) {
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackCompatibleChannelID, Type: channeltype.OpenAICompatible})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
-	if err := RelayResponseAPIHelper(c); err != nil {
-		t.Fatalf("RelayResponseAPIHelper returned error: %v", err)
-	}
+	apiErr := RelayResponseAPIHelper(c)
+	require.Nil(t, apiErr, "RelayResponseAPIHelper returned error")
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("unexpected status code: %d", recorder.Code)
-	}
-	if !upstreamCalled {
-		t.Fatalf("expected upstream to be called")
-	}
-	if !(strings.Contains(upstreamPath, "/v1/chat/completions") || strings.Contains(upstreamPath, "/chat/completions")) {
-		t.Fatalf("unexpected upstream path for streaming fallback: %s", upstreamPath)
-	}
+	require.Equal(t, http.StatusOK, recorder.Code, "unexpected status code")
+	require.True(t, upstreamCalled, "expected upstream to be called")
+	require.True(t, strings.Contains(upstreamPath, "/v1/chat/completions") || strings.Contains(upstreamPath, "/chat/completions"), "unexpected upstream path for streaming fallback: %s", upstreamPath)
 
 	var chatReq relaymodel.GeneralOpenAIRequest
-	if err := json.Unmarshal(upstreamBody, &chatReq); err != nil {
-		t.Fatalf("failed to unmarshal upstream chat request: %v", err)
-	}
-	if !chatReq.Stream {
-		t.Fatalf("expected chat request stream flag to be true")
-	}
-	if len(chatReq.Messages) == 0 || chatReq.Messages[0].StringContent() == "" {
-		t.Fatalf("expected user message in chat request: %#v", chatReq.Messages)
-	}
+	chatErr := json.Unmarshal(upstreamBody, &chatReq)
+	require.NoError(t, chatErr, "failed to unmarshal upstream chat request")
+	require.True(t, chatReq.Stream, "expected chat request stream flag to be true")
+	require.NotEmpty(t, chatReq.Messages, "expected messages in chat request")
+	require.NotEmpty(t, chatReq.Messages[0].StringContent(), "expected user message in chat request")
 
 	events := parseSSEEvents(recorder.Body.String())
 	t.Logf("raw SSE: %s", recorder.Body.String())
 	t.Logf("parsed SSE events: %+v", events)
-	if len(events) == 0 {
-		t.Fatalf("expected SSE events, got none")
-	}
+	require.NotEmpty(t, events, "expected SSE events, got none")
 
 	var (
 		seenCreated   bool
@@ -352,9 +463,7 @@ func TestRelayResponseAPIHelper_FallbackStreaming(t *testing.T) {
 
 	for idx, ev := range events {
 		if idx == len(events)-1 {
-			if ev.event != "" || strings.TrimSpace(ev.data) != "[DONE]" {
-				t.Fatalf("expected final SSE chunk to be [DONE], got event=%q data=%q", ev.event, ev.data)
-			}
+			require.True(t, ev.event == "" && strings.TrimSpace(ev.data) == "[DONE]", "expected final SSE chunk to be [DONE], got event=%q data=%q", ev.event, ev.data)
 			continue
 		}
 		switch ev.event {
@@ -365,37 +474,23 @@ func TestRelayResponseAPIHelper_FallbackStreaming(t *testing.T) {
 		case "response.completed":
 			seenCompleted = true
 			var streamEvent openai.ResponseAPIStreamEvent
-			if err := json.Unmarshal([]byte(ev.data), &streamEvent); err != nil {
-				t.Fatalf("failed to unmarshal response.completed event: %v", err)
-			}
-			if streamEvent.Response == nil {
-				t.Fatalf("expected response payload in response.completed event")
-			}
+			err := json.Unmarshal([]byte(ev.data), &streamEvent)
+			require.NoError(t, err, "failed to unmarshal response.completed event")
+			require.NotNil(t, streamEvent.Response, "expected response payload in response.completed event")
 			finalResponse = streamEvent.Response
 		}
 	}
 
-	if !seenCreated {
-		t.Fatalf("missing response.created event")
-	}
-	if deltaCount < 2 {
-		t.Fatalf("expected at least two delta events, got %d", deltaCount)
-	}
-	if !seenCompleted || finalResponse == nil {
-		t.Fatalf("missing response.completed event")
-	}
-	if finalResponse.Status != "completed" {
-		t.Fatalf("expected final status completed, got %s", finalResponse.Status)
-	}
-	if len(finalResponse.Output) == 0 || len(finalResponse.Output[0].Content) == 0 {
-		t.Fatalf("expected output message in final response: %#v", finalResponse.Output)
-	}
-	if text := finalResponse.Output[0].Content[0].Text; text != "Hello world!" {
-		t.Fatalf("unexpected final response text: %q", text)
-	}
-	if finalResponse.Usage == nil || finalResponse.Usage.TotalTokens != 12 {
-		t.Fatalf("unexpected usage in final response: %#v", finalResponse.Usage)
-	}
+	require.True(t, seenCreated, "missing response.created event")
+	require.GreaterOrEqual(t, deltaCount, 2, "expected at least two delta events")
+	require.True(t, seenCompleted, "missing response.completed event")
+	require.NotNil(t, finalResponse, "missing final response")
+	require.Equal(t, "completed", finalResponse.Status, "expected final status completed")
+	require.NotEmpty(t, finalResponse.Output, "expected output in final response")
+	require.NotEmpty(t, finalResponse.Output[0].Content, "expected output content in final response")
+	require.Equal(t, "Hello world!", finalResponse.Output[0].Content[0].Text, "unexpected final response text")
+	require.NotNil(t, finalResponse.Usage, "expected usage in final response")
+	require.Equal(t, 12, finalResponse.Usage.TotalTokens, "unexpected usage total tokens in final response")
 }
 
 func TestRelayResponseAPIHelper_FallbackStreamingToolCalls(t *testing.T) {
@@ -413,9 +508,7 @@ func TestRelayResponseAPIHelper_FallbackStreamingToolCalls(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Fatalf("response writer does not support flushing")
-		}
+		require.True(t, ok, "response writer does not support flushing")
 
 		chunks := []string{
 			`{"id":"chatcmpl-tool","object":"chat.completion.chunk","created":1741036800,"model":"gpt-4o-mini","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_delta","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}`,
@@ -465,18 +558,13 @@ func TestRelayResponseAPIHelper_FallbackStreamingToolCalls(t *testing.T) {
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackCompatibleChannelID, Type: channeltype.OpenAICompatible})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
-	if err := RelayResponseAPIHelper(c); err != nil {
-		t.Fatalf("RelayResponseAPIHelper returned error: %v", err)
-	}
+	apiErr := RelayResponseAPIHelper(c)
+	require.Nil(t, apiErr, "RelayResponseAPIHelper returned error")
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("unexpected status code: %d", recorder.Code)
-	}
+	require.Equal(t, http.StatusOK, recorder.Code, "unexpected status code")
 
 	events := parseSSEEvents(recorder.Body.String())
-	if len(events) == 0 {
-		t.Fatalf("expected SSE events, got none")
-	}
+	require.NotEmpty(t, events, "expected SSE events, got none")
 
 	var (
 		seenRequiredAction bool
@@ -487,45 +575,31 @@ func TestRelayResponseAPIHelper_FallbackStreamingToolCalls(t *testing.T) {
 		switch ev.event {
 		case "response.required_action.added", "response.required_action.delta", "response.required_action.done":
 			var streamEvent openai.ResponseAPIStreamEvent
-			if err := json.Unmarshal([]byte(ev.data), &streamEvent); err != nil {
-				t.Fatalf("failed to decode required_action event: %v", err)
-			}
-			if streamEvent.RequiredAction == nil || streamEvent.RequiredAction.SubmitToolOutputs == nil || len(streamEvent.RequiredAction.SubmitToolOutputs.ToolCalls) == 0 {
-				t.Fatalf("expected tool call in required_action event, got %#v", streamEvent.RequiredAction)
-			}
+			unmarshalErr := json.Unmarshal([]byte(ev.data), &streamEvent)
+			require.NoError(t, unmarshalErr, "failed to decode required_action event")
+			require.NotNil(t, streamEvent.RequiredAction, "expected required_action in event")
+			require.NotNil(t, streamEvent.RequiredAction.SubmitToolOutputs, "expected submit_tool_outputs in required_action")
+			require.NotEmpty(t, streamEvent.RequiredAction.SubmitToolOutputs.ToolCalls, "expected tool call in required_action event")
 			seenRequiredAction = true
 		case "response.completed":
 			var streamEvent openai.ResponseAPIStreamEvent
-			if err := json.Unmarshal([]byte(ev.data), &streamEvent); err != nil {
-				t.Fatalf("failed to decode response.completed event: %v", err)
-			}
-			if streamEvent.Response == nil {
-				t.Fatalf("expected response payload in response.completed event")
-			}
+			err := json.Unmarshal([]byte(ev.data), &streamEvent)
+			require.NoError(t, err, "failed to decode response.completed event")
+			require.NotNil(t, streamEvent.Response, "expected response payload in response.completed event")
 			finalResponse = streamEvent.Response
 		}
 	}
 
-	if !seenRequiredAction {
-		t.Fatalf("expected required_action events in stream, got %v", events)
-	}
-	if finalResponse == nil {
-		t.Fatalf("missing final response payload")
-	}
-	if finalResponse.RequiredAction == nil || finalResponse.RequiredAction.SubmitToolOutputs == nil {
-		t.Fatalf("expected required_action in final response, got %#v", finalResponse.RequiredAction)
-	}
+	require.True(t, seenRequiredAction, "expected required_action events in stream, got %v", events)
+	require.NotNil(t, finalResponse, "missing final response payload")
+	require.NotNil(t, finalResponse.RequiredAction, "expected required_action in final response")
+	require.NotNil(t, finalResponse.RequiredAction.SubmitToolOutputs, "expected submit_tool_outputs in required_action")
 	toolCalls := finalResponse.RequiredAction.SubmitToolOutputs.ToolCalls
-	if len(toolCalls) != 1 {
-		t.Fatalf("expected single tool call in final response, got %d", len(toolCalls))
-	}
+	require.Len(t, toolCalls, 1, "expected single tool call in final response")
 	fn := toolCalls[0].Function
-	if fn == nil || fn.Name != "get_weather" {
-		t.Fatalf("unexpected tool call function: %#v", fn)
-	}
-	if fn.Arguments == "" {
-		t.Fatalf("expected arguments in tool call function")
-	}
+	require.NotNil(t, fn, "expected function in tool call")
+	require.Equal(t, "get_weather", fn.Name, "unexpected tool call function name")
+	require.NotEmpty(t, fn.Arguments, "expected arguments in tool call function")
 }
 
 func TestRelayResponseAPIHelper_FallbackAnthropicStreamingHandled(t *testing.T) {
@@ -604,24 +678,17 @@ func TestRelayResponseAPIHelper_FallbackAnthropicStreamingHandled(t *testing.T) 
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackAnthropicChannelID, Type: channeltype.Anthropic})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
-	err := RelayResponseAPIHelper(c)
-	if err != nil {
-		t.Fatalf("expected anthropic streaming fallback to succeed, got error: %v", err)
-	}
+	apiErr := RelayResponseAPIHelper(c)
+	require.Nil(t, apiErr, "expected anthropic streaming fallback to succeed")
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", recorder.Code)
-	}
+	require.Equal(t, http.StatusOK, recorder.Code, "expected status 200")
 
-	if ct := recorder.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
-		t.Fatalf("expected text/event-stream content type, got %q", ct)
-	}
+	ct := recorder.Header().Get("Content-Type")
+	require.Contains(t, ct, "text/event-stream", "expected text/event-stream content type")
 
 	body := recorder.Body.String()
 	events := parseSSEEvents(body)
-	if len(events) == 0 {
-		t.Fatalf("expected SSE events from anthropic stream, got none. body=%q", body)
-	}
+	require.NotEmpty(t, events, "expected SSE events from anthropic stream, got none. body=%q", body)
 
 	var (
 		seenCreated   bool
@@ -636,60 +703,74 @@ func TestRelayResponseAPIHelper_FallbackAnthropicStreamingHandled(t *testing.T) 
 		case "response.completed":
 			seenCompleted = true
 			var streamEvent openai.ResponseAPIStreamEvent
-			if err := json.Unmarshal([]byte(ev.data), &streamEvent); err != nil {
-				t.Fatalf("failed to decode response.completed event: %v", err)
-			}
-			if streamEvent.Response == nil {
-				t.Fatalf("expected response payload in response.completed event")
-			}
+			err := json.Unmarshal([]byte(ev.data), &streamEvent)
+			require.NoError(t, err, "failed to decode response.completed event")
+			require.NotNil(t, streamEvent.Response, "expected response payload in response.completed event")
 			finalResponse = streamEvent.Response
 		}
 	}
 
-	if !seenCreated {
-		t.Fatalf("missing response.created event from anthropic stream. events=%#v", events)
-	}
-	if !seenCompleted {
-		t.Fatalf("missing response.completed event from anthropic stream. events=%#v", events)
-	}
-	if finalResponse == nil {
-		t.Fatalf("missing final response payload")
-	}
-	if finalResponse.Status != "completed" {
-		t.Fatalf("expected completed status, got %s", finalResponse.Status)
-	}
-	if len(finalResponse.Output) == 0 || len(finalResponse.Output[0].Content) == 0 {
-		t.Fatalf("expected final output content, got %#v", finalResponse.Output)
-	}
-	if text := finalResponse.Output[0].Content[0].Text; text != "Hello world!" {
-		t.Fatalf("unexpected final response text: %q", text)
-	}
+	require.True(t, seenCreated, "missing response.created event from anthropic stream. events=%#v", events)
+	require.True(t, seenCompleted, "missing response.completed event from anthropic stream. events=%#v", events)
+	require.NotNil(t, finalResponse, "missing final response payload")
+	require.Equal(t, "completed", finalResponse.Status, "expected completed status")
+	require.NotEmpty(t, finalResponse.Output, "expected final output")
+	require.NotEmpty(t, finalResponse.Output[0].Content, "expected final output content")
+	require.Equal(t, "Hello world!", finalResponse.Output[0].Content[0].Text, "unexpected final response text")
 }
 
 func TestNormalizeResponseAPIRawBody_RemovesUnsupportedParams(t *testing.T) {
+	t.Parallel()
 	temp := 0.7
 	topP := 0.9
 	req := &openai.ResponseAPIRequest{Model: "gpt-5-mini", Temperature: &temp, TopP: &topP}
 
 	sanitizeResponseAPIRequest(req, channeltype.OpenAI)
-	if req.Temperature != nil {
-		t.Fatalf("expected temperature pointer to be nil after sanitization")
-	}
-	if req.TopP != nil {
-		t.Fatalf("expected top_p pointer to be nil after sanitization")
-	}
+	require.Nil(t, req.Temperature, "expected temperature pointer to be nil after sanitization")
+	require.Nil(t, req.TopP, "expected top_p pointer to be nil after sanitization")
 
 	raw := []byte(`{"model":"gpt-5-mini","temperature":0.7,"top_p":0.9}`)
-	patched, err := normalizeResponseAPIRawBody(raw, req)
-	if err != nil {
-		t.Fatalf("normalizeResponseAPIRawBody failed: %v", err)
-	}
-	if bytes.Contains(patched, []byte("\"temperature\"")) {
-		t.Fatalf("temperature should have been removed: %s", patched)
-	}
-	if bytes.Contains(patched, []byte("\"top_p\"")) {
-		t.Fatalf("top_p should have been removed: %s", patched)
-	}
+	patched, _, _, err := normalizeResponseAPIRawBody(raw, req, channeltype.OpenAI)
+	require.NoError(t, err, "normalizeResponseAPIRawBody failed")
+	require.False(t, bytes.Contains(patched, []byte(`"temperature"`)), "temperature should have been removed: %s", patched)
+	require.False(t, bytes.Contains(patched, []byte(`"top_p"`)), "top_p should have been removed: %s", patched)
+}
+
+func TestNormalizeResponseAPIRawBody_NormalizesAssistantHistoryContentType(t *testing.T) {
+	t.Parallel()
+	raw := []byte(`{
+	  "model": "gpt-4o-mini",
+	  "input": [
+	    {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+	    {"role": "assistant", "content": [{"type": "input_text", "text": "hello"}]}
+	  ]
+	}`)
+
+	req := &openai.ResponseAPIRequest{Model: "gpt-4o-mini"}
+	err := json.Unmarshal(raw, req)
+	require.NoError(t, err, "failed to unmarshal request")
+
+	patched, stats, changed, err := normalizeResponseAPIRawBody(raw, req, channeltype.OpenAI)
+	require.NoError(t, err, "normalizeResponseAPIRawBody failed")
+	require.True(t, changed, "expected raw body to be changed")
+	require.Equal(t, 1, stats.AssistantInputTextFixed, "expected assistant input_text to be rewritten")
+
+	var out map[string]any
+	err = json.Unmarshal(patched, &out)
+	require.NoError(t, err, "failed to unmarshal patched payload")
+
+	input, ok := out["input"].([]any)
+	require.True(t, ok, "expected input to be an array")
+	require.Len(t, input, 2)
+
+	assistant, ok := input[1].(map[string]any)
+	require.True(t, ok)
+	content, ok := assistant["content"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, content)
+	part, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "output_text", part["type"], "expected assistant content type to be output_text")
 }
 
 type parsedSSE struct {
@@ -738,23 +819,39 @@ func parseSSEEvents(raw string) []parsedSSE {
 
 func ensureResponseFallbackFixtures(t *testing.T) {
 	t.Helper()
+	responseFallbackFixtureMu.Lock()
+	defer responseFallbackFixtureMu.Unlock()
+
+	// Tests in this package spawn post-response billing/logging tasks via graceful.GoCritical.
+	// Wait for them here to avoid SQLITE_BUSY errors when fixtures are reset between tests.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	require.NoError(t, graceful.Drain(ctx), "failed to drain critical tasks")
+
 	ensureResponseFallbackDB(t)
 
-	if err := model.DB.AutoMigrate(&model.User{}, &model.Token{}, &model.Channel{}, &model.UserRequestCost{}, &model.Log{}, &model.Trace{}); err != nil {
-		t.Fatalf("failed to migrate tables: %v", err)
-	}
+	responseFallbackMigrateOnce.Do(func() {
+		err := model.DB.AutoMigrate(
+			&model.User{},
+			&model.Token{},
+			&model.Channel{},
+			&model.UserRequestCost{},
+			&model.Log{},
+			&model.Trace{},
+			&model.MCPServer{},
+			&model.MCPTool{},
+		)
+		require.NoError(t, err, "failed to migrate tables")
+	})
 
-	if err := model.DB.Where("id = ?", fallbackUserID).Delete(&model.User{}).Error; err != nil {
-		t.Fatalf("failed to clean user fixture: %v", err)
-	}
+	err := model.DB.Where("id = ?", fallbackUserID).Delete(&model.User{}).Error
+	require.NoError(t, err, "failed to clean user fixture")
 	user := &model.User{Id: fallbackUserID, Username: "response-fallback", Quota: 1_000_000, Status: model.UserStatusEnabled}
-	if err := model.DB.Create(user).Error; err != nil {
-		t.Fatalf("failed to create user fixture: %v", err)
-	}
+	err = model.DB.Create(user).Error
+	require.NoError(t, err, "failed to create user fixture")
 
-	if err := model.DB.Where("id = ?", fallbackTokenID).Delete(&model.Token{}).Error; err != nil {
-		t.Fatalf("failed to clean token fixture: %v", err)
-	}
+	err = model.DB.Where("id = ?", fallbackTokenID).Delete(&model.Token{}).Error
+	require.NoError(t, err, "failed to clean token fixture")
 	token := &model.Token{
 		Id:             fallbackTokenID,
 		UserId:         fallbackUserID,
@@ -764,47 +861,46 @@ func ensureResponseFallbackFixtures(t *testing.T) {
 		UnlimitedQuota: true,
 		RemainQuota:    0,
 	}
-	if err := model.DB.Create(token).Error; err != nil {
-		t.Fatalf("failed to create token fixture: %v", err)
-	}
+	err = model.DB.Create(token).Error
+	require.NoError(t, err, "failed to create token fixture")
 
-	if err := model.DB.Where("id = ?", fallbackChannelID).Delete(&model.Channel{}).Error; err != nil {
-		t.Fatalf("failed to clean channel fixture: %v", err)
-	}
+	err = model.DB.Where("id = ?", fallbackChannelID).Delete(&model.Channel{}).Error
+	require.NoError(t, err, "failed to clean channel fixture")
 	channel := &model.Channel{Id: fallbackChannelID, Type: channeltype.Azure, Name: "azure-fallback", Status: model.ChannelStatusEnabled}
-	if err := model.DB.Create(channel).Error; err != nil {
-		t.Fatalf("failed to create channel fixture: %v", err)
-	}
+	err = model.DB.Create(channel).Error
+	require.NoError(t, err, "failed to create channel fixture")
 
-	if err := model.DB.Where("id = ?", fallbackCompatibleChannelID).Delete(&model.Channel{}).Error; err != nil {
-		t.Fatalf("failed to clean openai-compatible channel fixture: %v", err)
-	}
+	err = model.DB.Where("id = ?", fallbackCompatibleChannelID).Delete(&model.Channel{}).Error
+	require.NoError(t, err, "failed to clean openai-compatible channel fixture")
 	compatibleChannel := &model.Channel{Id: fallbackCompatibleChannelID, Type: channeltype.OpenAICompatible, Name: "compatible-fallback", Status: model.ChannelStatusEnabled}
-	if err := model.DB.Create(compatibleChannel).Error; err != nil {
-		t.Fatalf("failed to create openai-compatible channel fixture: %v", err)
-	}
+	err = model.DB.Create(compatibleChannel).Error
+	require.NoError(t, err, "failed to create openai-compatible channel fixture")
 
-	if err := model.DB.Where("id = ?", fallbackAnthropicChannelID).Delete(&model.Channel{}).Error; err != nil {
-		t.Fatalf("failed to clean anthropic channel fixture: %v", err)
-	}
+	err = model.DB.Where("id = ?", fallbackAnthropicChannelID).Delete(&model.Channel{}).Error
+	require.NoError(t, err, "failed to clean anthropic channel fixture")
 	anthropicChannel := &model.Channel{Id: fallbackAnthropicChannelID, Type: channeltype.Anthropic, Name: "anthropic-fallback", Status: model.ChannelStatusEnabled}
-	if err := model.DB.Create(anthropicChannel).Error; err != nil {
-		t.Fatalf("failed to create anthropic channel fixture: %v", err)
-	}
+	err = model.DB.Create(anthropicChannel).Error
+	require.NoError(t, err, "failed to create anthropic channel fixture")
+
+	err = model.DB.Where("id = ?", fallbackOpenAIChannelID).Delete(&model.Channel{}).Error
+	require.NoError(t, err, "failed to clean openai channel fixture")
+	openaiChannel := &model.Channel{Id: fallbackOpenAIChannelID, Type: channeltype.OpenAI, Name: "openai-fallback", Status: model.ChannelStatusEnabled}
+	err = model.DB.Create(openaiChannel).Error
+	require.NoError(t, err, "failed to create openai channel fixture")
 }
 
 func ensureResponseFallbackDB(t *testing.T) {
 	t.Helper()
-	if model.DB != nil {
-		if model.LOG_DB == nil {
-			model.LOG_DB = model.DB
+	responseFallbackDBOnce.Do(func() {
+		if model.DB != nil {
+			if model.LOG_DB == nil {
+				model.LOG_DB = model.DB
+			}
+			return
 		}
-		return
-	}
-	db, err := gorm.Open(sqlite.Open("file:response_fallback_tests?mode=memory&cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("failed to open sqlite database: %v", err)
-	}
-	model.DB = db
-	model.LOG_DB = db
+		db, err := gorm.Open(sqlite.Open("file:response_fallback_tests?mode=memory&cache=shared"), &gorm.Config{})
+		require.NoError(t, err, "failed to open sqlite database")
+		model.DB = db
+		model.LOG_DB = db
+	})
 }

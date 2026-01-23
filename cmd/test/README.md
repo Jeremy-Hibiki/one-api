@@ -28,6 +28,14 @@
 - Uses a shared HTTP client with concurrency (`errgroup`) to keep suites fast.
 - Classifies outcomes as **PASS**, **FAIL**, or **SKIP** (unsupported feature combinations).
 
+## Tool Variants
+
+Tool-calling variants (Chat/Response/Claude Tools + Tools History) run up to three payload attempts. If a provider returns a valid 2xx response but never invokes a tool, the harness marks the run as **PASS\*** and records a warning. This keeps the matrix focused on one-api format compatibility while still flagging provider tool-call reliability.
+
+## Retries
+
+Transient failures (network errors and HTTP 5xx) are retried a few times with backoff. If the provider continues returning transient 5xx errors after retries, the harness reports **SKIP** rather than failing the full run.
+
 Streaming responses are captured by accumulating the opening SSE/event payload. If the upstream rejects streaming (`"streaming is not supported"`, HTTP 405, etc.), the harness marks the attempt as `SKIP` instead of failing the whole run.
 
 ## Running the suite
@@ -37,6 +45,18 @@ API_TOKEN=sk-... ONEAPI_TEST_MODELS="gpt-4o-mini,claude-3.5-haiku" go run ./cmd/
 ```
 
 `run` is also accepted explicitly (`go run ./cmd/test run`). The command exits **non-zero** when at least one request fails (excluding skips). Unsupported combinations still appear in the report but do not flip the exit code.
+
+### Probing FFmpeg availability
+
+Run `go run ./cmd/test audio` to verify the host can execute `ffprobe`/`ffmpeg`. The subcommand automatically downloads a short sample clip unless you provide a positional argument or `--source` flag pointing to a local file or HTTP(S) URL:
+
+```bash
+go run ./cmd/test audio
+go run ./cmd/test audio ./path/to/sample.m4a
+go run ./cmd/test audio --source https://example.com/sample.wav
+```
+
+The probe logs the measured duration and the token estimate, helping confirm that One-API audio helpers work inside the current environment.
 
 ### Capturing payload samples
 

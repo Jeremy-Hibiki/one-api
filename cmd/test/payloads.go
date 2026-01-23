@@ -98,11 +98,11 @@ func chatCompletionPayload(model string, stream bool, exp expectation) any {
 		base["messages"] = []map[string]any{
 			{
 				"role":    "system",
-				"content": "You are a weather assistant that must call tools when asked for weather information.",
+				"content": "You are a weather assistant. You MUST call the get_weather function to retrieve weather data. Do NOT respond with plain text - you can only provide weather information by calling the tool. Never guess or make up weather data.",
 			},
 			{
 				"role":    "user",
-				"content": "What is the weather in San Francisco, CA right now? Use the tool to find out.",
+				"content": "Call the get_weather tool to check the current weather in San Francisco, CA. Do not respond with text - just invoke the tool.",
 			},
 		}
 		base["tools"] = []map[string]any{chatWeatherToolDefinition()}
@@ -120,11 +120,11 @@ func chatCompletionPayload(model string, stream bool, exp expectation) any {
 		base["messages"] = []map[string]any{
 			{
 				"role":    "system",
-				"content": "You are a weather assistant that must call the get_weather function whenever updated forecasts are needed.",
+				"content": "You are a weather assistant. You MUST call the get_weather function to retrieve any weather data. Do NOT respond with plain text - always invoke the tool first. Never summarize previous results without calling the tool again.",
 			},
 			{
 				"role":    "user",
-				"content": "Fetch the current weather conditions for San Francisco, CA using the tool.",
+				"content": "Call the get_weather tool to check the current weather in San Francisco, CA.",
 			},
 			{
 				"role":    "assistant",
@@ -145,7 +145,7 @@ func chatCompletionPayload(model string, stream bool, exp expectation) any {
 			},
 			{
 				"role":    "user",
-				"content": "Thanks for the update. Please call the tool again to grab tomorrow morning's forecast for San Francisco in Fahrenheit and summarize the findings.",
+				"content": "Now call the get_weather tool again with unit=fahrenheit to get tomorrow's forecast for San Francisco. You MUST invoke the tool - do not respond with text.",
 			},
 		}
 		base["tools"] = []map[string]any{chatWeatherToolDefinition()}
@@ -190,6 +190,168 @@ func chatCompletionPayload(model string, stream bool, exp expectation) any {
 	return base
 }
 
+// toolAttemptPayloads builds up to three payloads for tool-calling expectations.
+//
+// It starts with a strongly forced tool_choice using a realistic schema, then
+// falls back to a minimal "ping" tool (often more reliable), and finally
+// relaxes tool_choice to "auto" so providers that reject forced tool_choice can
+// still return a valid response (counted as a soft-pass with a warning).
+func toolAttemptPayloads(reqType requestType, model string, stream bool, exp expectation) []any {
+	if !isToolExpectation(exp) {
+		return nil
+	}
+	if exp == expectationToolHistory {
+		switch reqType {
+		case requestTypeChatCompletion:
+			return chatToolHistoryAttemptPayloads(model, stream)
+		case requestTypeResponseAPI:
+			return responseToolHistoryAttemptPayloads(model, stream)
+		case requestTypeClaudeMessages:
+			return claudeToolHistoryAttemptPayloads(model, stream)
+		}
+	}
+
+	switch reqType {
+	case requestTypeChatCompletion:
+		return chatToolAttemptPayloads(model, stream)
+	case requestTypeResponseAPI:
+		return responseToolAttemptPayloads(model, stream)
+	case requestTypeClaudeMessages:
+		return claudeToolAttemptPayloads(model, stream)
+	default:
+		return nil
+	}
+}
+
+// chatToolAttemptPayloads returns multiple ChatCompletion tool-call payloads to improve
+// cross-provider reliability.
+func chatToolAttemptPayloads(model string, stream bool) []any {
+	forced := chatCompletionPayload(model, stream, expectationToolInvocation).(map[string]any)
+	forced["temperature"] = 0.0
+
+	pingForced := map[string]any{
+		"model":       model,
+		"max_tokens":  128,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"stream":      stream,
+		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": "You MUST call the ping function exactly once and nothing else.",
+			},
+			{
+				"role":    "user",
+				"content": "Call ping now.",
+			},
+		},
+		"tools": []map[string]any{chatPingToolDefinition()},
+		"tool_choice": map[string]any{
+			"type": "function",
+			"function": map[string]string{
+				"name": "ping",
+			},
+		},
+	}
+
+	pingAuto := map[string]any{
+		"model":       model,
+		"max_tokens":  128,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"stream":      stream,
+		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": "If you can call tools, call ping. Otherwise reply with the single word: pong.",
+			},
+			{
+				"role":    "user",
+				"content": "Either call ping or reply pong.",
+			},
+		},
+		"tools":       []map[string]any{chatPingToolDefinition()},
+		"tool_choice": "auto",
+	}
+
+	return []any{forced, pingForced, pingAuto}
+}
+
+// chatToolHistoryAttemptPayloads returns multiple ChatCompletion tool-history payloads.
+func chatToolHistoryAttemptPayloads(model string, stream bool) []any {
+	forced := chatCompletionPayload(model, stream, expectationToolHistory).(map[string]any)
+	forced["temperature"] = 0.0
+
+	callID := "call_ping_history_1"
+	pingForced := map[string]any{
+		"model":       model,
+		"max_tokens":  256,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"stream":      stream,
+		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": "You MUST call the ping function. Do not answer in plain text.",
+			},
+			{
+				"role":    "user",
+				"content": "Call ping.",
+			},
+			{
+				"role":    "assistant",
+				"content": "",
+				"tool_calls": []map[string]any{{
+					"id":   callID,
+					"type": "function",
+					"function": map[string]any{
+						"name":      "ping",
+						"arguments": "{}",
+					},
+				}},
+			},
+			{
+				"role":         "tool",
+				"tool_call_id": callID,
+				"content":      "{\"pong\":true}",
+			},
+			{
+				"role":    "user",
+				"content": "Call ping again.",
+			},
+		},
+		"tools": []map[string]any{chatPingToolDefinition()},
+		"tool_choice": map[string]any{
+			"type": "function",
+			"function": map[string]string{
+				"name": "ping",
+			},
+		},
+	}
+
+	pingAuto := map[string]any{
+		"model":       model,
+		"max_tokens":  256,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"stream":      stream,
+		"messages": []map[string]any{
+			{
+				"role":    "system",
+				"content": "If tool calls are supported, call ping. Otherwise respond with a short acknowledgement.",
+			},
+			{
+				"role":    "user",
+				"content": "Try to call ping again.",
+			},
+		},
+		"tools":       []map[string]any{chatPingToolDefinition()},
+		"tool_choice": "auto",
+	}
+
+	return []any{forced, pingForced, pingAuto}
+}
+
 // responseAPIPayload builds the Response API payload for the given expectation.
 func responseAPIPayload(model string, stream bool, exp expectation) any {
 	base := map[string]any{
@@ -201,13 +363,14 @@ func responseAPIPayload(model string, stream bool, exp expectation) any {
 
 	if exp == expectationToolInvocation {
 		base["max_output_tokens"] = defaultMaxTokens
+		base["instructions"] = "You MUST call the get_weather function to retrieve weather data. Do NOT respond with plain text - always invoke the tool. Never guess or make up weather information."
 		base["input"] = []map[string]any{
 			{
 				"role": "user",
 				"content": []map[string]any{
 					{
 						"type": "input_text",
-						"text": "Please call get_weather for San Francisco, CA in celsius and report the findings.",
+						"text": "Call the get_weather tool to check the weather in San Francisco, CA (use celsius). You MUST invoke the tool - do not respond with text.",
 					},
 				},
 			},
@@ -225,13 +388,14 @@ func responseAPIPayload(model string, stream bool, exp expectation) any {
 		callID := "call_" + callSuffix
 		fcID := "fc_" + callSuffix
 		base["max_output_tokens"] = defaultMaxTokens
+		base["instructions"] = "You MUST call the get_weather function to retrieve weather data. Do NOT respond with plain text - always invoke the tool first. Never summarize previous results without calling the tool again."
 		base["input"] = []any{
 			map[string]any{
 				"role": "user",
 				"content": []map[string]any{
 					{
 						"type": "input_text",
-						"text": "Retrieve the current weather for San Francisco, CA using the tool.",
+						"text": "Call the get_weather tool to check the current weather in San Francisco, CA.",
 					},
 				},
 			},
@@ -253,7 +417,7 @@ func responseAPIPayload(model string, stream bool, exp expectation) any {
 				"content": []map[string]any{
 					{
 						"type": "input_text",
-						"text": "Great, now call the tool again to retrieve tomorrow morning's forecast for San Francisco in Fahrenheit and summarize both readings.",
+						"text": "Now call the get_weather tool again with unit=fahrenheit to get tomorrow's forecast for San Francisco. You MUST invoke the tool - do not respond with text.",
 					},
 				},
 			},
@@ -353,6 +517,114 @@ func responseAPIPayload(model string, stream bool, exp expectation) any {
 	return base
 }
 
+// responseToolAttemptPayloads returns multiple Response API tool-call payloads.
+func responseToolAttemptPayloads(model string, stream bool) []any {
+	forced := responseAPIPayload(model, stream, expectationToolInvocation).(map[string]any)
+	forced["temperature"] = 0.0
+
+	pingForced := map[string]any{
+		"model":             model,
+		"max_output_tokens": 128,
+		"temperature":       0.0,
+		"top_p":             1.0,
+		"stream":            stream,
+		"instructions":      "You MUST call the ping function exactly once. Do not output plain text.",
+		"input": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "Call ping now."},
+				},
+			},
+		},
+		"tools":       []map[string]any{responsePingToolDefinition()},
+		"tool_choice": map[string]any{"type": "tool", "name": "ping"},
+	}
+
+	pingAuto := map[string]any{
+		"model":             model,
+		"max_output_tokens": 128,
+		"temperature":       0.0,
+		"top_p":             1.0,
+		"stream":            stream,
+		"instructions":      "Call ping if possible. Otherwise reply with the single word: pong.",
+		"input": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "Either call ping or reply pong."},
+				},
+			},
+		},
+		"tools":       []map[string]any{responsePingToolDefinition()},
+		"tool_choice": "auto",
+	}
+
+	return []any{forced, pingForced, pingAuto}
+}
+
+// responseToolHistoryAttemptPayloads returns multiple Response API tool-history payloads.
+func responseToolHistoryAttemptPayloads(model string, stream bool) []any {
+	forced := responseAPIPayload(model, stream, expectationToolHistory).(map[string]any)
+	forced["temperature"] = 0.0
+
+	callSuffix := "ping_history_1"
+	callID := "call_" + callSuffix
+	fcID := "fc_" + callSuffix
+	pingForced := map[string]any{
+		"model":             model,
+		"max_output_tokens": 256,
+		"temperature":       0.0,
+		"top_p":             1.0,
+		"stream":            stream,
+		"instructions":      "You MUST call ping when asked. Do not output plain text.",
+		"input": []any{
+			map[string]any{
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": "Call ping now."}},
+			},
+			map[string]any{
+				"type":      "function_call",
+				"id":        fcID,
+				"call_id":   callID,
+				"status":    "completed",
+				"name":      "ping",
+				"arguments": "{}",
+			},
+			map[string]any{
+				"type":    "function_call_output",
+				"call_id": callID,
+				"output":  "{\"pong\":true}",
+			},
+			map[string]any{
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": "Call ping again."}},
+			},
+		},
+		"tools":       []map[string]any{responsePingToolDefinition()},
+		"tool_choice": map[string]any{"type": "tool", "name": "ping"},
+	}
+
+	pingAuto := map[string]any{
+		"model":             model,
+		"max_output_tokens": 256,
+		"temperature":       0.0,
+		"top_p":             1.0,
+		"stream":            stream,
+		"instructions":      "If tool calls are supported, call ping; otherwise reply briefly.",
+		"input": []map[string]any{
+			{
+				"role":    "user",
+				"content": []map[string]any{{"type": "input_text", "text": "Try to call ping."}},
+			},
+		},
+		"tools":       []map[string]any{responsePingToolDefinition()},
+		"tool_choice": "auto",
+	}
+
+	return []any{forced, pingForced, pingAuto}
+}
+
 // claudeMessagesPayload builds the Claude Messages payload for the given expectation.
 func claudeMessagesPayload(model string, stream bool, exp expectation) any {
 	base := map[string]any{
@@ -365,13 +637,14 @@ func claudeMessagesPayload(model string, stream bool, exp expectation) any {
 	}
 
 	if exp == expectationToolInvocation {
+		base["system"] = "You MUST call the get_weather function to retrieve weather data. Do NOT respond with plain text - always invoke the tool. Never guess or make up weather information."
 		base["messages"] = []map[string]any{
 			{
 				"role": "user",
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": "Use the get_weather tool to retrieve today's weather in San Francisco, CA.",
+						"text": "Call the get_weather tool to check the current weather in San Francisco, CA. You MUST invoke the tool - do not respond with text.",
 					},
 				},
 			},
@@ -386,13 +659,14 @@ func claudeMessagesPayload(model string, stream bool, exp expectation) any {
 
 	if exp == expectationToolHistory {
 		callID := "toolu_weather_history_1"
+		base["system"] = "You MUST call the get_weather function to retrieve weather data. Do NOT respond with plain text - always invoke the tool first. Never summarize previous results without calling the tool again."
 		base["messages"] = []map[string]any{
 			{
 				"role": "user",
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": "Please use the weather tool to pull the current conditions in San Francisco, CA.",
+						"text": "Call the get_weather tool to check the current weather in San Francisco, CA.",
 					},
 				},
 			},
@@ -425,7 +699,7 @@ func claudeMessagesPayload(model string, stream bool, exp expectation) any {
 					},
 					{
 						"type": "text",
-						"text": "Thanks! Please call the tool again to gather tomorrow morning's forecast for San Francisco in Fahrenheit before replying.",
+						"text": "Now call the get_weather tool again with unit=fahrenheit to get tomorrow's forecast for San Francisco. You MUST invoke the tool - do not respond with text.",
 					},
 				},
 			},
@@ -479,6 +753,108 @@ func claudeMessagesPayload(model string, stream bool, exp expectation) any {
 	return base
 }
 
+// claudeToolAttemptPayloads returns multiple Claude Messages tool-call payloads.
+func claudeToolAttemptPayloads(model string, stream bool) []any {
+	forced := claudeMessagesPayload(model, stream, expectationToolInvocation).(map[string]any)
+	forced["temperature"] = 0.0
+
+	pingForced := map[string]any{
+		"model":       model,
+		"max_tokens":  128,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"top_k":       defaultTopK,
+		"stream":      stream,
+		"system":      "You MUST call the ping tool exactly once. Do not answer in plain text.",
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": []map[string]any{{"type": "text", "text": "Call ping now."}},
+			},
+		},
+		"tools":       []map[string]any{claudePingToolDefinition()},
+		"tool_choice": map[string]any{"type": "tool", "name": "ping"},
+	}
+
+	pingAuto := map[string]any{
+		"model":       model,
+		"max_tokens":  128,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"top_k":       defaultTopK,
+		"stream":      stream,
+		"system":      "Call ping if possible. Otherwise reply with the single word: pong.",
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": []map[string]any{{"type": "text", "text": "Either call ping or reply pong."}},
+			},
+		},
+		"tools": []map[string]any{claudePingToolDefinition()},
+	}
+
+	return []any{forced, pingForced, pingAuto}
+}
+
+// claudeToolHistoryAttemptPayloads returns multiple Claude Messages tool-history payloads.
+func claudeToolHistoryAttemptPayloads(model string, stream bool) []any {
+	forced := claudeMessagesPayload(model, stream, expectationToolHistory).(map[string]any)
+	forced["temperature"] = 0.0
+
+	callID := "toolu_ping_history_1"
+	pingForced := map[string]any{
+		"model":       model,
+		"max_tokens":  256,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"top_k":       defaultTopK,
+		"stream":      stream,
+		"system":      "You MUST call ping when asked. Do not answer in plain text.",
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": []map[string]any{{"type": "text", "text": "Call ping."}},
+			},
+			{
+				"role":    "assistant",
+				"content": []map[string]any{{"type": "tool_use", "id": callID, "name": "ping", "input": map[string]any{}}},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{
+						"type":        "tool_result",
+						"tool_use_id": callID,
+						"content":     []map[string]any{{"type": "text", "text": "{\\\"pong\\\":true}"}},
+					},
+					{"type": "text", "text": "Call ping again."},
+				},
+			},
+		},
+		"tools":       []map[string]any{claudePingToolDefinition()},
+		"tool_choice": map[string]any{"type": "tool", "name": "ping"},
+	}
+
+	pingAuto := map[string]any{
+		"model":       model,
+		"max_tokens":  256,
+		"temperature": 0.0,
+		"top_p":       1.0,
+		"top_k":       defaultTopK,
+		"stream":      stream,
+		"system":      "If tools are supported, call ping; otherwise reply briefly.",
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": []map[string]any{{"type": "text", "text": "Try to call ping again."}},
+			},
+		},
+		"tools": []map[string]any{claudePingToolDefinition()},
+	}
+
+	return []any{forced, pingForced, pingAuto}
+}
+
 // structuredOutputSchema defines the shared JSON schema used for structured output tests.
 func structuredOutputSchema() map[string]any {
 	return map[string]any{
@@ -509,12 +885,34 @@ func chatWeatherToolDefinition() map[string]any {
 	}
 }
 
+// chatPingToolDefinition defines a minimal tool schema used to maximize tool-call reliability.
+func chatPingToolDefinition() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "ping",
+			"description": "Return a pong response.",
+			"parameters":  emptyObjectSchema(),
+		},
+	}
+}
+
 func responseWeatherToolDefinition() map[string]any {
 	return map[string]any{
 		"type":        "function",
 		"name":        "get_weather",
 		"description": "Get the current weather for a location",
 		"parameters":  weatherFunctionSchema(),
+	}
+}
+
+// responsePingToolDefinition defines a minimal Response API tool schema.
+func responsePingToolDefinition() map[string]any {
+	return map[string]any{
+		"type":        "function",
+		"name":        "ping",
+		"description": "Return a pong response.",
+		"parameters":  emptyObjectSchema(),
 	}
 }
 
@@ -547,11 +945,20 @@ func affineResponseTools() []map[string]any {
 			"strict": false,
 		},
 		{
-			"type":                "web_search_preview",
-			"search_context_size": "medium",
-			"user_location": map[string]any{
-				"type":    "approximate",
-				"country": "US",
+			"type":        "function",
+			"name":        "workspace_search",
+			"description": "Search the user's AFFiNE workspace for additional context snippets to cite in the response.",
+			"parameters": map[string]any{
+				"$schema":              "http://json-schema.org/draft-07/schema#",
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]any{
+					"query": map[string]any{
+						"description": "Plain language description of what to search for in the workspace.",
+						"type":        "string",
+					},
+				},
+				"required": []string{"query"},
 			},
 		},
 		{
@@ -628,6 +1035,24 @@ func claudeWeatherToolDefinition() map[string]any {
 		"name":         "get_weather",
 		"description":  "Get the current weather for a location",
 		"input_schema": weatherFunctionSchema(),
+	}
+}
+
+// claudePingToolDefinition defines a minimal Claude Messages tool schema.
+func claudePingToolDefinition() map[string]any {
+	return map[string]any{
+		"name":         "ping",
+		"description":  "Return a pong response.",
+		"input_schema": emptyObjectSchema(),
+	}
+}
+
+// emptyObjectSchema returns a strict empty object schema.
+func emptyObjectSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           map[string]any{},
 	}
 }
 

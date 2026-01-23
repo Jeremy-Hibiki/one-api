@@ -62,15 +62,14 @@ func TestGetFullRequestURL(t *testing.T) {
 		},
 		{
 			name:        "other-type-base-with-v1-trailing-slash",
-			base:        "https://api.example.com/v1/",
+			base:        "https://oneapi.laisky.com/v1/",
 			path:        "/v1/embeddings",
-			expect:      "https://api.example.com/v1/embeddings",
+			expect:      "https://oneapi.laisky.com/v1/embeddings",
 			channelType: channeltype.OpenAI,
 		},
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.expect, GetFullRequestURL(tc.base, tc.path, tc.channelType))

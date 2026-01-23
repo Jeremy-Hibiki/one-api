@@ -27,6 +27,8 @@
     - [Pricing Hierarchy](#pricing-hierarchy)
     - [Pricing Constants](#pricing-constants)
     - [Model Pricing Structure](#model-pricing-structure)
+      - [Tier Resolution Engine](#tier-resolution-engine)
+      - [Multimedia Pricing Merge Path](#multimedia-pricing-merge-path)
     - [Global Pricing System](#global-pricing-system)
       - [Architecture](#architecture)
       - [Configuration](#configuration)
@@ -455,17 +457,48 @@ const (
 
 ```go
 type ModelConfig struct {
+    Ratio             float64              `json:"ratio"`
+    CompletionRatio   float64              `json:"completion_ratio,omitempty"`
+    CachedInputRatio  float64              `json:"cached_input_ratio,omitempty"`
+    CacheWrite5mRatio float64              `json:"cache_write_5m_ratio,omitempty"`
+    CacheWrite1hRatio float64              `json:"cache_write_1h_ratio,omitempty"`
+    Tiers             []ModelRatioTier     `json:"tiers,omitempty"`
+    MaxTokens         int32                `json:"max_tokens,omitempty"`
+    Video             *VideoPricingConfig  `json:"video,omitempty"`
+    Audio             *AudioPricingConfig  `json:"audio,omitempty"`
+    Image             *ImagePricingConfig  `json:"image,omitempty"`
+}
+
+type ModelRatioTier struct {
     Ratio             float64 `json:"ratio"`
     CompletionRatio   float64 `json:"completion_ratio,omitempty"`
-    // For image models: explicit USD price per generated image.
-    ImagePriceUsd     float64 `json:"image_price_usd,omitempty"`
-    // Cached reads (cache hit/refresh)
     CachedInputRatio  float64 `json:"cached_input_ratio,omitempty"`
-    // Cache writes (cache creation)
     CacheWrite5mRatio float64 `json:"cache_write_5m_ratio,omitempty"`
     CacheWrite1hRatio float64 `json:"cache_write_1h_ratio,omitempty"`
+    InputTokenThreshold int  `json:"input_token_threshold"`
 }
 ```
+
+- **Tiered pricing**: Adapters can attach sorted `tiers` to alter input, completion, and cache-write prices once a request crosses a token threshold. `pricing.ResolveEffectivePricing()` applies these tiers at runtime and records which threshold was selected for observability.
+- **Cache-aware pricing**: `CachedInputRatio`, `CacheWrite5mRatio`, and `CacheWrite1hRatio` let adapters express Anthropic-style prompt caching economics. Negative values mark a bucket as free; zero means “inherit the base ratio.”
+- **Max token policy**: `MaxTokens` carries per-model token ceilings so controllers can clamp `max_tokens` before dispatching upstream.
+- **Multimedia metadata**: `Video`, `Audio`, and `Image` pointers hold secondary pricing dimensions (per-second, per-minute, or per-image tables) alongside text token billing. These blobs travel through the three-layer resolver so channel overrides, adapter defaults, and global fallbacks stay consistent across media types.
+
+`VideoPricingConfig`, `AudioPricingConfig`, and `ImagePricingConfig` define the knobs administrators see in the UI: duration-based USD prices, prompt-to-token conversion ratios, render-based size/quality multipliers, and min/max batch sizes. Channel overrides merge on top of adapter defaults, and unresolved fields inherit from the previous layer to avoid surprises.
+
+#### Tier Resolution Engine
+
+- `pricing.ResolveEffectivePricing(modelName, inputTokens, adaptor)` collapses the base config plus tier overrides into an `EffectivePricing` struct before quotas are debited.
+- Tier thresholds are inclusive (>=) and the resolver tracks the winning threshold for observability and debugging.
+- Optional tier fields inherit from the previous layer unless explicitly overridden, so you only configure what changes at that scale break.
+- If no adapter pricing exists, the resolver falls back to adapter-provided defaults (`GetModelRatio()` / `GetCompletionRatio()`) and, failing that, the final USD-per-million default.
+
+#### Multimedia Pricing Merge Path
+
+- `pricing.GetVideoPricingWithThreeLayers()` mirrors the token pricing hierarchy for video metadata: channel override → adapter → global fallback.
+- Audio and image configs piggy-back on the same `cloneModelConfig()` pathway, so all multimedia pricing features stay in sync when global pricing is rebuilt.
+- Controllers read these merged configs to compute per-second and per-image quotas (e.g., `relay/controller/video.go`, `relay/controller/image.go`) while still charging prompt tokens through the tiered resolver.
+- `VideoPricingConfig.ResolutionMultipliers`, `AudioPricingConfig.PromptTokensPerSecond`, and `ImagePricingConfig.QualitySizeMultipliers` let adapters express tiered pricing for 720p vs 4K renders, streaming vs transcription seconds, and HD vs SD images without duplicating models; those multipliers remain editable at the channel layer.
 
 ### Global Pricing System
 
@@ -604,16 +637,16 @@ To prevent lost billing in early client disconnect scenarios, controllers now re
 
 Flow:
 
-1) After `DoRequest` succeeds, write a provisional `UserRequestCost` for the `request_id` using the estimated pre-consumed quota (prompt tokens + max output tokens × pricing), even if physical pre-consume is skipped for trusted users/tokens.
-2) If upstream responds with a non-success HTTP status, refund pre-consumed quota (if any) and set the provisional `UserRequestCost` to `0`.
-3) When usage arrives, compute the final quota using the detailed pricing formula and reconcile the record by overwriting the provisional value. Token/user/channel updates use the delta between pre- and post-consumption.
+1. After `DoRequest` succeeds, write a provisional `UserRequestCost` for the `request_id` using the estimated pre-consumed quota (prompt tokens + max output tokens × pricing), even if physical pre-consume is skipped for trusted users/tokens.
+2. If upstream responds with a non-success HTTP status, refund pre-consumed quota (if any) and set the provisional `UserRequestCost` to `0`.
+3. When usage arrives, compute the final quota using the detailed pricing formula and reconcile the record by overwriting the provisional value. Token/user/channel updates use the delta between pre- and post-consumption.
 
 Controllers:
 
 - Text/Chat (`relay/controller/text.go`)
 - Response API (`relay/controller/response.go`)
 - Claude Messages (`relay/controller/claude_messages.go`)
-- Images (`relay/controller/image.go`) — per-image pre-consume + usage override (e.g., `gpt-image-1`)
+- Images (`relay/controller/image.go`) — per-image pre-consume + usage override (e.g., `gpt-image-1` / `gpt-image-1-mini`)
 - Audio (`relay/controller/audio.go`)
 
 Helper:
@@ -676,26 +709,27 @@ quota = audio_duration_seconds * audio_tokens_per_second * model_ratio * group_r
 
 ### Universal Two-Step Image Billing (2025-08)
 
-The billing system now implements a universal, robust two-step billing process for all image-centric models (e.g., DALL·E 2/3, gpt-image-1):
+The billing system now implements a universal, robust two-step billing process for all image-centric models (e.g., DALL·E 2/3, GPT Image 1 family):
 
 **1. Pre-consume:**
 
-- Before sending the request, the system pre-consumes quota based on a fixed per-image price (`ImagePriceUsd`), multiplied by the appropriate size/quality tier and group ratio.
+- Before sending the request, the system pre-consumes quota based on a fixed per-image price (`image.price_per_image_usd`), multiplied by the appropriate size/quality tier and group ratio.
 - This ensures quota is reserved up front, even if usage data is missing later.
-- Example: For gpt-image-1, the base price for 1024x1024/low is $0.011; higher qualities and sizes use tier multipliers (see `ratio.ImageTierTables`).
+- For gpt-image-1, the base price for 1024x1024/low is $0.011; higher qualities and sizes use tier multipliers (see `ratio.ImageTierTables`).
+- gpt-image-1-mini uses the same tier table with a $0.005 base price for 1024x1024/low.
 
 **2. Post-consume (Reconciliation):**
 
 - After the request, if the provider returns detailed usage metrics (token buckets), the system recomputes the quota using the most accurate, token-based formula for that model.
 - For gpt-image-1, the formula is:
-
   - Input text tokens: $5 per 1M tokens
   - Cached input text tokens: $1.25 per 1M tokens
   - Input image tokens: $10 per 1M tokens
   - Cached input image tokens: $2.5 per 1M tokens
   - Output image tokens: $40 per 1M tokens
-  - Cached tokens are apportioned between text/image proportionally.
-  - The group ratio is applied as a final multiplier.
+- gpt-image-1-mini reuses the same bucket logic with prices of $2.00, $0.20, $2.50, $0.25, and $8.00 per 1M tokens respectively.
+- Cached tokens are apportioned between text/image proportionally.
+- The group ratio is applied as a final multiplier.
 
 - If usage data is missing or unreliable, the system falls back to the pre-consumed per-image price.
 
@@ -712,14 +746,14 @@ The billing system now implements a universal, robust two-step billing process f
 
 - All quota operations (pre-consume, post-consume, refund) are logged with clear context, and quota is always refunded if the request fails.
 
-**6. Example (gpt-image-1):**
+**6. Example (gpt-image-1 / gpt-image-1-mini):**
 
-- Pre-consume: For a 1024x1024/high image, pre-consume $0.167 × group ratio × quota-per-USD.
-- Post-consume: If usage is returned, recompute using the five-bucket formula above and override the pre-charge.
+- Pre-consume: For a 1024x1024/high image, pre-consume the respective tier price ($0.167 for gpt-image-1, $0.036 for gpt-image-1-mini) × group ratio × quota-per-USD.
+- Post-consume: If usage is returned, recompute using the matching five-bucket formula above and override the pre-charge.
 
 **7. Implementation References:**
 
-- Controller logic: `relay/controller/image.go` (see `RelayImageHelper`, `computeImageUsageQuota`, `computeGptImage1TokenQuota`)
+- Controller logic: `relay/controller/image.go` (see `RelayImageHelper`, `computeImageUsageQuota`, `computeGptImageTokenQuota`)
 - Pricing constants: `relay/adaptor/openai/constants.go`, `relay/billing/ratio/image.go`
 - Tier tables: `ratio.ImageTierTables`
 

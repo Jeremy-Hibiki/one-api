@@ -31,7 +31,9 @@ import (
 	metalib "github.com/songquanpeng/one-api/relay/meta"
 	relaymodel "github.com/songquanpeng/one-api/relay/model"
 	"github.com/songquanpeng/one-api/relay/pricing"
+	"github.com/songquanpeng/one-api/relay/relaymode"
 	"github.com/songquanpeng/one-api/relay/streaming"
+	"github.com/songquanpeng/one-api/relay/tooling"
 )
 
 func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
@@ -63,13 +65,33 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	systemPromptReset := setSystemPrompt(ctx, textRequest, meta.ForcedSystemPrompt)
 
 	// get channel-specific pricing if available
+	var channelRecord *model.Channel
 	var channelModelRatio map[string]float64
 	var channelCompletionRatio map[string]float64
 	if channelModel, ok := c.Get(ctxkey.ChannelModel); ok {
 		if channel, ok := channelModel.(*model.Channel); ok {
+			channelRecord = channel
 			// Get from unified ModelConfigs only (after migration)
 			channelModelRatio = channel.GetModelRatioFromConfigs()
 			channelCompletionRatio = channel.GetCompletionRatioFromConfigs()
+		}
+	}
+
+	requestAdaptor := relay.GetAdaptor(meta.APIType)
+	if requestAdaptor == nil {
+		return openai.ErrorWrapper(errors.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
+	}
+
+	registry, mcpToolNames, regErr := expandMCPBuiltinsInChatRequest(c, meta, channelRecord, requestAdaptor, textRequest)
+	if regErr != nil {
+		return openai.ErrorWrapper(regErr, "mcp_tool_registry_failed", http.StatusBadRequest)
+	}
+	if registry != nil {
+		textRequest.ToolChoice = normalizeChatToolChoiceForMCP(textRequest.ToolChoice, mcpToolNames)
+		if textRequest.Stream {
+			lg.Warn("mcp tool execution forces non-streaming response")
+			textRequest.Stream = false
+			meta.IsStream = false
 		}
 	}
 
@@ -80,6 +102,10 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
 
 	ratio := modelRatio * groupRatio
+	if err := tooling.ValidateChatBuiltinTools(c, textRequest, meta, channelRecord, requestAdaptor); err != nil {
+		return openai.ErrorWrapper(err, "tool_not_allowed", http.StatusBadRequest)
+	}
+
 	// pre-consume quota
 	promptTokens := getPromptTokens(gmw.Ctx(c), textRequest, meta.Mode)
 	meta.PromptTokens = promptTokens
@@ -111,11 +137,118 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		streaming.StoreTracker(c, tracker)
 	}
 
-	adaptor := relay.GetAdaptor(meta.APIType)
-	if adaptor == nil {
-		return openai.ErrorWrapper(errors.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
+	requestAdaptor.Init(meta)
+	if registry != nil {
+		response, usage, mcpSummary, incrementalCharged, execErr := executeChatMCPToolLoop(c, meta, textRequest, registry, preConsumedQuota)
+		if execErr != nil {
+			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+			return execErr
+		}
+		tooling.ApplyBuiltinToolCharges(c, &usage, meta, channelRecord, requestAdaptor)
+		if mcpSummary != nil && mcpSummary.summary != nil {
+			var existing *model.ToolUsageSummary
+			if raw, ok := c.Get(ctxkey.ToolInvocationSummary); ok {
+				if summary, ok := raw.(*model.ToolUsageSummary); ok {
+					existing = summary
+				}
+			}
+			merged := mergeToolUsageSummaries(existing, mcpSummary.summary)
+			c.Set(ctxkey.ToolInvocationSummary, merged)
+		}
+
+		c.JSON(http.StatusOK, response)
+
+		// refund pre-consumed quota immediately
+		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		if usage != nil {
+			userId := strconv.Itoa(meta.UserId)
+			username := c.GetString(ctxkey.Username)
+			if username == "" {
+				username = "unknown"
+			}
+			group := meta.Group
+			if group == "" {
+				group = "default"
+			}
+
+			apiFormat := c.GetString(ctxkey.APIFormat)
+			if apiFormat == "" {
+				apiFormat = "unknown"
+			}
+			apiType := relaymode.String(meta.Mode)
+			tokenId := strconv.Itoa(meta.TokenId)
+
+			metrics.GlobalRecorder.RecordRelayRequest(
+				meta.StartTime,
+				meta.ChannelId,
+				channeltype.IdToName(meta.ChannelType),
+				meta.ActualModelName,
+				userId,
+				group,
+				tokenId,
+				apiFormat,
+				apiType,
+				true,
+				usage.PromptTokens,
+				usage.CompletionTokens,
+				0,
+			)
+
+			userBalance := float64(c.GetInt64(ctxkey.UserQuota))
+			metrics.GlobalRecorder.RecordUserMetrics(
+				userId,
+				username,
+				group,
+				0,
+				usage.PromptTokens,
+				usage.CompletionTokens,
+				userBalance,
+			)
+
+			metrics.GlobalRecorder.RecordModelUsage(meta.ActualModelName, channeltype.IdToName(meta.ChannelType), time.Since(meta.StartTime))
+		}
+
+		quotaId := c.GetInt(ctxkey.Id)
+		requestId := c.GetString(ctxkey.RequestId)
+		graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(ctx context.Context) {
+			baseBillingTimeout := time.Duration(config.BillingTimeoutSec) * time.Second
+			billingTimeout := baseBillingTimeout
+
+			ctx, cancel := context.WithTimeout(gmw.BackgroundCtx(c), billingTimeout)
+			defer cancel()
+
+			done := make(chan bool, 1)
+			var quota int64
+
+			go func() {
+				quota = postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, groupRatio, systemPromptReset, channelCompletionRatio)
+				if requestId != "" {
+					if err := model.UpdateUserRequestCostQuotaByRequestID(quotaId, requestId, quota); err != nil {
+						lg.Error("update user request cost failed", zap.Error(err), zap.String("request_id", requestId))
+					}
+				}
+				done <- true
+			}()
+
+			select {
+			case <-done:
+			case <-ctx.Done():
+				if ctx.Err() == context.DeadlineExceeded && usage != nil {
+					estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
+					elapsedTime := time.Since(meta.StartTime)
+					lg.Error("CRITICAL BILLING TIMEOUT",
+						zap.String("model", textRequest.Model),
+						zap.String("requestId", requestId),
+						zap.Int("userId", meta.UserId),
+						zap.Int64("estimatedQuota", int64(estimatedQuota)),
+						zap.Duration("elapsedTime", elapsedTime))
+
+					metrics.GlobalRecorder.RecordBillingTimeout(meta.UserId, meta.ChannelId, textRequest.Model, estimatedQuota, elapsedTime)
+				}
+			}
+		})
+		return nil
 	}
-	adaptor.Init(meta)
 
 	// Downgrade structured JSON schema for providers that reject response_format
 	if requiresJSONSchemaDowngrade(meta, textRequest) {
@@ -124,7 +257,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 
 	// get request body
-	requestBody, err := getRequestBody(c, meta, textRequest, adaptor, systemPromptReset)
+	requestBody, err := getRequestBody(c, meta, textRequest, requestAdaptor, systemPromptReset)
 	if err != nil {
 		// Check if this is a validation error and preserve the correct HTTP status code
 		//
@@ -144,7 +277,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	requestBody = bytes.NewBuffer(requestBodyBytes)
 
 	// do request
-	resp, err := adaptor.DoRequest(c, meta, requestBody)
+	resp, err := requestAdaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
 		// ErrorWrapper will log the error, so we don't need to log it here
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
@@ -179,7 +312,8 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 
 	// do response
-	usage, respErr := adaptor.DoResponse(c, resp, meta)
+	c.Set(ctxkey.SkipAdaptorResponseBodyLog, true)
+	usage, respErr := requestAdaptor.DoResponse(c, resp, meta)
 	if upstreamCapture != nil {
 		logUpstreamResponseFromCapture(lg, resp, upstreamCapture, "chat_completions")
 	} else {
@@ -210,6 +344,8 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		}
 	}
 
+	tooling.ApplyBuiltinToolCharges(c, &usage, meta, channelRecord, requestAdaptor)
+
 	// post-consume quota
 	quotaId := c.GetInt(ctxkey.Id)
 	// refund pre-consumed quota immediately
@@ -227,12 +363,23 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		}
 
 		// Record relay request metrics with actual usage
+		apiFormat := c.GetString(ctxkey.APIFormat)
+		if apiFormat == "" {
+			apiFormat = "unknown"
+		}
+		apiType := relaymode.String(meta.Mode)
+		tokenId := strconv.Itoa(meta.TokenId)
+
 		metrics.GlobalRecorder.RecordRelayRequest(
 			meta.StartTime,
 			meta.ChannelId,
 			channeltype.IdToName(meta.ChannelType),
 			meta.ActualModelName,
 			userId,
+			group,
+			tokenId,
+			apiFormat,
+			apiType,
 			true,
 			usage.PromptTokens,
 			usage.CompletionTokens,

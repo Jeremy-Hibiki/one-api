@@ -10,6 +10,7 @@ import (
 
 	"github.com/Laisky/go-utils/v6/log"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 
 	"github.com/songquanpeng/one-api/relay/model"
 )
@@ -70,6 +71,7 @@ func createTestStreamResponseWithToolCalls(id string, toolArgs any) *ChatComplet
 
 // TestThinkingProcessor_ProcessThinkingContent tests the ThinkingProcessor functionality
 func TestThinkingProcessor_ProcessThinkingContent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name              string
 		input             string
@@ -189,6 +191,7 @@ func TestThinkingProcessor_ProcessThinkingContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			tp := &ThinkingProcessor{}
 			if tt.setupFunc != nil {
 				tt.setupFunc(tp)
@@ -196,31 +199,23 @@ func TestThinkingProcessor_ProcessThinkingContent(t *testing.T) {
 
 			content, reasoning, modified := tp.ProcessThinkingContent(tt.input)
 
-			if content != tt.expectedContent {
-				t.Errorf("Expected content %q, got %q", tt.expectedContent, content)
-			}
+			require.Equal(t, tt.expectedContent, content, "content mismatch")
 
 			if tt.expectedReasoning == nil {
-				if reasoning != nil {
-					t.Errorf("Expected nil reasoning, got %q", *reasoning)
-				}
+				require.Nil(t, reasoning, "expected nil reasoning")
 			} else {
-				if reasoning == nil {
-					t.Errorf("Expected reasoning %q, got nil", *tt.expectedReasoning)
-				} else if *reasoning != *tt.expectedReasoning {
-					t.Errorf("Expected reasoning %q, got %q", *tt.expectedReasoning, *reasoning)
-				}
+				require.NotNil(t, reasoning, "expected non-nil reasoning")
+				require.Equal(t, *tt.expectedReasoning, *reasoning, "reasoning mismatch")
 			}
 
-			if modified != tt.expectedModified {
-				t.Errorf("Expected modified %v, got %v", tt.expectedModified, modified)
-			}
+			require.Equal(t, tt.expectedModified, modified, "modified mismatch")
 		})
 	}
 }
 
 // TestStreamingContext_NewStreamingContext tests context initialization
 func TestStreamingContext_NewStreamingContext(t *testing.T) {
+	t.Parallel()
 	logger := createTestLogger()
 
 	tests := []struct {
@@ -242,47 +237,32 @@ func TestStreamingContext_NewStreamingContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := NewStreamingContext(logger, tt.enableThinking)
 
-			if ctx == nil {
-				t.Fatal("Expected non-nil context")
-			}
-
-			if ctx.logger != logger {
-				t.Error("Logger not properly set")
-			}
+			require.NotNil(t, ctx, "expected non-nil context")
+			require.Equal(t, logger, ctx.logger, "logger not properly set")
 
 			if tt.expectThinking {
-				if ctx.thinkingProcessor == nil {
-					t.Error("Expected thinking processor to be created")
-				}
+				require.NotNil(t, ctx.thinkingProcessor, "expected thinking processor to be created")
 			} else {
-				if ctx.thinkingProcessor != nil {
-					t.Error("Expected thinking processor to be nil")
-				}
+				require.Nil(t, ctx.thinkingProcessor, "expected thinking processor to be nil")
 			}
 
 			// Check buffer pre-allocation
-			if ctx.responseTextBuilder.Cap() == 0 {
-				t.Error("Expected responseTextBuilder to be pre-allocated")
-			}
-			if ctx.toolArgsTextBuilder.Cap() == 0 {
-				t.Error("Expected toolArgsTextBuilder to be pre-allocated")
-			}
+			require.NotZero(t, ctx.responseTextBuilder.Cap(), "expected responseTextBuilder to be pre-allocated")
+			require.NotZero(t, ctx.toolArgsTextBuilder.Cap(), "expected toolArgsTextBuilder to be pre-allocated")
 
 			// Verify initial state
-			if ctx.chunksProcessed != 0 {
-				t.Errorf("Expected chunksProcessed to be 0, got %d", ctx.chunksProcessed)
-			}
-			if ctx.doneRendered {
-				t.Error("Expected doneRendered to be false")
-			}
+			require.Zero(t, ctx.chunksProcessed, "expected chunksProcessed to be 0")
+			require.False(t, ctx.doneRendered, "expected doneRendered to be false")
 		})
 	}
 }
 
 // TestStreamingContext_ProcessStreamChunk tests chunk processing
 func TestStreamingContext_ProcessStreamChunk(t *testing.T) {
+	t.Parallel()
 	logger := createTestLogger()
 
 	tests := []struct {
@@ -329,6 +309,7 @@ func TestStreamingContext_ProcessStreamChunk(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := NewStreamingContext(logger, tt.enableThinking)
 			originalContent := ""
 			if len(tt.response.Choices) > 0 {
@@ -337,37 +318,30 @@ func TestStreamingContext_ProcessStreamChunk(t *testing.T) {
 
 			modified := ctx.ProcessStreamChunk(tt.response)
 
-			if modified != tt.expectModified {
-				t.Errorf("Expected modified %v, got %v", tt.expectModified, modified)
-			}
+			require.Equal(t, tt.expectModified, modified, "modified mismatch")
 
 			// Verify content accumulation
 			responseText := ctx.responseTextBuilder.String()
 			// Note: responseTextBuilder always contains original content (before thinking processing)
 			// The thinking processing modifies the response.Choices[].Delta.Content but not the builder
 			if originalContent != "" {
-				if !strings.Contains(responseText, originalContent) {
-					t.Error("Expected original content to be preserved in responseTextBuilder")
-				}
+				require.Contains(t, responseText, originalContent, "expected original content to be preserved in responseTextBuilder")
 			}
 
 			// Verify usage accumulation
 			if tt.response.Usage != nil {
-				if ctx.usage != tt.response.Usage {
-					t.Error("Expected usage to be accumulated")
-				}
+				require.Equal(t, tt.response.Usage, ctx.usage, "expected usage to be accumulated")
 			}
 
 			// Verify counter increment
-			if ctx.chunksProcessed != 1 {
-				t.Errorf("Expected chunksProcessed to be 1, got %d", ctx.chunksProcessed)
-			}
+			require.Equal(t, 1, ctx.chunksProcessed, "expected chunksProcessed to be 1")
 		})
 	}
 }
 
 // TestStreamingContext_ManageBufferCapacity tests buffer management
 func TestStreamingContext_ManageBufferCapacity(t *testing.T) {
+	t.Parallel()
 	logger := createTestLogger()
 	ctx := NewStreamingContext(logger, false)
 
@@ -388,12 +362,8 @@ func TestStreamingContext_ManageBufferCapacity(t *testing.T) {
 	ctx.ManageBufferCapacity()
 
 	// Verify content was preserved (this is the most important functional test)
-	if ctx.responseTextBuilder.String() != largeContent {
-		t.Error("Response content not preserved during capacity management")
-	}
-	if ctx.toolArgsTextBuilder.String() != largeContent {
-		t.Error("Tool args content not preserved during capacity management")
-	}
+	require.Equal(t, largeContent, ctx.responseTextBuilder.String(), "response content not preserved during capacity management")
+	require.Equal(t, largeContent, ctx.toolArgsTextBuilder.String(), "tool args content not preserved during capacity management")
 
 	// Check that ManageBufferCapacity method runs without panicking
 	// Additional management calls should be safe
@@ -401,16 +371,13 @@ func TestStreamingContext_ManageBufferCapacity(t *testing.T) {
 	ctx.ManageBufferCapacity()
 
 	// Verify content is still preserved after multiple management calls
-	if ctx.responseTextBuilder.String() != largeContent {
-		t.Error("Response content not preserved after multiple capacity management calls")
-	}
-	if ctx.toolArgsTextBuilder.String() != largeContent {
-		t.Error("Tool args content not preserved after multiple capacity management calls")
-	}
+	require.Equal(t, largeContent, ctx.responseTextBuilder.String(), "response content not preserved after multiple capacity management calls")
+	require.Equal(t, largeContent, ctx.toolArgsTextBuilder.String(), "tool args content not preserved after multiple capacity management calls")
 }
 
 // TestStreamingContext_CalculateUsage tests usage calculation
 func TestStreamingContext_CalculateUsage(t *testing.T) {
+	t.Parallel()
 	logger := createTestLogger()
 
 	tests := []struct {
@@ -482,6 +449,7 @@ func TestStreamingContext_CalculateUsage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := NewStreamingContext(logger, false)
 			if tt.setupFunc != nil {
 				tt.setupFunc(ctx)
@@ -489,25 +457,17 @@ func TestStreamingContext_CalculateUsage(t *testing.T) {
 
 			usage := ctx.CalculateUsage(tt.promptTokens, testModelName)
 
-			if usage == nil {
-				t.Fatal("Expected non-nil usage")
-			}
-
-			if usage.PromptTokens != tt.expectedPromptTokens {
-				t.Errorf("Expected prompt tokens %d, got %d", tt.expectedPromptTokens, usage.PromptTokens)
-			}
-			if usage.CompletionTokens != tt.expectedCompletionTokens {
-				t.Errorf("Expected completion tokens %d, got %d", tt.expectedCompletionTokens, usage.CompletionTokens)
-			}
-			if usage.TotalTokens != tt.expectedTotalTokens {
-				t.Errorf("Expected total tokens %d, got %d", tt.expectedTotalTokens, usage.TotalTokens)
-			}
+			require.NotNil(t, usage, "expected non-nil usage")
+			require.Equal(t, tt.expectedPromptTokens, usage.PromptTokens, "prompt tokens mismatch")
+			require.Equal(t, tt.expectedCompletionTokens, usage.CompletionTokens, "completion tokens mismatch")
+			require.Equal(t, tt.expectedTotalTokens, usage.TotalTokens, "total tokens mismatch")
 		})
 	}
 }
 
 // TestStreamingContext_ValidateStreamCompletion tests stream validation
 func TestStreamingContext_ValidateStreamCompletion(t *testing.T) {
+	t.Parallel()
 	logger := createTestLogger()
 
 	tests := []struct {
@@ -551,6 +511,7 @@ func TestStreamingContext_ValidateStreamCompletion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := NewStreamingContext(logger, false)
 			if tt.setupFunc != nil {
 				tt.setupFunc(ctx)
@@ -558,18 +519,12 @@ func TestStreamingContext_ValidateStreamCompletion(t *testing.T) {
 
 			err, valid := ctx.ValidateStreamCompletion(testModelName, testContentType)
 
-			if valid != tt.expectValid {
-				t.Errorf("Expected valid %v, got %v", tt.expectValid, valid)
-			}
+			require.Equal(t, tt.expectValid, valid, "valid mismatch")
 
 			if tt.expectError {
-				if err == nil {
-					t.Error("Expected error, got nil")
-				}
+				require.NotNil(t, err, "expected error, got nil")
 			} else {
-				if err != nil {
-					t.Errorf("Expected no error, got %v", err)
-				}
+				require.Nil(t, err, "expected no error")
 			}
 		})
 	}
@@ -577,6 +532,7 @@ func TestStreamingContext_ValidateStreamCompletion(t *testing.T) {
 
 // TestStreamingContext_Integration tests complete streaming workflow
 func TestStreamingContext_Integration(t *testing.T) {
+	t.Parallel()
 	logger := createTestLogger()
 	ctx := NewStreamingContext(logger, true) // Enable thinking
 
@@ -595,60 +551,40 @@ func TestStreamingContext_Integration(t *testing.T) {
 	// Process all chunks
 	for _, response := range responses {
 		modified := ctx.ProcessStreamChunk(response)
-		if !modified {
-			t.Error("Expected all chunks to be modified")
-		}
+		require.True(t, modified, "expected all chunks to be modified")
 	}
 
 	// Verify final state
-	if ctx.chunksProcessed != 4 {
-		t.Errorf("Expected 4 chunks processed, got %d", ctx.chunksProcessed)
-	}
+	require.Equal(t, 4, ctx.chunksProcessed, "expected 4 chunks processed")
 
 	// Calculate final usage
 	finalUsage := ctx.CalculateUsage(testPromptTokens, testModelName)
-	if finalUsage.PromptTokens != testPromptTokens {
-		t.Errorf("Expected prompt tokens %d, got %d", testPromptTokens, finalUsage.PromptTokens)
-	}
+	require.Equal(t, testPromptTokens, finalUsage.PromptTokens, "prompt tokens mismatch")
 
 	// Validate completion
 	err, valid := ctx.ValidateStreamCompletion(testModelName, testContentType)
-	if !valid {
-		t.Error("Expected valid completion")
-	}
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
+	require.True(t, valid, "expected valid completion")
+	require.Nil(t, err, "expected no error")
 
 	// Verify content accumulation in responseTextBuilder
 	// Note: responseTextBuilder contains original content before thinking processing
 	finalContent := ctx.responseTextBuilder.String()
-	if !strings.Contains(finalContent, "Hello") || !strings.Contains(finalContent, "world!") {
-		t.Error("Expected content to be preserved in responseTextBuilder")
-	}
+	require.Contains(t, finalContent, "Hello", "expected content to be preserved")
+	require.Contains(t, finalContent, "world!", "expected content to be preserved")
 	// The thinking tags remain in responseTextBuilder as it stores original content
 	// The actual thinking processing modifies the response.Choices[].Delta.Content fields
 }
 
 // TestBufferCapacityConstants tests the capacity constants
 func TestBufferCapacityConstants(t *testing.T) {
-	if DefaultBuilderCapacity != 4096 {
-		t.Errorf("Expected DefaultBuilderCapacity to be 4096, got %d", DefaultBuilderCapacity)
-	}
-	if LargeBuilderCapacity != 65536 {
-		t.Errorf("Expected LargeBuilderCapacity to be 65536, got %d", LargeBuilderCapacity)
-	}
-	if MaxBuilderCapacity != 1048576 {
-		t.Errorf("Expected MaxBuilderCapacity to be 1048576, got %d", MaxBuilderCapacity)
-	}
+	t.Parallel()
+	require.Equal(t, 4096, DefaultBuilderCapacity, "DefaultBuilderCapacity mismatch")
+	require.Equal(t, 65536, LargeBuilderCapacity, "LargeBuilderCapacity mismatch")
+	require.Equal(t, 1048576, MaxBuilderCapacity, "MaxBuilderCapacity mismatch")
 
 	// Verify logical ordering
-	if DefaultBuilderCapacity >= LargeBuilderCapacity {
-		t.Error("DefaultBuilderCapacity should be less than LargeBuilderCapacity")
-	}
-	if LargeBuilderCapacity >= MaxBuilderCapacity {
-		t.Error("LargeBuilderCapacity should be less than MaxBuilderCapacity")
-	}
+	require.Less(t, DefaultBuilderCapacity, LargeBuilderCapacity, "DefaultBuilderCapacity should be less than LargeBuilderCapacity")
+	require.Less(t, LargeBuilderCapacity, MaxBuilderCapacity, "LargeBuilderCapacity should be less than MaxBuilderCapacity")
 }
 
 // Helper function to create string pointer
@@ -659,6 +595,7 @@ func stringPtr(s string) *string {
 // TestUnifiedStreamProcessing_ThinkingMapping verifies that when thinking is enabled and reasoning_format
 // is set, the streamed chunks contain the reasoning in the requested field and avoid duplicates.
 func TestUnifiedStreamProcessing_ThinkingMapping(t *testing.T) {
+	t.Parallel()
 	// Prepare a gin test context with query params
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -688,9 +625,8 @@ func TestUnifiedStreamProcessing_ThinkingMapping(t *testing.T) {
 	}
 
 	// Run unified processing with thinking enabled
-	if err, _ := UnifiedStreamProcessing(c, resp, 0, testModelName, true); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	errResp, _ := UnifiedStreamProcessing(c, resp, 0, testModelName, true)
+	require.Nil(t, errResp, "unexpected error")
 
 	// Parse the first emitted chunk from the recorder
 	body := w.Body.String()
@@ -703,28 +639,19 @@ func TestUnifiedStreamProcessing_ThinkingMapping(t *testing.T) {
 			break
 		}
 	}
-	if jsonLine == "" {
-		t.Fatalf("no JSON chunk found in response body: %q", body)
-	}
+	require.NotEmpty(t, jsonLine, "no JSON chunk found in response body: %q", body)
 
 	var out ChatCompletionsStreamResponse
-	if err := json.Unmarshal([]byte(jsonLine), &out); err != nil {
-		t.Fatalf("failed to unmarshal emitted chunk: %v", err)
-	}
-	if len(out.Choices) == 0 {
-		t.Fatalf("no choices in emitted chunk: %v", out)
-	}
+	err := json.Unmarshal([]byte(jsonLine), &out)
+	require.NoError(t, err, "failed to unmarshal emitted chunk")
+	require.NotEmpty(t, out.Choices, "no choices in emitted chunk: %v", out)
+
 	got := out.Choices[0].Delta
 	// Expect content without think tags
-	if got.StringContent() != "hello  world" {
-		t.Fatalf("unexpected content: %q", got.StringContent())
-	}
+	require.Equal(t, "hello  world", got.StringContent(), "unexpected content")
 	// Expect thinking field to be set as per reasoning_format=thinking
-	if got.Thinking == nil || *got.Thinking != "abc" {
-		t.Fatalf("expected thinking=abc, got %#v", got.Thinking)
-	}
+	require.NotNil(t, got.Thinking, "expected thinking to be set")
+	require.Equal(t, "abc", *got.Thinking, "thinking content mismatch")
 	// And ReasoningContent should be cleared to avoid duplicates
-	if got.ReasoningContent != nil {
-		t.Fatalf("expected ReasoningContent to be nil when reasoning_format=thinking; got %#v", *got.ReasoningContent)
-	}
+	require.Nil(t, got.ReasoningContent, "expected ReasoningContent to be nil when reasoning_format=thinking")
 }

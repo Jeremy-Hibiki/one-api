@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/relay/channeltype"
@@ -90,6 +91,16 @@ func TestStructuredOutputCostCalculation(t *testing.T) {
 
 			// Create mock response
 			mockResponse := &SlimTextResponse{
+				Choices: []TextResponseChoice{
+					{
+						Index: 0,
+						Message: model.Message{
+							Role:    "assistant",
+							Content: "test",
+						},
+						FinishReason: "stop",
+					},
+				},
 				Usage: model.Usage{
 					PromptTokens:     100,
 					CompletionTokens: tt.completionTokens,
@@ -122,24 +133,14 @@ func TestStructuredOutputCostCalculation(t *testing.T) {
 			}
 
 			usage, err := adaptor.DoResponse(c, resp, meta)
-
-			if err != nil {
-				t.Fatalf("DoResponse failed: %v", err)
-			}
-
-			if usage == nil {
-				t.Fatal("Usage should not be nil")
-			}
+			require.Nil(t, err, "DoResponse failed")
+			require.NotNil(t, usage, "Usage should not be nil")
 
 			// Check completion tokens
-			if usage.CompletionTokens != tt.completionTokens {
-				t.Errorf("Expected completion tokens %d, got %d", tt.completionTokens, usage.CompletionTokens)
-			}
+			require.Equal(t, tt.completionTokens, usage.CompletionTokens, "completion tokens mismatch")
 
 			// No structured output surcharge should be applied
-			if usage.ToolsCost != tt.expectedToolsCost {
-				t.Errorf("Expected ToolsCost %d, got %d", tt.expectedToolsCost, usage.ToolsCost)
-			}
+			require.Equal(t, tt.expectedToolsCost, usage.ToolsCost, "ToolsCost mismatch")
 		})
 	}
 }
@@ -175,6 +176,16 @@ func TestStructuredOutputCostWithOriginalRequest(t *testing.T) {
 	// Create mock response
 	completionTokens := 500
 	mockResponse := &SlimTextResponse{
+		Choices: []TextResponseChoice{
+			{
+				Index: 0,
+				Message: model.Message{
+					Role:    "assistant",
+					Content: "test",
+				},
+				FinishReason: "stop",
+			},
+		},
 		Usage: model.Usage{
 			PromptTokens:     100,
 			CompletionTokens: completionTokens,
@@ -207,17 +218,9 @@ func TestStructuredOutputCostWithOriginalRequest(t *testing.T) {
 	}
 
 	usage, err := adaptor.DoResponse(c, resp, meta)
-
-	if err != nil {
-		t.Fatalf("DoResponse failed: %v", err)
-	}
-
-	if usage == nil {
-		t.Fatal("Usage should not be nil")
-	}
+	require.Nil(t, err, "DoResponse failed")
+	require.NotNil(t, usage, "Usage should not be nil")
 
 	// No structured output surcharge should be applied even when original request is used
-	if usage.ToolsCost != 0 {
-		t.Errorf("Expected no structured output cost from RequestModel context, but got %d", usage.ToolsCost)
-	}
+	require.Zero(t, usage.ToolsCost, "Expected no structured output cost from RequestModel context")
 }

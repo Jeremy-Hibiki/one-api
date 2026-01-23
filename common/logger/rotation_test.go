@@ -10,6 +10,7 @@ import (
 )
 
 func TestRotationWindowBoundaries(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		when     time.Time
@@ -41,7 +42,6 @@ func TestRotationWindowBoundaries(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			start, next := tc.interval.windowBounds(tc.when)
 			require.Equal(t, tc.start, start)
@@ -51,6 +51,7 @@ func TestRotationWindowBoundaries(t *testing.T) {
 }
 
 func TestRotationWriterDaily(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "app.log")
 
@@ -84,6 +85,7 @@ func TestRotationWriterDaily(t *testing.T) {
 }
 
 func TestRotationWriterRetention(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "app.log")
 

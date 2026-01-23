@@ -1,184 +1,300 @@
-import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { useForm, useWatch } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import * as z from 'zod'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { api } from '@/lib/api'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Info } from 'lucide-react'
-import { useNotifications } from '@/components/ui/notifications'
+import { ToolListEditor } from "@/components/mcp/ToolListEditor";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { useNotifications } from "@/components/ui/notifications";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { TimestampDisplay } from "@/components/ui/timestamp";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { api } from "@/lib/api";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Info } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useForm, useWatch } from "react-hook-form";
+import { useTranslation } from "react-i18next";
+import { useNavigate, useParams } from "react-router-dom";
+import * as z from "zod";
 
 // Helper function to render quota with USD conversion (USD only)
 const renderQuotaWithPrompt = (quota: number): string => {
-  const quotaPerUnitRaw = localStorage.getItem('quota_per_unit')
-  const quotaPerUnit = parseFloat(quotaPerUnitRaw || '500000')
-  const usd = Number.isFinite(quota) && quotaPerUnit > 0 ? quota / quotaPerUnit : NaN
-  const usdValue = Number.isFinite(usd) ? usd.toFixed(2) : '0.00'
-  console.log(`[QUOTA_DEBUG][User] renderQuotaWithPrompt quota=${String(quota)} ratioRaw=${String(quotaPerUnitRaw)} ratio=${String(quotaPerUnit)} usd=${String(usd)} usdValue=${usdValue}`)
-  return `$${usdValue}`
-}
+  const quotaPerUnitRaw = localStorage.getItem("quota_per_unit");
+  const quotaPerUnit = parseFloat(quotaPerUnitRaw || "500000");
+  const usd =
+    Number.isFinite(quota) && quotaPerUnit > 0 ? quota / quotaPerUnit : NaN;
+  const usdValue = Number.isFinite(usd) ? usd.toFixed(2) : "0.00";
+  console.log(
+    `[QUOTA_DEBUG][User] renderQuotaWithPrompt quota=${String(quota)} ratioRaw=${String(quotaPerUnitRaw)} ratio=${String(quotaPerUnit)} usd=${String(usd)} usdValue=${usdValue}`
+  );
+  return `$${usdValue}`;
+};
 
-const userSchema = z.object({
-  username: z.string().trim().min(3, 'Username must be at least 3 characters').max(30, 'Username must be at most 30 characters'),
-  display_name: z.string().trim().max(20, 'Display name must be at most 20 characters').optional(),
-  password: z.string().optional(),
-  email: z
-    .string()
-    .trim()
-    .max(50, 'Email must be at most 50 characters')
-    .refine((value) => value === '' || z.string().email().safeParse(value).success, { message: 'Valid email is required' })
-    .optional(),
-  // Coerce to number since HTML inputs provide string values
-  quota: z.coerce.number().min(0, 'Quota must be non-negative'),
-  group: z.string().min(1, 'Group is required'),
-})
-
-type UserForm = z.infer<typeof userSchema>
+type UserForm = {
+  username: string;
+  display_name?: string;
+  password?: string;
+  email?: string;
+  quota: number;
+  group: string;
+  mcp_tool_blacklist: string[];
+};
 
 interface Group {
-  key: string
-  text: string
-  value: string
+  key: string;
+  text: string;
+  value: string;
 }
 
 type UserSnapshot = {
-  username: string
-  display_name: string
-  email: string
-  quota: number
-  group: string
-}
+  username: string;
+  display_name: string;
+  email: string;
+  quota: number;
+  group: string;
+  mcp_tool_blacklist: string[];
+};
 
 const snapshotUserForm = (values: UserForm): UserSnapshot => ({
   username: values.username.trim(),
-  display_name: (values.display_name ?? '').trim(),
-  email: (values.email ?? '').trim(),
+  display_name: (values.display_name ?? "").trim(),
+  email: (values.email ?? "").trim(),
   quota: values.quota,
   group: values.group,
-})
+  mcp_tool_blacklist: values.mcp_tool_blacklist,
+});
 
 export function EditUserPage() {
-  const params = useParams()
-  const userId = params.id
-  const isEdit = userId !== undefined
-  const navigate = useNavigate()
+  const params = useParams();
+  const userId = params.id;
+  const isEdit = userId !== undefined;
+  const navigate = useNavigate();
+  const { t } = useTranslation();
+  const tr = useCallback(
+    (key: string, defaultValue: string, options?: Record<string, unknown>) =>
+      t(`users.edit.${key}`, { defaultValue, ...options }),
+    [t]
+  );
 
-  const [loading, setLoading] = useState(isEdit)
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [groupOptions, setGroupOptions] = useState<Group[]>([])
-  const [initialSnapshot, setInitialSnapshot] = useState<UserSnapshot | null>(null)
-  const { notify } = useNotifications()
+  const [loading, setLoading] = useState(isEdit);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [groupOptions, setGroupOptions] = useState<Group[]>([]);
+  const [initialSnapshot, setInitialSnapshot] = useState<UserSnapshot | null>(
+    null
+  );
+  const [createdAt, setCreatedAt] = useState<number | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const { notify } = useNotifications();
+
+  const userSchema = useMemo(
+    () =>
+      z.object({
+        username: z
+          .string()
+          .trim()
+          .min(
+            3,
+            tr(
+              "validation.username_min",
+              "Username must be at least 3 characters"
+            )
+          )
+          .max(
+            30,
+            tr(
+              "validation.username_max",
+              "Username must be at most 30 characters"
+            )
+          ),
+        display_name: z
+          .string()
+          .trim()
+          .max(
+            20,
+            tr(
+              "validation.display_name_max",
+              "Display name must be at most 20 characters"
+            )
+          )
+          .optional(),
+        password: z.string().optional(),
+        email: z
+          .string()
+          .trim()
+          .max(
+            50,
+            tr("validation.email_max", "Email must be at most 50 characters")
+          )
+          .refine(
+            (value) =>
+              value === "" || z.string().email().safeParse(value).success,
+            {
+              message: tr(
+                "validation.email_invalid",
+                "Valid email is required"
+              ),
+            }
+          )
+          .optional(),
+        quota: z.coerce
+          .number()
+          .min(0, tr("validation.quota_min", "Quota must be non-negative")),
+        group: z
+          .string()
+          .min(1, tr("validation.group_required", "Group is required")),
+        mcp_tool_blacklist: z.array(z.string()).optional().default([]),
+      }),
+    [tr]
+  );
 
   const form = useForm<UserForm>({
     resolver: zodResolver(userSchema),
     defaultValues: {
-      username: '',
-      display_name: '',
-      password: '',
-      email: '',
+      username: "",
+      display_name: "",
+      password: "",
+      email: "",
       quota: 0,
-      group: 'default',
+      group: "default",
+      mcp_tool_blacklist: [],
     },
-  })
+  });
 
-  const watchQuota = useWatch({ control: form.control, name: 'quota' })
+  const watchQuota = useWatch({ control: form.control, name: "quota" });
   useEffect(() => {
-    console.log(`[QUOTA_DEBUG][User] watchQuota=${String(watchQuota)} type=${typeof watchQuota}`)
-  }, [watchQuota])
+    console.log(
+      `[QUOTA_DEBUG][User] watchQuota=${String(watchQuota)} type=${typeof watchQuota}`
+    );
+  }, [watchQuota]);
 
   const loadUser = async () => {
-    if (!userId) return
+    if (!userId) return;
 
     try {
       // Unified API call - complete URL with /api prefix
-      const response = await api.get(`/api/user/${userId}`)
-      const { success, message, data } = response.data
+      const response = await api.get(`/api/user/${userId}`);
+      const { success, message, data } = response.data;
 
       if (success && data) {
         const normalized: UserForm = {
-          username: (data.username ?? '') as string,
-          display_name: (data.display_name ?? '') as string,
-          password: '',
-          email: (data.email ?? '') as string,
+          username: (data.username ?? "") as string,
+          display_name: (data.display_name ?? "") as string,
+          password: "",
+          email: (data.email ?? "") as string,
           quota: Number(data.quota ?? 0),
-          group: (data.group ?? 'default') as string,
+          group: (data.group ?? "default") as string,
+          mcp_tool_blacklist: Array.isArray(data.mcp_tool_blacklist)
+            ? data.mcp_tool_blacklist
+            : [],
+        };
+        form.reset(normalized);
+        setInitialSnapshot(snapshotUserForm(normalized));
+        // Capture timestamps for display
+        if (typeof data.created_at === "number") {
+          setCreatedAt(data.created_at);
         }
-        form.reset(normalized)
-        setInitialSnapshot(snapshotUserForm(normalized))
+        if (typeof data.updated_at === "number") {
+          setUpdatedAt(data.updated_at);
+        }
       } else {
-        throw new Error(message || 'Failed to load user')
+        throw new Error(message || "Failed to load user");
       }
     } catch (error) {
-      console.error('Error loading user:', error)
+      console.error("Error loading user:", error);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
   const loadGroups = async () => {
     try {
       // Unified API call - complete URL with /api prefix
-      const response = await api.get('/api/group/')
-      const { success, data } = response.data
+      const response = await api.get("/api/group/");
+      const { success, data } = response.data;
 
       if (success && data) {
         const options = data.map((group: string) => ({
           key: group,
           text: group,
           value: group,
-        }))
-        setGroupOptions(options)
+        }));
+        setGroupOptions(options);
       }
     } catch (error) {
-      console.error('Error loading groups:', error)
+      console.error("Error loading groups:", error);
     }
-  }
+  };
 
   useEffect(() => {
     if (isEdit) {
-      loadUser()
+      loadUser();
     } else {
-      setLoading(false)
-      setInitialSnapshot(null)
+      setLoading(false);
+      setInitialSnapshot(null);
     }
-    loadGroups()
-  }, [isEdit, userId])
+    loadGroups();
+  }, [isEdit, userId]);
 
   const onSubmit = async (data: UserForm) => {
-    setIsSubmitting(true)
+    setIsSubmitting(true);
     try {
-      const snapshot = snapshotUserForm(data)
-      let response: any
+      const snapshot = snapshotUserForm(data);
+      let response: any;
 
       if (isEdit && userId) {
-        const payload: Record<string, any> = { id: parseInt(userId, 10) }
-        const previous = initialSnapshot
+        const payload: Record<string, any> = { id: parseInt(userId, 10) };
+        const previous = initialSnapshot;
 
         if (!previous || snapshot.username !== previous.username) {
-          payload.username = snapshot.username
+          payload.username = snapshot.username;
         }
         if (!previous || snapshot.display_name !== previous.display_name) {
-          payload.display_name = snapshot.display_name
+          payload.display_name = snapshot.display_name;
         }
         if (!previous || snapshot.email !== previous.email) {
-          payload.email = snapshot.email
+          payload.email = snapshot.email;
         }
         if (!previous || snapshot.quota !== previous.quota) {
-          payload.quota = snapshot.quota
+          payload.quota = snapshot.quota;
         }
         if (!previous || snapshot.group !== previous.group) {
-          payload.group = snapshot.group
+          payload.group = snapshot.group;
+        }
+        if (
+          !previous ||
+          JSON.stringify(snapshot.mcp_tool_blacklist) !==
+            JSON.stringify(previous.mcp_tool_blacklist)
+        ) {
+          payload.mcp_tool_blacklist = snapshot.mcp_tool_blacklist;
         }
         if (data.password) {
-          payload.password = data.password
+          payload.password = data.password;
         }
 
-        response = await api.put('/api/user/', payload)
+        response = await api.put("/api/user/", payload);
       } else {
         const payload: Record<string, any> = {
           username: snapshot.username,
@@ -186,50 +302,80 @@ export function EditUserPage() {
           email: snapshot.email,
           quota: snapshot.quota,
           group: snapshot.group,
-        }
+          mcp_tool_blacklist: snapshot.mcp_tool_blacklist,
+        };
         if (data.password) {
-          payload.password = data.password
+          payload.password = data.password;
         }
 
-        response = await api.post('/api/user/', payload)
+        response = await api.post("/api/user/", payload);
       }
 
-      const { success, message } = response.data
+      const { success, message } = response.data;
       if (success) {
-        navigate('/users', {
+        navigate("/users", {
           state: {
-            message: isEdit ? 'User updated successfully' : 'User created successfully'
-          }
-        })
+            message: isEdit
+              ? tr("notifications.update_success", "User updated successfully")
+              : tr("notifications.create_success", "User created successfully"),
+          },
+        });
       } else {
-        form.setError('root', { message: message || 'Operation failed' })
-        notify({ type: 'error', title: 'Request failed', message: message || 'Operation failed' })
+        const fallback = tr("errors.operation_failed", "Operation failed");
+        form.setError("root", { message: message || fallback });
+        notify({
+          type: "error",
+          title: tr("errors.request_failed_title", "Request failed"),
+          message: message || fallback,
+        });
       }
     } catch (error) {
-      form.setError('root', {
-        message: error instanceof Error ? error.message : 'Operation failed'
-      })
-      notify({ type: 'error', title: 'Unexpected error', message: error instanceof Error ? error.message : 'Operation failed' })
+      form.setError("root", {
+        message:
+          error instanceof Error
+            ? error.message
+            : tr("errors.operation_failed", "Operation failed"),
+      });
+      notify({
+        type: "error",
+        title: tr("errors.unexpected_title", "Unexpected error"),
+        message:
+          error instanceof Error
+            ? error.message
+            : tr("errors.operation_failed", "Operation failed"),
+      });
     } finally {
-      setIsSubmitting(false)
+      setIsSubmitting(false);
     }
-  }
+  };
 
   // RHF invalid handler: toast + focus first invalid field
   const onInvalid = (errors: any) => {
-    const firstKey = Object.keys(errors)[0]
-    const firstMsg = errors[firstKey]?.message || 'Please correct the highlighted fields.'
-    notify({ type: 'error', title: 'Validation error', message: String(firstMsg) })
-    const el = document.querySelector(`[name="${firstKey}"]`) as HTMLElement | null
+    const firstKey = Object.keys(errors)[0];
+    const fallbackMessage = tr(
+      "validation.fix_fields",
+      "Please correct the highlighted fields."
+    );
+    const firstMsg = errors[firstKey]?.message || fallbackMessage;
+    notify({
+      type: "error",
+      title: tr("validation.error_title", "Validation error"),
+      message: String(firstMsg || fallbackMessage),
+    });
+    const el = document.querySelector(
+      `[name="${firstKey}"]`
+    ) as HTMLElement | null;
     if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        ; (el as any).focus?.()
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      (el as any).focus?.();
     }
-  }
+  };
 
   // Error highlighting helpers
-  const hasError = (path: string): boolean => !!(form.formState.errors as any)?.[path]
-  const errorClass = (path: string) => (hasError(path) ? 'border-destructive focus-visible:ring-destructive' : '')
+  const hasError = (path: string): boolean =>
+    !!(form.formState.errors as any)?.[path];
+  const errorClass = (path: string) =>
+    hasError(path) ? "border-destructive focus-visible:ring-destructive" : "";
 
   if (loading) {
     return (
@@ -237,11 +383,11 @@ export function EditUserPage() {
         <Card>
           <CardContent className="flex items-center justify-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            <span className="ml-3">Loading user...</span>
+            <span className="ml-3">{tr("loading", "Loading user...")}</span>
           </CardContent>
         </Card>
       </div>
-    )
+    );
   }
 
   return (
@@ -249,32 +395,23 @@ export function EditUserPage() {
       <TooltipProvider>
         <Card>
           <CardHeader>
-            <CardTitle>{isEdit ? 'Edit User' : 'Create User'}</CardTitle>
+            <CardTitle>
+              {isEdit
+                ? tr("title.edit", "Edit User")
+                : tr("title.create", "Create User")}
+            </CardTitle>
             <CardDescription>
-              {isEdit ? 'Update user information' : 'Create a new user account'}
+              {isEdit
+                ? tr("description.edit", "Update user information")
+                : tr("description.create", "Create a new user account")}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <Form {...form}>
-              <form onSubmit={form.handleSubmit(onSubmit, onInvalid)} className="space-y-6">
-                {/* helper for label + tooltip */}
-                {(() => {
-                  // small inline helper component
-                  const LabelWithHelp = ({ label, help }: { label: string; help: string }) => (
-                    <div className="flex items-center gap-1">
-                      <span className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
-                        {label}
-                      </span>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label={`Help: ${label}`} />
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-xs whitespace-pre-line">{help}</TooltipContent>
-                      </Tooltip>
-                    </div>
-                  )
-                  return null
-                })()}
+              <form
+                onSubmit={form.handleSubmit(onSubmit, onInvalid)}
+                className="space-y-6"
+              >
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <FormField
                     control={form.control}
@@ -282,16 +419,36 @@ export function EditUserPage() {
                     render={({ field }) => (
                       <FormItem>
                         <div className="flex items-center gap-1">
-                          <FormLabel>Username *</FormLabel>
+                          <FormLabel>
+                            {tr("fields.username.label", "Username *")}
+                          </FormLabel>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label="Help: Username" />
+                              <Info
+                                className="h-4 w-4 text-muted-foreground cursor-help"
+                                aria-label={tr(
+                                  "aria.help_username",
+                                  "Help: Username"
+                                )}
+                              />
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">Unique login name. Min 3 characters.</TooltipContent>
+                            <TooltipContent className="max-w-xs">
+                              {tr(
+                                "fields.username.help",
+                                "Unique login name. Min 3 characters."
+                              )}
+                            </TooltipContent>
                           </Tooltip>
                         </div>
                         <FormControl>
-                          <Input placeholder="Enter username" className={errorClass('username')} {...field} />
+                          <Input
+                            placeholder={tr(
+                              "fields.username.placeholder",
+                              "Enter username"
+                            )}
+                            className={errorClass("username")}
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -304,22 +461,69 @@ export function EditUserPage() {
                     render={({ field }) => (
                       <FormItem>
                         <div className="flex items-center gap-1">
-                          <FormLabel>Display Name</FormLabel>
+                          <FormLabel>
+                            {tr("fields.display_name.label", "Display Name")}
+                          </FormLabel>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label="Help: Display Name" />
+                              <Info
+                                className="h-4 w-4 text-muted-foreground cursor-help"
+                                aria-label={tr(
+                                  "aria.help_display_name",
+                                  "Help: Display Name"
+                                )}
+                              />
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">Optional human‑readable name shown in the UI.</TooltipContent>
+                            <TooltipContent className="max-w-xs">
+                              {tr(
+                                "fields.display_name.help",
+                                "Optional human-readable name shown in the UI."
+                              )}
+                            </TooltipContent>
                           </Tooltip>
                         </div>
                         <FormControl>
-                          <Input placeholder="Enter display name" className={errorClass('display_name')} {...field} />
+                          <Input
+                            placeholder={tr(
+                              "fields.display_name.placeholder",
+                              "Enter display name"
+                            )}
+                            className={errorClass("display_name")}
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
                     )}
                   />
                 </div>
+
+                <FormField
+                  control={form.control}
+                  name="mcp_tool_blacklist"
+                  render={({ field }) => (
+                    <FormItem>
+                      <ToolListEditor
+                        label={tr(
+                          "fields.mcp_tool_blacklist.label",
+                          "MCP tool blacklist"
+                        )}
+                        description={tr(
+                          "fields.mcp_tool_blacklist.help",
+                          "Block MCP tools for this user. Use server.tool or tool name."
+                        )}
+                        value={Array.isArray(field.value) ? field.value : []}
+                        onChange={field.onChange}
+                        placeholder={tr(
+                          "fields.mcp_tool_blacklist.placeholder",
+                          "server.tool_name"
+                        )}
+                        addLabel={tr("actions.add", "Add")}
+                      />
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <FormField
@@ -328,16 +532,37 @@ export function EditUserPage() {
                     render={({ field }) => (
                       <FormItem>
                         <div className="flex items-center gap-1">
-                          <FormLabel>Email</FormLabel>
+                          <FormLabel>
+                            {tr("fields.email.label", "Email")}
+                          </FormLabel>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label="Help: Email" />
+                              <Info
+                                className="h-4 w-4 text-muted-foreground cursor-help"
+                                aria-label={tr(
+                                  "aria.help_email",
+                                  "Help: Email"
+                                )}
+                              />
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">Optional contact address for password reset and notifications.</TooltipContent>
+                            <TooltipContent className="max-w-xs">
+                              {tr(
+                                "fields.email.help",
+                                "Optional contact address for password reset and notifications."
+                              )}
+                            </TooltipContent>
                           </Tooltip>
                         </div>
                         <FormControl>
-                          <Input type="email" placeholder="Enter email" className={errorClass('email')} {...field} />
+                          <Input
+                            type="email"
+                            placeholder={tr(
+                              "fields.email.placeholder",
+                              "Enter email"
+                            )}
+                            className={errorClass("email")}
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -350,16 +575,45 @@ export function EditUserPage() {
                     render={({ field }) => (
                       <FormItem>
                         <div className="flex items-center gap-1">
-                          <FormLabel>{isEdit ? 'New Password (leave empty to keep current)' : 'Password *'}</FormLabel>
+                          <FormLabel>
+                            {isEdit
+                              ? tr(
+                                  "fields.password.label_edit",
+                                  "New Password (leave empty to keep current)"
+                                )
+                              : tr(
+                                  "fields.password.label_create",
+                                  "Password *"
+                                )}
+                          </FormLabel>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label="Help: Password" />
+                              <Info
+                                className="h-4 w-4 text-muted-foreground cursor-help"
+                                aria-label={tr(
+                                  "aria.help_password",
+                                  "Help: Password"
+                                )}
+                              />
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">Minimum length depends on policy. Leave empty when editing to keep unchanged.</TooltipContent>
+                            <TooltipContent className="max-w-xs">
+                              {tr(
+                                "fields.password.help",
+                                "Minimum length depends on policy. Leave empty when editing to keep unchanged."
+                              )}
+                            </TooltipContent>
                           </Tooltip>
                         </div>
                         <FormControl>
-                          <Input type="password" placeholder="Enter password" className={errorClass('password')} {...field} />
+                          <Input
+                            type="password"
+                            placeholder={tr(
+                              "fields.password.placeholder",
+                              "Enter password"
+                            )}
+                            className={errorClass("password")}
+                            {...field}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -376,28 +630,48 @@ export function EditUserPage() {
                         <div className="flex items-center gap-1">
                           <FormLabel>
                             {(() => {
-                              const current = watchQuota ?? field.value ?? 0
-                              const numeric = Number(current)
-                              const usdLabel = Number.isFinite(numeric) && numeric >= 0 ? renderQuotaWithPrompt(numeric) : '$0.00'
-                              return `Quota (${usdLabel})`
+                              const current = watchQuota ?? field.value ?? 0;
+                              const numeric = Number(current);
+                              const usdLabel =
+                                Number.isFinite(numeric) && numeric >= 0
+                                  ? renderQuotaWithPrompt(numeric)
+                                  : "$0.00";
+                              return tr(
+                                "fields.quota.label",
+                                "Quota ({{usd}})",
+                                { usd: usdLabel }
+                              );
                             })()}
                           </FormLabel>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label="Help: Quota" />
+                              <Info
+                                className="h-4 w-4 text-muted-foreground cursor-help"
+                                aria-label={tr(
+                                  "aria.help_quota",
+                                  "Help: Quota"
+                                )}
+                              />
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">Quota units are tokens. USD estimate uses the per‑unit ratio configured by admin.</TooltipContent>
+                            <TooltipContent className="max-w-xs">
+                              {tr(
+                                "fields.quota.help",
+                                "Quota units are tokens. USD estimate uses the per-unit ratio configured by admin."
+                              )}
+                            </TooltipContent>
                           </Tooltip>
                         </div>
                         <FormControl>
                           <Input
                             type="number"
                             min="0"
-                            className={errorClass('quota')}
+                            className={errorClass("quota")}
                             {...field}
                             onChange={(e) => {
-                              console.log(`[QUOTA_DEBUG][User] onChange value=${String(e.target.value)}`)
-                              field.onChange(e)
+                              console.log(
+                                `[QUOTA_DEBUG][User] onChange value=${String(e.target.value)}`
+                              );
+                              field.onChange(e);
                             }}
                           />
                         </FormControl>
@@ -412,18 +686,39 @@ export function EditUserPage() {
                     render={({ field }) => (
                       <FormItem>
                         <div className="flex items-center gap-1">
-                          <FormLabel>Group *</FormLabel>
+                          <FormLabel>
+                            {tr("fields.group.label", "Group *")}
+                          </FormLabel>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Info className="h-4 w-4 text-muted-foreground cursor-help" aria-label="Help: Group" />
+                              <Info
+                                className="h-4 w-4 text-muted-foreground cursor-help"
+                                aria-label={tr(
+                                  "aria.help_group",
+                                  "Help: Group"
+                                )}
+                              />
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-xs">User group controls access and model/channel visibility.</TooltipContent>
+                            <TooltipContent className="max-w-xs">
+                              {tr(
+                                "fields.group.help",
+                                "User group controls access and model/channel visibility."
+                              )}
+                            </TooltipContent>
                           </Tooltip>
                         </div>
-                        <Select onValueChange={field.onChange} value={field.value}>
+                        <Select
+                          onValueChange={field.onChange}
+                          value={field.value}
+                        >
                           <FormControl>
-                            <SelectTrigger className={errorClass('group')}>
-                              <SelectValue placeholder="Select a group" />
+                            <SelectTrigger className={errorClass("group")}>
+                              <SelectValue
+                                placeholder={tr(
+                                  "fields.group.placeholder",
+                                  "Select a group"
+                                )}
+                              />
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
@@ -440,6 +735,40 @@ export function EditUserPage() {
                   />
                 </div>
 
+                {/* Display timestamps for edit mode (read-only) */}
+                {isEdit && (createdAt || updatedAt) && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2 border-t">
+                    {createdAt && createdAt > 0 && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-muted-foreground">
+                          {tr("fields.created_at.label", "Register Time")}
+                        </label>
+                        <div className="p-2 bg-muted rounded-md">
+                          <TimestampDisplay
+                            timestamp={Math.floor(createdAt / 1000)}
+                            className="text-sm"
+                            fallback="-"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {updatedAt && updatedAt > 0 && (
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium text-muted-foreground">
+                          {tr("fields.updated_at.label", "Last Modified")}
+                        </label>
+                        <div className="p-2 bg-muted rounded-md">
+                          <TimestampDisplay
+                            timestamp={Math.floor(updatedAt / 1000)}
+                            className="text-sm"
+                            fallback="-"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {form.formState.errors.root && (
                   <div className="text-sm text-destructive">
                     {form.formState.errors.root.message}
@@ -449,16 +778,19 @@ export function EditUserPage() {
                 <div className="flex gap-2">
                   <Button type="submit" disabled={isSubmitting}>
                     {isSubmitting
-                      ? (isEdit ? 'Updating...' : 'Creating...')
-                      : (isEdit ? 'Update User' : 'Create User')
-                    }
+                      ? isEdit
+                        ? tr("actions.updating", "Updating...")
+                        : tr("actions.creating", "Creating...")
+                      : isEdit
+                        ? tr("actions.update", "Update User")
+                        : tr("actions.create", "Create User")}
                   </Button>
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => navigate('/users')}
+                    onClick={() => navigate("/users")}
                   >
-                    Cancel
+                    {tr("actions.cancel", "Cancel")}
                   </Button>
                 </div>
               </form>
@@ -467,7 +799,7 @@ export function EditUserPage() {
         </Card>
       </TooltipProvider>
     </div>
-  )
+  );
 }
 
-export default EditUserPage
+export default EditUserPage;

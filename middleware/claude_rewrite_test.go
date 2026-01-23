@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 )
 
 func setupTestEngine() *gin.Engine {
@@ -18,6 +19,7 @@ func setupTestEngine() *gin.Engine {
 }
 
 func TestRewriteClaudeMessagesPrefix(t *testing.T) {
+	t.Parallel()
 	engine := setupTestEngine()
 	engine.Use(RewriteClaudeMessagesPrefix("/v1/v1/messages", engine))
 	engine.Use(RewriteClaudeMessagesPrefix("/openai/v1/messages", engine))
@@ -35,16 +37,13 @@ func TestRewriteClaudeMessagesPrefix(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		w := httptest.NewRecorder()
 		engine.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 for %s, got %d", path, w.Code)
-		}
-		if body := w.Body.String(); body != "ok" {
-			t.Fatalf("expected body 'ok' for %s, got %q", path, body)
-		}
+		require.Equal(t, http.StatusOK, w.Code, "expected 200 for %s", path)
+		require.Equal(t, "ok", w.Body.String(), "expected body 'ok' for %s", path)
 	}
 }
 
 func TestRewriteNonMatchingPassThrough(t *testing.T) {
+	t.Parallel()
 	engine := setupTestEngine()
 	engine.Use(RewriteClaudeMessagesPrefix("/v1/v1/messages", engine))
 	// Register an unrelated route to ensure pass-through works
@@ -53,10 +52,6 @@ func TestRewriteNonMatchingPassThrough(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
 	engine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	if body := w.Body.String(); body != "healthy" {
-		t.Fatalf("unexpected body: %q", body)
-	}
+	require.Equal(t, http.StatusOK, w.Code, "expected 200")
+	require.Equal(t, "healthy", w.Body.String(), "unexpected body")
 }

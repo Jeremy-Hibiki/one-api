@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -67,7 +68,7 @@ func renderReport(rep report) {
 	}
 
 	fmt.Println()
-	fmt.Println("=== One-API Compatibility Matrix ===")
+	fmt.Printf("=== One-API Compatibility Matrix %s ===\n", time.Now().Format(time.RFC3339))
 	fmt.Println()
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -99,18 +100,26 @@ func renderReport(rep report) {
 	)
 
 	failures, skips := gatherOutcomes(rep)
+	warnings := gatherWarnings(rep)
 	if len(failures) > 0 {
 		fmt.Println()
 		fmt.Println("Failures:")
 		for _, res := range failures {
-			fmt.Printf("- %s · %s → %s\n", res.Model, res.Label, shorten(res.ErrorReason, 200))
+			fmt.Printf("- %s - %s -> %s\n", res.Model, res.Label, shorten(res.ErrorReason, 200))
+		}
+	}
+	if len(warnings) > 0 {
+		fmt.Println()
+		fmt.Println("Warnings (passed with caveats):")
+		for _, res := range warnings {
+			fmt.Printf("- %s - %s -> %s\n", res.Model, res.Label, shorten(res.Warning, 200))
 		}
 	}
 	if len(skips) > 0 {
 		fmt.Println()
 		fmt.Println("Skipped (unsupported combinations):")
 		for _, res := range skips {
-			fmt.Printf("- %s · %s → %s\n", res.Model, res.Label, shorten(res.ErrorReason, 200))
+			fmt.Printf("- %s - %s -> %s\n", res.Model, res.Label, shorten(res.ErrorReason, 200))
 		}
 	}
 
@@ -125,6 +134,9 @@ func formatMatrixCell(res testResult) string {
 	duration := res.Duration.Truncate(10 * time.Millisecond)
 	switch {
 	case res.Success:
+		if strings.TrimSpace(res.Warning) != "" {
+			return fmt.Sprintf("PASS* %.2fs", duration.Seconds())
+		}
 		return fmt.Sprintf("PASS %.2fs", duration.Seconds())
 	case res.Skipped:
 		reason := res.ErrorReason
@@ -139,6 +151,24 @@ func formatMatrixCell(res testResult) string {
 		}
 		return fmt.Sprintf("FAIL %s", shorten(reason, 32))
 	}
+}
+
+// gatherWarnings collects results that passed but carry warning messages.
+func gatherWarnings(rep report) []testResult {
+	var warnings []testResult
+	for _, model := range rep.models {
+		entry := rep.resultsByModel[model]
+		for _, variant := range rep.variants {
+			res, ok := entry[variant.Key]
+			if !ok || res.Model == "" {
+				continue
+			}
+			if res.Success && strings.TrimSpace(res.Warning) != "" {
+				warnings = append(warnings, res)
+			}
+		}
+	}
+	return warnings
 }
 
 func gatherOutcomes(rep report) (failures, skips []testResult) {

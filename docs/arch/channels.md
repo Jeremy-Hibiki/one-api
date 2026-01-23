@@ -11,6 +11,24 @@
   - [Configuration knobs](#configuration-knobs)
   - [Operational guidance](#operational-guidance)
   - [Known limitations](#known-limitations)
+  - [API Endpoint Routing Architecture](#api-endpoint-routing-architecture)
+    - [Channel Type to API Type Mapping](#channel-type-to-api-type-mapping)
+    - [Adaptor Resolution Flow](#adaptor-resolution-flow)
+    - [Endpoint Interface Requirements](#endpoint-interface-requirements)
+    - [Rerank Endpoint Deep Dive](#rerank-endpoint-deep-dive)
+    - [URL Construction by Channel Type](#url-construction-by-channel-type)
+      - [OpenAI Adaptor (used by OpenAI, OpenAI-Compatible, Azure, etc.)](#openai-adaptor-used-by-openai-openai-compatible-azure-etc)
+      - [OpenAI-Compatible URL Helper](#openai-compatible-url-helper)
+    - [Audio/Video/Image Endpoints](#audiovideoimage-endpoints)
+    - [Endpoint Support Summary](#endpoint-support-summary)
+    - [Configurable Channel Endpoint Support](#configurable-channel-endpoint-support)
+      - [Configuration Storage](#configuration-storage)
+      - [Endpoint Validation Flow](#endpoint-validation-flow)
+      - [Default Endpoints by Channel Type](#default-endpoints-by-channel-type)
+      - [API Endpoints](#api-endpoints)
+      - [Frontend Integration](#frontend-integration)
+      - [Backward Compatibility](#backward-compatibility)
+    - [Implementation Gap: Rerank for OpenAI-Compatible](#implementation-gap-rerank-for-openai-compatible)
 
 ## Overview
 
@@ -176,3 +194,279 @@ Environment variables (see `common/config/config.go`):
 - With `RETRY_TIMES = 0`, only 413 errors will trigger multi‑channel retries (due to explicit override). Other errors will not retry unless you set a positive budget.
 - The in‑memory cache is eventually consistent (refresh interval). A freshly suspended ability may remain in the cache until the next sync; selection still avoids it within the same request.
 - Error string heuristics for classification/auto‑disable are provider‑dependent and may need updates as provider messages evolve.
+
+## API Endpoint Routing Architecture
+
+This section documents how One-API routes different API endpoints to upstream providers, including the adaptor selection process and URL construction logic.
+
+### Channel Type to API Type Mapping
+
+The `ToAPIType()` function in `relay/channeltype/helper.go` maps channel types to API types:
+
+```go
+func ToAPIType(channelType int) int {
+    apiType := apitype.OpenAI  // Default fallback
+    switch channelType {
+    case Anthropic: return apitype.Anthropic
+    case Cohere:    return apitype.Cohere
+    case VertextAI: return apitype.VertexAI
+    // ... other explicit mappings
+    }
+    return apiType  // OpenAI for unmapped types (incl. OpenAICompatible)
+}
+```
+
+**Critical insight**: `OpenAICompatible` (type 50) does NOT have an explicit mapping—it falls through to `apitype.OpenAI`. This means OpenAI-Compatible channels use the OpenAI adaptor, which has implications for endpoint support.
+
+### Adaptor Resolution Flow
+
+```text
+Request Path → relaymode.GetByPath() → RelayMode
+Channel Type → channeltype.ToAPIType() → API Type
+API Type → relay.GetAdaptor() → Adaptor Instance
+```
+
+Example for a rerank request to an OpenAI-Compatible channel:
+
+1. `/v1/rerank` → `relaymode.Rerank`
+2. `channeltype.OpenAICompatible` → `apitype.OpenAI`
+3. `apitype.OpenAI` → `openai.Adaptor{}`
+
+### Endpoint Interface Requirements
+
+Each relay mode requires specific adaptor interface implementations:
+
+| Relay Mode      | Required Interface              | Implementing Adaptors                |
+| --------------- | ------------------------------- | ------------------------------------ |
+| ChatCompletions | `Adaptor` (base)                | All adaptors                         |
+| Embeddings      | `Adaptor` (base)                | All adaptors (varies by support)     |
+| Rerank          | `RerankAdaptor`                 | `cohere.Adaptor` only                |
+| ClaudeMessages  | `ConvertClaudeRequest()` method | OpenAI, Cohere, VertexAI, AWS        |
+| ResponseAPI     | Handled via conversion          | OpenAI (native), others via fallback |
+
+### Rerank Endpoint Deep Dive
+
+The rerank flow in `relay/controller/rerank.go`:
+
+```go
+func prepareRerankRequestBody(c *gin.Context, meta *metalib.Meta,
+    adaptorImpl adaptor.Adaptor, request *relaymodel.RerankRequest) (io.Reader, error) {
+
+    // Check if adaptor implements RerankAdaptor interface
+    if rerankAdaptor, ok := adaptorImpl.(adaptor.RerankAdaptor); ok {
+        converted, err := rerankAdaptor.ConvertRerankRequest(c, request.Clone())
+        // ... process
+    }
+
+    // If not implemented, fail with error
+    return nil, errors.Errorf("rerank requests are not supported by adaptor %s",
+        adaptorImpl.GetChannelName())
+}
+```
+
+**Only Cohere adaptor implements `RerankAdaptor`**:
+
+```go
+// relay/adaptor/cohere/adaptor.go
+func (a *Adaptor) ConvertRerankRequest(c *gin.Context, request *model.RerankRequest) (any, error)
+func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
+    switch meta.Mode {
+    case relaymode.Rerank:
+        return fmt.Sprintf("%s/v2/rerank", meta.BaseURL), nil
+    // ...
+    }
+}
+```
+
+### URL Construction by Channel Type
+
+The `GetRequestURL()` method constructs upstream URLs:
+
+#### OpenAI Adaptor (used by OpenAI, OpenAI-Compatible, Azure, etc.)
+
+```go
+// relay/adaptor/openai/adaptor.go
+func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
+    switch meta.ChannelType {
+    case channeltype.Azure:
+        // Azure-specific: /openai/deployments/{model}/{task}?api-version=...
+    case channeltype.OpenAICompatible:
+        // Preserves request path, handles /v1 deduplication
+        return GetFullRequestURL(meta.BaseURL, requestPath+query, meta.ChannelType), nil
+    default:
+        // Standard OpenAI: {BaseURL}{RequestURLPath}
+        return GetFullRequestURL(meta.BaseURL, meta.RequestURLPath, meta.ChannelType), nil
+    }
+}
+```
+
+#### OpenAI-Compatible URL Helper
+
+```go
+// relay/adaptor/openai/helper.go
+func GetFullRequestURL(baseURL string, requestURL string, channelType int) string {
+    if channelType == channeltype.OpenAICompatible {
+        trimmedBase := strings.TrimRight(baseURL, "/")
+        path := requestURL
+        // Handle /v1 prefix to avoid duplication
+        if strings.HasSuffix(trimmedBase, "/v1") {
+            path = strings.TrimPrefix(path, "/v1")
+        }
+        return trimmedBase + path
+    }
+    // ... other channel types
+}
+```
+
+### Audio/Video/Image Endpoints
+
+These endpoints in `relay/controller/audio.go` and `relay/controller/video.go` handle URL construction differently:
+
+**Audio**: Constructs URL directly without going through adaptor:
+
+```go
+fullRequestURL := openai.GetFullRequestURL(baseURL, requestURL, channelType)
+if channelType == channeltype.Azure {
+    // Azure-specific audio endpoint construction
+    fullRequestURL = fmt.Sprintf("%s/openai/deployments/%s/audio/...", ...)
+}
+```
+
+**Video**: Uses proxy helper for non-POST requests, otherwise direct forwarding:
+
+```go
+if c.Request.Method != http.MethodPost {
+    return RelayProxyHelper(c, relaymode.Videos)
+}
+// ... direct request construction for POST
+```
+
+### Endpoint Support Summary
+
+| Channel Type      | Chat | Embeddings | Rerank | Audio | Video | Images |
+| ----------------- | ---- | ---------- | ------ | ----- | ----- | ------ |
+| OpenAI            | ✅   | ✅         | ❌     | ✅    | ✅    | ✅     |
+| Azure             | ✅   | ✅         | ❌     | ✅    | ❌    | ✅     |
+| OpenAI-Compatible | ✅   | ✅         | ❌     | ✅    | ✅    | ✅     |
+| Cohere            | ✅   | ❌         | ✅     | ❌    | ❌    | ❌     |
+| Anthropic         | ✅   | ❌         | ❌     | ❌    | ❌    | ❌     |
+| AWS Bedrock       | ✅   | ✅         | ❌     | ❌    | ❌    | ❌     |
+| Vertex AI         | ✅   | ✅         | ❌     | ❌    | ❌    | ❌     |
+| Ollama            | ✅   | ✅         | ❌     | ❌    | ❌    | ❌     |
+| Gemini            | ✅   | ✅         | ❌     | ❌    | ❌    | ❌     |
+
+Note: This table shows **default** endpoints per channel type. Administrators can customize supported endpoints per-channel (see below).
+
+### Configurable Channel Endpoint Support
+
+Channel endpoint support is now configurable on a per-channel basis. This allows administrators to:
+
+1. **Restrict endpoints**: Limit a channel to only specific endpoints (e.g., chat-only)
+2. **Expand endpoints**: Enable endpoints not in the channel type's default set
+3. **Override defaults**: Customize behavior for specific upstream providers
+
+#### Configuration Storage
+
+Endpoint configuration is stored in the `config` JSON field of the channel:
+
+```json
+{
+  "supported_endpoints": ["chat_completions", "embeddings", "response_api"]
+}
+```
+
+When `supported_endpoints` is empty or absent, the channel uses its type's default endpoints (backward compatible).
+
+#### Endpoint Validation Flow
+
+```text
+Request → Distributor Middleware → channelSupportsEndpoint() → Route or Skip
+```
+
+The `channelSupportsEndpoint()` function in `middleware/distributor.go`:
+
+```go
+func channelSupportsEndpoint(channel *model.Channel, relayMode int) bool {
+    // Get endpoint name from relay mode
+    endpointName := channeltype.RelayModeToEndpointName(relayMode)
+
+    // Get effective supported endpoints
+    supportedEndpoints := channel.GetEffectiveSupportedEndpoints()
+
+    // Check if endpoint is supported
+    return channeltype.IsEndpointSupportedByName(endpointName, supportedEndpoints)
+}
+```
+
+#### Default Endpoints by Channel Type
+
+Defined in `relay/channeltype/endpoints.go`:
+
+```go
+var defaultEndpointsMap = map[int][]Endpoint{
+    OpenAI: {
+        EndpointChatCompletions, EndpointCompletions, EndpointEmbeddings,
+        EndpointModerations, EndpointImagesGenerations, EndpointImagesEdits,
+        EndpointAudioSpeech, EndpointAudioTranscription, EndpointAudioTranslation,
+        EndpointResponseAPI, EndpointClaudeMessages, EndpointRealtime, EndpointVideos,
+    },
+    Cohere: {
+        EndpointChatCompletions, EndpointClaudeMessages, EndpointRerank,
+    },
+    Anthropic: {
+        EndpointChatCompletions, EndpointClaudeMessages,
+    },
+    // ... other channel types
+}
+```
+
+#### API Endpoints
+
+**GET `/api/channel/metadata?type={channelType}`** returns:
+
+```json
+{
+  "default_base_url": "https://api.openai.com",
+  "base_url_editable": true,
+  "default_endpoints": ["chat_completions", "embeddings", "response_api", ...],
+  "all_endpoints": [
+    {"id": 1, "name": "chat_completions", "description": "Chat Completions", "path": "/v1/chat/completions"},
+    {"id": 3, "name": "embeddings", "description": "Embeddings", "path": "/v1/embeddings"},
+    // ... all available endpoints
+  ]
+}
+```
+
+#### Frontend Integration
+
+The channel edit page (`web/modern/src/pages/channels/EditChannelPage.tsx`) includes:
+
+1. **ChannelEndpointSettings** component with checkbox toggles for each endpoint
+2. "Reset to Defaults" button to revert to channel type defaults
+3. "Select All" and "Minimal" quick actions
+4. Documentation modal with cURL examples for each endpoint
+
+#### Backward Compatibility
+
+- Existing channels without `supported_endpoints` in config use defaults
+- Empty array `[]` is treated as "use defaults" (not "no endpoints")
+- No database migration required—uses existing `config` JSON column
+
+### Implementation Gap: Rerank for OpenAI-Compatible
+
+To add rerank support for OpenAI-Compatible channels, the following would be required:
+
+1. **Implement `RerankAdaptor` interface** in the OpenAI adaptor
+
+2. **Add rerank mode handling** in `GetRequestURL()`:
+
+   ```go
+   case channeltype.OpenAICompatible:
+       if meta.Mode == relaymode.Rerank {
+           return fmt.Sprintf("%s/v1/rerank", meta.BaseURL), nil
+       }
+   ```
+
+3. **Add `ConvertRerankRequest()` method** with proper request mapping
+
+This would allow OpenAI-Compatible channels to forward rerank requests to providers like Jina or other Cohere-API-compatible services at custom URLs.

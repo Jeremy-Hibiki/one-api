@@ -17,6 +17,11 @@ func SetRelayRouter(router *gin.Engine) {
 		middleware.RewriteClaudeMessagesPrefix("/openai/v1/v1/messages", router),
 		middleware.RewriteClaudeMessagesPrefix("/api/v1/v1/messages", router),
 	)
+
+	// Auto-detect API format for misrouted requests (e.g., Response API sent to chat/completions).
+	// This must be placed early in the chain, before authentication and other middlewares,
+	// so that misrouted requests are redirected to the correct endpoint with all middlewares applied.
+	router.Use(middleware.APIFormatAutoDetect(router))
 	router.Use(middleware.CORS())
 	router.Use(middleware.GzipDecodeMiddleware())
 	// https://platform.openai.com/docs/api-reference/introduction
@@ -27,10 +32,13 @@ func SetRelayRouter(router *gin.Engine) {
 		modelsRouter.GET("/:model", controller.RetrieveModel)
 	}
 
+	router.POST("/mcp", middleware.TokenAuth(), controller.MCPProxy)
+
 	relayMws := []gin.HandlerFunc{
 		// Track in-flight requests for graceful shutdown/drain
 		func(c *gin.Context) { done := graceful.BeginRequest(); defer done(); c.Next() },
 		middleware.RelayPanicRecover(), middleware.TokenAuth(),
+		middleware.BindAsyncTaskChannel(),
 		middleware.Distribute(),
 		middleware.GlobalRelayRateLimit(),
 		middleware.ChannelRateLimit(),
@@ -53,6 +61,11 @@ func SetRelayRouter(router *gin.Engine) {
 	relayV1Router.POST("/images/generations", controller.Relay)
 	relayV1Router.POST("/images/edits", controller.Relay)
 	relayV1Router.POST("/images/variations", controller.RelayNotImplemented)
+	relayV1Router.POST("/videos", controller.Relay)
+	relayV1Router.GET("/videos", controller.Relay)
+	relayV1Router.GET("/videos/:video_id", controller.Relay)
+	relayV1Router.GET("/videos/:video_id/content", controller.Relay)
+	relayV1Router.DELETE("/videos/:video_id", controller.Relay)
 	relayV1Router.POST("/embeddings", controller.Relay)
 	relayV1Router.POST("/rerank", controller.Relay)
 	relayV1Router.POST("/engines/:model/embeddings", controller.Relay)

@@ -86,6 +86,13 @@ const (
 	// response. Set by adaptors after parsing provider responses and consumed during billing adjustments.
 	WebSearchCallCount = "web_search_call_count"
 
+	// ToolInvocationCounts stores raw built-in tool invocation counts aggregated during response handling.
+	// Adaptors may populate this alongside specialized counters like WebSearchCallCount.
+	ToolInvocationCounts = "tool_invocation_counts"
+	// ToolInvocationSummary captures per-request built-in tool usage, including counts and billed quota.
+	// Populated by tooling.ApplyBuiltinToolCharges and consumed by billing metadata generation.
+	ToolInvocationSummary = "tool_invocation_summary"
+
 	// Group is the user group resolved for the current user (affects routing & ratios).
 	// Set in: middleware/distributor (via model.CacheGetUserGroup).
 	// Read in: meta/metrics and for channel selection.
@@ -145,6 +152,11 @@ const (
 	// Set in: common/gin.go GetRequestBody and UnmarshalBodyReusable.
 	// Read in: controllers (e.g., response/claude_messages) for debugging/logging.
 	KeyRequestBody = gin.BodyBytesKey
+
+	// AsyncTaskRequestMetadata stores a sanitized snapshot of asynchronous task request parameters (e.g., /v1/videos POST payload).
+	// Set in: RelayVideoHelper after parsing the incoming request.
+	// Read in: async task persistence to capture request context for later diagnostics.
+	AsyncTaskRequestMetadata = "async_task_request_metadata"
 
 	// SystemPrompt is a forced/extra system prompt configured on the channel.
 	// Set in: middleware/distributor if channel.SystemPrompt is non-empty.
@@ -206,6 +218,11 @@ const (
 	// Read in: controller/claude_messages to return converted responses.
 	ConvertedResponse = "converted_response"
 
+	// SkipAdaptorResponseBodyLog suppresses verbose adaptor-level upstream body logging when the
+	// controller already captured and will emit a debug preview. This avoids duplicate payload logs
+	// while keeping high-level status metadata available.
+	SkipAdaptorResponseBodyLog = "skip_adaptor_response_body_log"
+
 	// DebugResponseWriter stores the body-capturing response writer used for debug logging of outbound payloads.
 	// Set in: relay/controller debug logging helpers when enhanced diagnostics are enabled.
 	// Read in: controller/relay and relay/controller helpers when writing response debug logs.
@@ -237,4 +254,9 @@ const (
 	// Set in: relay/controller/text when initializing a streaming request.
 	// Read in: streaming adaptors to record completion progress and enforce quota limits mid-stream.
 	StreamingQuotaTracker = "streaming_quota_tracker"
+
+	// APIFormat is the detected API format of the request (OpenAI, Claude, Response API).
+	// Set in: middleware/api_format_detect.
+	// Read in: metrics for labeling.
+	APIFormat = "api_format"
 )

@@ -2,11 +2,14 @@ package controller
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestAPIIntegration verifies that all APIs (Audio, ChatCompletion, Response) work correctly
 // after the billing refactor and maintain backward compatibility
 func TestAPIIntegration(t *testing.T) {
+	t.Parallel()
 
 	t.Run("Audio API Billing Compatibility", func(t *testing.T) {
 		// Test that Audio API still uses the simple billing function
@@ -32,13 +35,12 @@ func TestAPIIntegration(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				// Verify that the quota calculation is straightforward for audio
 				// Audio API doesn't use completion ratios or tools cost
 				expectedQuota := tc.totalQuota
 
-				if expectedQuota != tc.totalQuota {
-					t.Errorf("Expected quota %d, got %d", tc.totalQuota, expectedQuota)
-				}
+				require.Equal(t, tc.totalQuota, expectedQuota, "Expected quota mismatch")
 
 				t.Logf("✓ Audio API test passed: %s - quota=%d", tc.name, expectedQuota)
 			})
@@ -109,6 +111,7 @@ func TestAPIIntegration(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				// Calculate quota using ChatCompletion formula
 				calculatedQuota := int64((float64(tc.promptTokens)+float64(tc.completionTokens)*tc.completionRatio)*tc.modelRatio*tc.groupRatio) + tc.toolsCost
 
@@ -117,13 +120,9 @@ func TestAPIIntegration(t *testing.T) {
 					expectedFloat := (float64(tc.promptTokens)+float64(tc.completionTokens)*tc.completionRatio)*tc.modelRatio*tc.groupRatio + float64(tc.toolsCost)
 					calculatedQuota = int64(expectedFloat)
 					// Should be 144 (truncated from 144.4)
-					if calculatedQuota != 144 {
-						t.Errorf("Expected quota to be 144, got %d", calculatedQuota)
-					}
+					require.Equal(t, int64(144), calculatedQuota, "Expected quota to be 144")
 				} else {
-					if calculatedQuota != tc.expectedQuota {
-						t.Errorf("Expected quota %d, got %d", tc.expectedQuota, calculatedQuota)
-					}
+					require.Equal(t, tc.expectedQuota, calculatedQuota, "Expected quota mismatch")
 				}
 
 				t.Logf("✓ ChatCompletion API test passed: %s - quota=%d", tc.name, calculatedQuota)
@@ -181,6 +180,7 @@ func TestAPIIntegration(t *testing.T) {
 
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 				// Calculate quota using Response API formula (same as ChatCompletion)
 				// input_tokens maps to prompt_tokens, output_tokens maps to completion_tokens
 				responseQuota := int64((float64(tc.inputTokens)+float64(tc.outputTokens)*tc.completionRatio)*tc.modelRatio*tc.groupRatio) + tc.toolsCost
@@ -189,9 +189,7 @@ func TestAPIIntegration(t *testing.T) {
 				chatQuota := int64((float64(tc.inputTokens)+float64(tc.outputTokens)*tc.completionRatio)*tc.modelRatio*tc.groupRatio) + tc.toolsCost
 
 				// They should be identical
-				if responseQuota != chatQuota {
-					t.Errorf("Response API quota (%d) should match ChatCompletion quota (%d)", responseQuota, chatQuota)
-				}
+				require.Equal(t, chatQuota, responseQuota, "Response API quota should match ChatCompletion quota")
 
 				t.Logf("✓ Response API test passed: %s - quota=%d (matches ChatCompletion)", tc.name, responseQuota)
 			})
@@ -199,6 +197,7 @@ func TestAPIIntegration(t *testing.T) {
 	})
 
 	t.Run("Cross-API Consistency", func(t *testing.T) {
+		t.Parallel()
 		// Verify that ChatCompletion and Response API produce identical billing
 		// for the same token counts and ratios
 
@@ -216,13 +215,8 @@ func TestAPIIntegration(t *testing.T) {
 		chatQuota := expectedQuota
 		responseQuota := expectedQuota
 
-		if chatQuota != responseQuota {
-			t.Errorf("ChatCompletion quota (%d) should match Response API quota (%d)", chatQuota, responseQuota)
-		}
-
-		if chatQuota != expectedQuota {
-			t.Errorf("Expected quota %d, got %d", expectedQuota, chatQuota)
-		}
+		require.Equal(t, responseQuota, chatQuota, "ChatCompletion quota should match Response API quota")
+		require.Equal(t, expectedQuota, chatQuota, "Expected quota mismatch")
 
 		t.Logf("✓ Cross-API consistency test passed: ChatCompletion=%d, Response=%d", chatQuota, responseQuota)
 	})
@@ -230,8 +224,10 @@ func TestAPIIntegration(t *testing.T) {
 
 // TestBillingRefactorSafety verifies that the billing refactor maintains all safety guarantees
 func TestBillingRefactorSafety(t *testing.T) {
+	t.Parallel()
 
 	t.Run("Function Signature Compatibility", func(t *testing.T) {
+		t.Parallel()
 		// Verify that all billing function signatures are preserved
 		// This ensures that existing code continues to work
 
@@ -251,6 +247,7 @@ func TestBillingRefactorSafety(t *testing.T) {
 	})
 
 	t.Run("Input Validation Safety", func(t *testing.T) {
+		t.Parallel()
 		// Verify that both billing functions handle invalid inputs gracefully
 		// without panicking or causing system instability
 
@@ -269,6 +266,7 @@ func TestBillingRefactorSafety(t *testing.T) {
 	})
 
 	t.Run("Backward Compatibility Guarantee", func(t *testing.T) {
+		t.Parallel()
 		// Verify that existing APIs continue to work exactly as before
 
 		compatibilityChecks := []string{

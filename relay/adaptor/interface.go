@@ -2,7 +2,10 @@ package adaptor
 
 import (
 	"io"
+	"maps"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
@@ -21,9 +24,6 @@ type ModelConfig struct {
 	// The upstream channel applies distinct pricing for cache‑hit and cache‑miss inputs,
 	// while the output price remains the same, equal to Ratio * CompletionRatio.
 	CompletionRatio float64 `json:"completion_ratio,omitempty"`
-	// ImagePriceUsd is the USD cost per generated image for image models.
-	// Text models should leave this as zero.
-	ImagePriceUsd float64 `json:"image_price_usd,omitempty"`
 	// CachedInputRatio specifies price per cached input token.
 	// If non-zero, it overrides Ratio for cached input tokens. Negative means free.
 	CachedInputRatio float64 `json:"cached_input_ratio,omitempty"`
@@ -40,6 +40,102 @@ type ModelConfig struct {
 	// MaxTokens represents the maximum token limit for this model on this channel
 	// 0 means no limit (infinity)
 	MaxTokens int32 `json:"max_tokens,omitempty"`
+	// Video holds per-second pricing metadata for video generation models.
+	Video *VideoPricingConfig `json:"video,omitempty"`
+	// Audio captures pricing metadata for audio prompt and completion billing.
+	Audio *AudioPricingConfig `json:"audio,omitempty"`
+	// Image captures pricing metadata for image prompt and render billing.
+	Image *ImagePricingConfig `json:"image,omitempty"`
+}
+
+// VideoPricingConfig captures pricing metadata for video generation requests.
+// Pricing is expressed as a per-second USD cost that can be adjusted via resolution
+// multipliers relative to the base resolution.
+type VideoPricingConfig struct {
+	// PerSecondUsd is the USD price per rendered second at the base resolution.
+	PerSecondUsd float64 `json:"per_second_usd,omitempty"`
+	// BaseResolution identifies the resolution treated as multiplier 1. Empty means unspecified.
+	BaseResolution string `json:"base_resolution,omitempty"`
+	// ResolutionMultipliers scales the base price for specific resolutions. Keys should be
+	// normalized via normalizeResolutionKey and values must be positive.
+	ResolutionMultipliers map[string]float64 `json:"resolution_multipliers,omitempty"`
+}
+
+// HasData reports whether the configuration contains any pricing information.
+func (cfg *VideoPricingConfig) HasData() bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.PerSecondUsd > 0 {
+		return true
+	}
+	return len(cfg.ResolutionMultipliers) > 0
+}
+
+// Clone returns a deep copy of the video pricing configuration.
+func (cfg *VideoPricingConfig) Clone() *VideoPricingConfig {
+	if cfg == nil {
+		return nil
+	}
+	clone := &VideoPricingConfig{
+		PerSecondUsd:   cfg.PerSecondUsd,
+		BaseResolution: cfg.BaseResolution,
+	}
+	if len(cfg.ResolutionMultipliers) > 0 {
+		clone.ResolutionMultipliers = make(map[string]float64, len(cfg.ResolutionMultipliers))
+		maps.Copy(clone.ResolutionMultipliers, cfg.ResolutionMultipliers)
+	}
+	return clone
+}
+
+// EffectiveMultiplier resolves the multiplier for the supplied resolution.
+// It first normalizes the key to handle orientation swaps (e.g., 720x1280 vs 1280x720)
+// and falls back to the raw trimmed key if no normalized match is present.
+func (cfg *VideoPricingConfig) EffectiveMultiplier(resolution string) float64 {
+	if cfg == nil {
+		return 1
+	}
+	normalized := normalizeResolutionKey(resolution)
+	if normalized != "" && len(cfg.ResolutionMultipliers) > 0 {
+		if multiplier, ok := cfg.ResolutionMultipliers[normalized]; ok && multiplier > 0 {
+			return multiplier
+		}
+	}
+	trimmed := strings.TrimSpace(strings.ToLower(resolution))
+	if trimmed != "" && len(cfg.ResolutionMultipliers) > 0 {
+		if multiplier, ok := cfg.ResolutionMultipliers[trimmed]; ok && multiplier > 0 {
+			return multiplier
+		}
+	}
+	if cfg.BaseResolution != "" {
+		base := normalizeResolutionKey(cfg.BaseResolution)
+		if base != "" && base == normalized {
+			return 1
+		}
+	}
+	return 1
+}
+
+func normalizeResolutionKey(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	if trimmed == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(trimmed, func(r rune) bool {
+		return r == 'x' || r == '*' || r == '\u00D7'
+	})
+	if len(parts) != 2 {
+		return trimmed
+	}
+	width, err1 := strconv.Atoi(parts[0])
+	height, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || width <= 0 || height <= 0 {
+		return trimmed
+	}
+	if width < height {
+		width, height = height, width
+	}
+	return strconv.Itoa(width) + "x" + strconv.Itoa(height)
 }
 
 // ModelRatioTier describes pricing for a specific input token tier. It overrides
@@ -61,6 +157,120 @@ type ModelRatioTier struct {
 
 	// The minimum input‑token count at which this tier becomes applicable
 	InputTokenThreshold int `json:"input_token_threshold"`
+}
+
+// ToolPricingConfig describes the per-invocation pricing for a provider built-in tool.
+// Prices can be expressed either as USD per call or precomputed quota units per call.
+type ToolPricingConfig struct {
+	// UsdPerCall represents the USD price per single invocation of the tool.
+	// Leave zero when using quota-based pricing.
+	UsdPerCall float64 `json:"usd_per_call,omitempty"`
+	// QuotaPerCall overrides the per-invocation cost directly in quota units.
+	// Zero means "not specified" unless the tool is intentionally free.
+	QuotaPerCall int64 `json:"quota_per_call,omitempty"`
+}
+
+// ChannelToolConfig defines channel-scoped built-in tool policies and pricing metadata.
+type ChannelToolConfig struct {
+	// Whitelist enumerates provider-built tools permitted for this channel. Nil/empty allows all.
+	Whitelist []string `json:"whitelist,omitempty"`
+	// Pricing defines per-tool invocation pricing for the entire channel.
+	Pricing map[string]ToolPricingConfig `json:"pricing,omitempty"`
+}
+
+// AudioPricingConfig captures pricing metadata for audio prompts and completions.
+// PromptRatio converts audio prompt tokens to text-token billing units; CompletionRatio
+// applies when upstream returns audio completions. Per-second fields allow direct
+// billing of duration-based models.
+type AudioPricingConfig struct {
+	PromptRatio               float64 `json:"prompt_ratio,omitempty"`
+	CompletionRatio           float64 `json:"completion_ratio,omitempty"`
+	PromptTokensPerSecond     float64 `json:"prompt_tokens_per_second,omitempty"`
+	CompletionTokensPerSecond float64 `json:"completion_tokens_per_second,omitempty"`
+	UsdPerSecond              float64 `json:"usd_per_second,omitempty"`
+}
+
+// HasData reports whether the audio configuration carries any non-zero metadata.
+func (cfg *AudioPricingConfig) HasData() bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.PromptRatio != 0 || cfg.CompletionRatio != 0 || cfg.PromptTokensPerSecond != 0 ||
+		cfg.CompletionTokensPerSecond != 0 || cfg.UsdPerSecond != 0
+}
+
+// Clone returns a copy of the audio pricing configuration.
+func (cfg *AudioPricingConfig) Clone() *AudioPricingConfig {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	return &clone
+}
+
+// ImagePricingConfig captures prompt and render billing metadata for image models.
+// Size and quality multipliers scale the base price; missing entries imply fallback to 1.0.
+type ImagePricingConfig struct {
+	PricePerImageUsd       float64                       `json:"price_per_image_usd,omitempty"`
+	PromptRatio            float64                       `json:"prompt_ratio,omitempty"`
+	DefaultSize            string                        `json:"default_size,omitempty"`
+	DefaultQuality         string                        `json:"default_quality,omitempty"`
+	PromptTokenLimit       int                           `json:"prompt_token_limit,omitempty"`
+	MinImages              int                           `json:"min_images,omitempty"`
+	MaxImages              int                           `json:"max_images,omitempty"`
+	SizeMultipliers        map[string]float64            `json:"size_multipliers,omitempty"`
+	QualityMultipliers     map[string]float64            `json:"quality_multipliers,omitempty"`
+	QualitySizeMultipliers map[string]map[string]float64 `json:"quality_size_multipliers,omitempty"`
+}
+
+// HasData reports whether the image configuration contains any pricing metadata.
+func (cfg *ImagePricingConfig) HasData() bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.PricePerImageUsd > 0 || cfg.PromptRatio > 0 || cfg.PromptTokenLimit > 0 || cfg.MinImages > 0 || cfg.MaxImages > 0 {
+		return true
+	}
+	if len(cfg.SizeMultipliers) > 0 || len(cfg.QualityMultipliers) > 0 || len(cfg.QualitySizeMultipliers) > 0 {
+		return true
+	}
+	return false
+}
+
+// Clone returns a deep copy of the image pricing configuration.
+func (cfg *ImagePricingConfig) Clone() *ImagePricingConfig {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	if len(cfg.SizeMultipliers) > 0 {
+		clone.SizeMultipliers = make(map[string]float64, len(cfg.SizeMultipliers))
+		for k, v := range cfg.SizeMultipliers {
+			clone.SizeMultipliers[k] = v
+		}
+	}
+	if len(cfg.QualityMultipliers) > 0 {
+		clone.QualityMultipliers = make(map[string]float64, len(cfg.QualityMultipliers))
+		for k, v := range cfg.QualityMultipliers {
+			clone.QualityMultipliers[k] = v
+		}
+	}
+	if len(cfg.QualitySizeMultipliers) > 0 {
+		clone.QualitySizeMultipliers = make(map[string]map[string]float64, len(cfg.QualitySizeMultipliers))
+		for quality, sizes := range cfg.QualitySizeMultipliers {
+			inner := make(map[string]float64, len(sizes))
+			for size, value := range sizes {
+				inner[size] = value
+			}
+			clone.QualitySizeMultipliers[quality] = inner
+		}
+	}
+	return &clone
+}
+
+// ToolingDefaultsProvider is implemented by adaptors that expose built-in tool defaults.
+type ToolingDefaultsProvider interface {
+	DefaultToolingConfig() ChannelToolConfig
 }
 
 type Adaptor interface {
@@ -102,6 +312,11 @@ func (d *DefaultPricingMethods) GetModelRatio(modelName string) float64 {
 
 func (d *DefaultPricingMethods) GetCompletionRatio(modelName string) float64 {
 	return 1.0 // Default completion ratio
+}
+
+// DefaultToolingConfig returns an empty tooling configuration so channels opt-in explicitly.
+func (d *DefaultPricingMethods) DefaultToolingConfig() ChannelToolConfig {
+	return ChannelToolConfig{}
 }
 
 func (d *DefaultPricingMethods) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, error) {

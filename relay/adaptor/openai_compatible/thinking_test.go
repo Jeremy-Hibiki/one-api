@@ -3,9 +3,12 @@ package openai_compatible
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractThinkingContent_SingleThinkTag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		input            string
@@ -58,18 +61,16 @@ func TestExtractThinkingContent_SingleThinkTag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			thinking, regular := ExtractThinkingContent(tt.input)
-			if thinking != tt.expectedThinking {
-				t.Errorf("ExtractThinkingContent() thinking = %q, want %q", thinking, tt.expectedThinking)
-			}
-			if regular != tt.expectedRegular {
-				t.Errorf("ExtractThinkingContent() regular = %q, want %q", regular, tt.expectedRegular)
-			}
+			require.Equal(t, tt.expectedThinking, thinking, "ExtractThinkingContent() thinking mismatch")
+			require.Equal(t, tt.expectedRegular, regular, "ExtractThinkingContent() regular mismatch")
 		})
 	}
 }
 
 func TestExtractThinkingContent_MultipleThinkTags_SingleTagBehavior(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		input            string
@@ -116,18 +117,16 @@ func TestExtractThinkingContent_MultipleThinkTags_SingleTagBehavior(t *testing.T
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			thinking, regular := ExtractThinkingContent(tt.input)
-			if thinking != tt.expectedThinking {
-				t.Errorf("ExtractThinkingContent() thinking = %q, want %q\nDescription: %s", thinking, tt.expectedThinking, tt.description)
-			}
-			if regular != tt.expectedRegular {
-				t.Errorf("ExtractThinkingContent() regular = %q, want %q\nDescription: %s", regular, tt.expectedRegular, tt.description)
-			}
+			require.Equal(t, tt.expectedThinking, thinking, "ExtractThinkingContent() thinking mismatch - %s", tt.description)
+			require.Equal(t, tt.expectedRegular, regular, "ExtractThinkingContent() regular mismatch - %s", tt.description)
 		})
 	}
 }
 
 func TestExtractThinkingContent_EdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		input            string
@@ -181,18 +180,16 @@ func TestExtractThinkingContent_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			thinking, regular := ExtractThinkingContent(tt.input)
-			if thinking != tt.expectedThinking {
-				t.Errorf("ExtractThinkingContent() thinking = %q, want %q\nDescription: %s", thinking, tt.expectedThinking, tt.description)
-			}
-			if regular != tt.expectedRegular {
-				t.Errorf("ExtractThinkingContent() regular = %q, want %q\nDescription: %s", regular, tt.expectedRegular, tt.description)
-			}
+			require.Equal(t, tt.expectedThinking, thinking, "ExtractThinkingContent() thinking mismatch - %s", tt.description)
+			require.Equal(t, tt.expectedRegular, regular, "ExtractThinkingContent() regular mismatch - %s", tt.description)
 		})
 	}
 }
 
 func TestExtractThinkingContent_PerformanceWithMultipleTags_SingleTagBehavior(t *testing.T) {
+	t.Parallel()
 	// Test performance characteristics with many think tags - only first should be processed
 	var builder strings.Builder
 	var expectedRegularBuilder strings.Builder
@@ -225,67 +222,55 @@ func TestExtractThinkingContent_PerformanceWithMultipleTags_SingleTagBehavior(t 
 
 	thinking, regular := ExtractThinkingContent(input)
 
-	if thinking != expectedThinking {
-		t.Errorf("ExtractThinkingContent() with multiple tags (single-tag behavior) thinking = %q, want %q", thinking, expectedThinking)
-	}
-	if regular != expectedRegular {
-		t.Errorf("ExtractThinkingContent() with multiple tags (single-tag behavior) regular = %q, want %q", regular, expectedRegular)
-	}
+	require.Equal(t, expectedThinking, thinking, "ExtractThinkingContent() with multiple tags (single-tag behavior) thinking mismatch")
+	require.Equal(t, expectedRegular, regular, "ExtractThinkingContent() with multiple tags (single-tag behavior) regular mismatch")
 }
 
 // Test the improved behavior - now handles only 1 think tag, not multiple
 func TestThinkTagHandling_ImprovedSingleTagOnly(t *testing.T) {
+	t.Parallel()
 	t.Run("Verify only first think tag is processed, subsequent ones treated as regular content", func(t *testing.T) {
+		t.Parallel()
 		input := "Hello <think>first</think> world <think>second</think> end"
 		thinking, regular := ExtractThinkingContent(input)
 
 		// The IMPROVED implementation handles only the FIRST think tag
-		if thinking != "first" {
-			t.Errorf("Expected only first think tag to be handled. Got thinking: %q, expected: %q", thinking, "first")
-		}
-
-		if regular != "Hello  world <think>second</think> end" {
-			t.Errorf("Expected regular content with second think tag preserved. Got: %q, expected: %q", regular, "Hello  world <think>second</think> end")
-		}
+		require.Equal(t, "first", thinking, "Expected only first think tag to be handled")
+		require.Equal(t, "Hello  world <think>second</think> end", regular, "Expected regular content with second think tag preserved")
 	})
 
 	t.Run("Verify single think tag still works correctly", func(t *testing.T) {
+		t.Parallel()
 		input := "Hello <think>only one</think> world"
 		thinking, regular := ExtractThinkingContent(input)
 
-		if thinking != "only one" {
-			t.Errorf("Expected single think tag to work. Got thinking: %q, expected: %q", thinking, "only one")
-		}
-
-		if regular != "Hello  world" {
-			t.Errorf("Expected regular content without think tag. Got: %q, expected: %q", regular, "Hello  world")
-		}
+		require.Equal(t, "only one", thinking, "Expected single think tag to work")
+		require.Equal(t, "Hello  world", regular, "Expected regular content without think tag")
 	})
 
 	t.Run("Verify improvement: three think tags - only first processed", func(t *testing.T) {
+		t.Parallel()
 		input := "Start <think>first</think> middle <think>second</think> more <think>third</think> end"
 		thinking, regular := ExtractThinkingContent(input)
 
 		// Only the first think tag should be extracted
-		if thinking != "first" {
-			t.Errorf("Expected only first think tag content. Got thinking: %q, expected: %q", thinking, "first")
-		}
+		require.Equal(t, "first", thinking, "Expected only first think tag content")
 
 		// All subsequent think tags should remain in regular content
 		expectedRegular := "Start  middle <think>second</think> more <think>third</think> end"
-		if regular != expectedRegular {
-			t.Errorf("Expected subsequent think tags to remain in regular content. Got: %q, expected: %q", regular, expectedRegular)
-		}
+		require.Equal(t, expectedRegular, regular, "Expected subsequent think tags to remain in regular content")
 	})
 }
 
 // Test streaming behavior to verify only first think tag is processed
 func TestStreamHandlerWithThinking_SingleTagBehavior(t *testing.T) {
+	t.Parallel()
 	// Note: This is a conceptual test structure since StreamHandlerWithThinking processes
 	// streaming chunks. The actual implementation would require mock HTTP responses and
 	// streaming chunk simulation. The key behavioral change is that the function now
 	// uses hasProcessedThinkTag flag to prevent processing of subsequent think tags.
 	t.Run("Streaming handler should only process first think tag", func(t *testing.T) {
+		t.Parallel()
 		// This test verifies the logic change in StreamHandlerWithThinking
 		// The function now includes:
 		// 1. hasProcessedThinkTag flag initialization
@@ -295,19 +280,18 @@ func TestStreamHandlerWithThinking_SingleTagBehavior(t *testing.T) {
 		// The behavior should match ExtractThinkingContent for consistency
 		input1 := "Hello <think>first</think> world"
 		thinking1, regular1 := ExtractThinkingContent(input1)
-		if thinking1 != "first" || regular1 != "Hello  world" {
-			t.Errorf("Single think tag test failed: thinking=%q, regular=%q", thinking1, regular1)
-		}
+		require.Equal(t, "first", thinking1, "Single think tag test failed - thinking mismatch")
+		require.Equal(t, "Hello  world", regular1, "Single think tag test failed - regular mismatch")
 
 		input2 := "Hello <think>first</think> world <think>second</think> end"
 		thinking2, regular2 := ExtractThinkingContent(input2)
-		if thinking2 != "first" || regular2 != "Hello  world <think>second</think> end" {
-			t.Errorf("Multiple think tags test failed: thinking=%q, regular=%q", thinking2, regular2)
-		}
+		require.Equal(t, "first", thinking2, "Multiple think tags test failed - thinking mismatch")
+		require.Equal(t, "Hello  world <think>second</think> end", regular2, "Multiple think tags test failed - regular mismatch")
 	})
 }
 
 func TestExtractThinkingContent_UnicodeThinkTags(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		input            string
@@ -368,13 +352,10 @@ func TestExtractThinkingContent_UnicodeThinkTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			thinking, regular := ExtractThinkingContent(tt.input)
-			if thinking != tt.expectedThinking {
-				t.Errorf("ExtractThinkingContent() thinking = %q, want %q\nDescription: %s", thinking, tt.expectedThinking, tt.description)
-			}
-			if regular != tt.expectedRegular {
-				t.Errorf("ExtractThinkingContent() regular = %q, want %q\nDescription: %s", regular, tt.expectedRegular, tt.description)
-			}
+			require.Equal(t, tt.expectedThinking, thinking, "ExtractThinkingContent() thinking mismatch - %s", tt.description)
+			require.Equal(t, tt.expectedRegular, regular, "ExtractThinkingContent() regular mismatch - %s", tt.description)
 		})
 	}
 }

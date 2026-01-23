@@ -10,6 +10,7 @@ import (
 
 // TestMigrationIntegration_CompleteWorkflow tests the complete migration workflow
 func TestMigrationIntegration_CompleteWorkflow(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name                   string
 		initialModelConfigs    *string
@@ -107,6 +108,7 @@ func TestMigrationIntegration_CompleteWorkflow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			channel := &Channel{
 				Id:              1,
 				ModelConfigs:    tt.initialModelConfigs,
@@ -140,8 +142,28 @@ func TestMigrationIntegration_CompleteWorkflow(t *testing.T) {
 	}
 }
 
+func TestMigrateLegacyImagePriceInConfigs(t *testing.T) {
+	t.Parallel()
+	input := `{"gpt-image-1":{"ratio":0.0,"image_price_usd":0.04}}`
+	updated, changed, err := migrateLegacyImagePriceInConfigs(input)
+	require.NoError(t, err)
+	require.True(t, changed)
+	var configs map[string]ModelConfigLocal
+	require.NoError(t, json.Unmarshal([]byte(updated), &configs))
+	cfg, ok := configs["gpt-image-1"]
+	require.True(t, ok)
+	require.NotNil(t, cfg.Image)
+	require.InDelta(t, 0.04, cfg.Image.PricePerImageUsd, 1e-9)
+	// idempotent re-run should report no further change
+	updatedAgain, changedAgain, err := migrateLegacyImagePriceInConfigs(updated)
+	require.NoError(t, err)
+	require.False(t, changedAgain)
+	require.Equal(t, updated, updatedAgain)
+}
+
 // TestMigrationIntegration_DataConsistency tests data consistency after migration
 func TestMigrationIntegration_DataConsistency(t *testing.T) {
+	t.Parallel()
 	channel := &Channel{
 		Id:              1,
 		ModelConfigs:    stringPtr(`{"gpt-3.5-turbo": {"max_tokens": 65536}}`),
@@ -192,6 +214,7 @@ func TestMigrationIntegration_DataConsistency(t *testing.T) {
 
 // TestMigrationIntegration_Idempotency tests that migration is idempotent
 func TestMigrationIntegration_Idempotency(t *testing.T) {
+	t.Parallel()
 	channel := &Channel{
 		Id:              1,
 		ModelRatio:      stringPtr(`{"gpt-3.5-turbo": 0.0015}`),
@@ -231,6 +254,7 @@ func TestMigrationIntegration_Idempotency(t *testing.T) {
 
 // TestMigrationIntegration_ErrorRecovery tests error recovery scenarios
 func TestMigrationIntegration_ErrorRecovery(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name                 string
 		initialModelConfigs  *string
@@ -260,6 +284,7 @@ func TestMigrationIntegration_ErrorRecovery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			channel := &Channel{
 				Id:           1,
 				ModelConfigs: tt.initialModelConfigs,

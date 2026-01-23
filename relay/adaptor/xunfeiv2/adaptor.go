@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/relay/adaptor"
+	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
 )
@@ -33,6 +34,11 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, request *model.ImageReques
 	return nil, nil
 }
 
+// ConvertClaudeRequest converts Claude Messages API request to OpenAI format for xunfeiv2
+func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, error) {
+	return openai_compatible.ConvertClaudeRequest(c, request)
+}
+
 func (a *Adaptor) DoRequest(c *gin.Context, meta *meta.Meta, requestBody io.Reader) (*http.Response, error) {
 	return nil, nil
 }
@@ -57,11 +63,11 @@ func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 	return map[string]adaptor.ModelConfig{
 		// XunfeiV2 Models - Based on https://www.xfyun.cn/doc/spark/Web.html#_1-%E6%8E%A5%E5%8F%A3%E8%AF%B4%E6%98%8E
 		"spark-lite":      {Ratio: 0.0 * MilliTokensRmb, CompletionRatio: 1},   // Free tier
-		"spark-pro":       {Ratio: 0.003 * MilliTokensRmb, CompletionRatio: 1}, // ¥0.003 / 1k tokens
-		"spark-pro-128k":  {Ratio: 0.005 * MilliTokensRmb, CompletionRatio: 1}, // ¥0.005 / 1k tokens
-		"spark-max":       {Ratio: 0.005 * MilliTokensRmb, CompletionRatio: 1}, // ¥0.005 / 1k tokens
-		"spark-max-32k":   {Ratio: 0.008 * MilliTokensRmb, CompletionRatio: 1}, // ¥0.008 / 1k tokens
-		"spark-4.0-ultra": {Ratio: 0.005 * MilliTokensRmb, CompletionRatio: 1}, // ¥0.005 / 1k tokens
+		"spark-pro":       {Ratio: 0.003 * MilliTokensRmb, CompletionRatio: 1}, // CNY 0.003 / 1k tokens
+		"spark-pro-128k":  {Ratio: 0.005 * MilliTokensRmb, CompletionRatio: 1}, // CNY 0.005 / 1k tokens
+		"spark-max":       {Ratio: 0.005 * MilliTokensRmb, CompletionRatio: 1}, // CNY 0.005 / 1k tokens
+		"spark-max-32k":   {Ratio: 0.008 * MilliTokensRmb, CompletionRatio: 1}, // CNY 0.008 / 1k tokens
+		"spark-4.0-ultra": {Ratio: 0.005 * MilliTokensRmb, CompletionRatio: 1}, // CNY 0.005 / 1k tokens
 	}
 }
 
@@ -81,4 +87,9 @@ func (a *Adaptor) GetCompletionRatio(modelName string) float64 {
 	}
 	// Use default fallback from DefaultPricingMethods
 	return a.DefaultPricingMethods.GetCompletionRatio(modelName)
+}
+
+// DefaultToolingConfig returns Xunfei V2 tooling defaults (no published tool billing as of 2025-11-12).
+func (a *Adaptor) DefaultToolingConfig() adaptor.ChannelToolConfig {
+	return XunfeiV2ToolingDefaults
 }

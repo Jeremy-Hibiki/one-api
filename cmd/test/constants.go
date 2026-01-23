@@ -20,29 +20,20 @@ var visionUnsupportedModels = map[string]struct{}{
 	"openai/gpt-oss-20b": {},
 }
 
+// azureEOFProneVariants was historically used to skip non-streaming Response API variants
+// where Azure would prematurely close the connection. This has since been fixed upstream
+// and these variants now work reliably. Keeping the map empty but preserved for future use.
+var azureEOFProneVariants = map[string]struct{}{}
+
 // structuredVariantSkips enumerates provider/variant combinations where the upstream API
 // provably lacks JSON-schema structured output support. Each entry provides a human-readable
 // reason that will be surfaced in the regression report when the combination is skipped.
 //
-// Rationale for current skips:
-//   - azure-gpt-5-nano (Azure-hosted GPT-5 nano) never emits structured JSON for Claude
-//     Messages, returning empty message content even when forced; both streaming states are
-//     skipped to avoid false failures while the provider lacks the capability.
-//   - gpt-5-mini fails to stream Claude structured output (the stream only carries usage
-//     deltas with no JSON blocks). Non-streaming is kept because it succeeds.
+// Rationale:
+// Keep this list small and strictly evidence-based. If a provider supports structured
+// outputs via any compatible API surface, one-api should convert the request rather than
+// skipping (e.g. Claude Messages structured -> Response API structured).
 var structuredVariantSkips = map[string]map[string]string{
-	"claude_structured_stream_false": {
-		"azure-gpt-5-nano": "Azure GPT-5 nano does not return structured JSON for Claude messages (empty content)",
-		"gpt-5-mini":       "GPT-5 mini returns empty content for Claude structured requests",
-	},
-	"claude_structured_stream_true": {
-		"azure-gpt-5-nano": "Azure GPT-5 nano does not return structured JSON for Claude messages (empty content)",
-		"gpt-5-mini":       "GPT-5 mini streams only usage deltas, never emitting structured JSON blocks",
-	},
+	"claude_structured_stream_false": {},
+	"claude_structured_stream_true":  {},
 }
-
-// toolHistoryVariantSkips remains intentionally empty. The regression suite now tolerates
-// providers that answer historical tool conversations with natural language instead of
-// replaying tool calls, so the matrix should exercise every Tools History variant and
-// surface genuine protocol gaps as test failures rather than skips.
-var toolHistoryVariantSkips = map[string]map[string]string{}

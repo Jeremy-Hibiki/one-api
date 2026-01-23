@@ -8,8 +8,10 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/Laisky/errors/v2"
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
@@ -21,9 +23,9 @@ import (
 	"github.com/songquanpeng/one-api/common/tracing"
 	relaymodel "github.com/songquanpeng/one-api/model"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	metalib "github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/songquanpeng/one-api/relay/pricing"
 	"github.com/songquanpeng/one-api/relay/relaymode"
 	"github.com/songquanpeng/one-api/relay/streaming"
 )
@@ -77,6 +79,18 @@ func recordUpstreamCompleted(c *gin.Context) {
 		return
 	}
 	tracing.RecordTraceTimestamp(c, relaymodel.TimestampUpstreamCompleted)
+}
+
+func shouldLogDetailedUpstreamBody(c *gin.Context) bool {
+	if c == nil {
+		return true
+	}
+	if skipRaw, exists := c.Get(ctxkey.SkipAdaptorResponseBodyLog); exists {
+		if flag, ok := skipRaw.(bool); ok {
+			return !flag
+		}
+	}
+	return true
 }
 
 // StreamHandler processes streaming responses from OpenAI API
@@ -356,6 +370,21 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
 
+	// Log the upstream response before any transformation so troubleshooting retains full context
+	fields := []zap.Field{
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("body_bytes", len(responseBody)),
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		fields = append(fields, zap.String("content_type", contentType))
+	}
+	if shouldLogDetailedUpstreamBody(c) {
+		fields = append(fields, zap.ByteString("body", responseBody))
+	} else {
+		fields = append(fields, zap.Bool("body_logging_suppressed", true))
+	}
+	logger.Debug("receive upstream response", fields...)
+
 	// Parse the response JSON
 	var textResponse TextResponseWithErrorInfo
 	if err = json.Unmarshal(responseBody, &textResponse); err != nil {
@@ -368,6 +397,29 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 			Error:      *textResponse.Error,
 			StatusCode: resp.StatusCode,
 		}, nil
+	}
+
+	// Forward responses that are not ChatCompletions when upstream omits choices without mutating the payload
+	if len(textResponse.Choices) == 0 {
+		logger.Debug("handler forwarding raw upstream response", zap.Int("status_code", resp.StatusCode))
+		resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
+
+		for k, values := range resp.Header {
+			for _, v := range values {
+				c.Writer.Header().Add(k, v)
+			}
+		}
+
+		c.Writer.WriteHeader(resp.StatusCode)
+		if _, err = io.Copy(c.Writer, resp.Body); err != nil {
+			return ErrorWrapper(err, "copy_response_body_failed", http.StatusInternalServerError), nil
+		}
+
+		if err = resp.Body.Close(); err != nil {
+			return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
+		}
+
+		return nil, nil
 	}
 
 	// Process reasoning content in each choice
@@ -385,6 +437,8 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	// Check if this is a Claude Messages conversion - if so, don't write response here
 	// The DoResponse method will handle the conversion and response writing
 	if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); exists && isClaudeConversion.(bool) {
+		// Preserve the original response body so convertToClaudeResponse can consume it later.
+		resp.Body = io.NopCloser(bytes.NewReader(responseBody))
 		// For Claude Messages conversion, just return the usage information
 		// The DoResponse method will handle the response conversion and writing
 		calculateTokenUsage(&textResponse, promptTokens, modelName)
@@ -403,7 +457,7 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		responseBody = modifiedBody
 		resp.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 	}
-	logger.Debug("handler response", zap.ByteString("body", responseBody))
+	logger.Debug("handler converted response", zap.ByteString("body", responseBody))
 
 	// Forward all response headers (not just first value of each)
 	for k, values := range resp.Header {
@@ -416,6 +470,14 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 			c.Writer.Header().Add(k, v)
 		}
 	}
+
+	// Ensure content length reflects the rewritten body size so clients do not wait for
+	// more bytes than we send (e.g. when we drop upstream-only fields).
+	newLength := strconv.Itoa(len(responseBody))
+	c.Writer.Header().Set("Content-Length", newLength)
+	logger.Debug("adjusted response content length",
+		zap.String("original_content_length", resp.Header.Get("Content-Length")),
+		zap.String("rewritten_content_length", newLength))
 
 	// Set response status and copy body to client
 	c.Writer.WriteHeader(resp.StatusCode)
@@ -433,6 +495,116 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 
 	// Usage was already calculated above
 	return nil, &textResponse.Usage
+}
+
+// EmbeddingHandler processes non-streaming embedding responses from the OpenAI API and derives usage
+// information even when upstream omits the usage block.
+func EmbeddingHandler(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
+	logger := gmw.GetLogger(c)
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ErrorWrapper(err, "read_embedding_response_body_failed", http.StatusInternalServerError), nil
+	}
+
+	if err = resp.Body.Close(); err != nil {
+		return ErrorWrapper(err, "close_embedding_response_body_failed", http.StatusInternalServerError), nil
+	}
+
+	fields := []zap.Field{
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("body_bytes", len(responseBody)),
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		fields = append(fields, zap.String("content_type", contentType))
+	}
+	if shouldLogDetailedUpstreamBody(c) {
+		fields = append(fields, zap.ByteString("body", responseBody))
+	} else {
+		fields = append(fields, zap.Bool("body_logging_suppressed", true))
+	}
+	logger.Debug("receive upstream embedding response", fields...)
+
+	if len(responseBody) == 0 {
+		logger.Error("received empty embedding response body from upstream",
+			zap.Int("status_code", resp.StatusCode),
+			zap.String("model", modelName))
+		return ErrorWrapper(errors.Errorf("empty embedding response body from upstream"),
+			"empty_embedding_response", http.StatusInternalServerError), nil
+	}
+
+	var embeddingResponse EmbeddingResponse
+	if err = json.Unmarshal(responseBody, &embeddingResponse); err != nil {
+		logger.Error("failed to unmarshal embedding response body",
+			zap.Error(err),
+			zap.ByteString("response_body", responseBody))
+		return ErrorWrapper(err, "unmarshal_embedding_response_failed", http.StatusInternalServerError), nil
+	}
+
+	if embeddingResponse.Error != nil && embeddingResponse.Error.Type != "" {
+		if embeddingResponse.Error.RawError == nil && embeddingResponse.Error.Message != "" {
+			embeddingResponse.Error.RawError = stdErrors.New(embeddingResponse.Error.Message)
+		}
+		logger.Debug("upstream returned embedding error response",
+			zap.String("error_type", string(embeddingResponse.Error.Type)),
+			zap.String("error_message", embeddingResponse.Error.Message),
+			zap.Error(embeddingResponse.Error.RawError))
+		return &model.ErrorWithStatusCode{
+			Error:      *embeddingResponse.Error,
+			StatusCode: resp.StatusCode,
+		}, nil
+	}
+
+	if len(embeddingResponse.Data) == 0 {
+		logger.Error("embedding response has no data, possible upstream error",
+			zap.ByteString("response_body", responseBody))
+		return ErrorWrapper(errors.Errorf("no embedding data in upstream response"),
+			"missing_embedding_data", http.StatusInternalServerError), nil
+	}
+
+	base64Vectors := 0
+	base64Dims := 0
+	for _, item := range embeddingResponse.Data {
+		if item.Base64Encoded {
+			base64Vectors++
+			if base64Dims == 0 {
+				base64Dims = len(item.Embedding)
+			}
+		}
+	}
+	if base64Vectors > 0 {
+		logger.Debug("decoded base64 embeddings",
+			zap.Int("vectors", base64Vectors),
+			zap.Int("dimensions", base64Dims))
+	}
+
+	usage := embeddingResponse.Usage
+	if usage.PromptTokens == 0 && promptTokens > 0 {
+		usage.PromptTokens = promptTokens
+	}
+	if usage.TotalTokens == 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+
+	logger.Debug("finalized embedding usage",
+		zap.Int("prompt_tokens", usage.PromptTokens),
+		zap.Int("completion_tokens", usage.CompletionTokens),
+		zap.Int("total_tokens", usage.TotalTokens))
+
+	// Preserve aggregated response for downstream inspection (e.g. tests or converters)
+	embeddingResponse.Usage = usage
+	c.Set(ctxkey.ConvertedResponse, embeddingResponse)
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+	c.Writer.WriteHeader(resp.StatusCode)
+	if _, err = c.Writer.Write(responseBody); err != nil {
+		return ErrorWrapper(err, "write_embedding_response_body_failed", http.StatusInternalServerError), &usage
+	}
+
+	return nil, &usage
 }
 
 // processReasoningContent is a helper function to extract and process reasoning content from the message
@@ -511,25 +683,37 @@ func hasAudioTokens(response *TextResponseWithErrorInfo) bool {
 // Helper function to calculate audio token usage
 func calculateAudioTokens(response *TextResponseWithErrorInfo, modelName string) {
 	// Convert audio tokens for prompt
+	audioCfg, found := pricing.ResolveAudioPricing(modelName, nil, &Adaptor{})
+	promptRatio := pricing.DefaultAudioPromptRatio
+	completionRatio := pricing.DefaultAudioCompletionRatio
+	if found && audioCfg != nil {
+		promptRatio = audioCfg.PromptRatio
+		completionRatio = audioCfg.CompletionRatio
+	}
+
 	if response.PromptTokensDetails != nil {
 		response.Usage.PromptTokens = response.PromptTokensDetails.TextTokens +
-			int(math.Ceil(
-				float64(response.PromptTokensDetails.AudioTokens)*
-					ratio.GetAudioPromptRatio(modelName),
-			))
+			int(math.Ceil(float64(response.PromptTokensDetails.AudioTokens)*promptRatio))
 	}
 
 	// Convert audio tokens for completion
 	if response.CompletionTokensDetails != nil {
 		response.Usage.CompletionTokens = response.CompletionTokensDetails.TextTokens +
-			int(math.Ceil(
-				float64(response.CompletionTokensDetails.AudioTokens)*
-					ratio.GetAudioPromptRatio(modelName)*ratio.GetAudioCompletionRatio(modelName),
-			))
+			int(math.Ceil(float64(response.CompletionTokensDetails.AudioTokens)*promptRatio*completionRatio))
 	}
 
 	// Calculate total tokens
 	response.Usage.TotalTokens = response.Usage.PromptTokens + response.Usage.CompletionTokens
+}
+
+func deriveWebSearchInvocationCount(current int, usage *ResponseAPIUsage) (int, bool) {
+	if current > 0 || usage == nil || usage.InputTokensDetails == nil {
+		return current, false
+	}
+	if count := usage.InputTokensDetails.WebSearchInvocationCount(); count > 0 {
+		return count, true
+	}
+	return current, false
 }
 
 // ResponseAPIHandler processes non-streaming responses from Response API format and converts them back to ChatCompletion format
@@ -543,8 +727,19 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 	}
 
 	lg := gmw.GetLogger(c)
-	// Log the response body for debugging
-	lg.Debug("got response from upstream", zap.ByteString("body", responseBody))
+	fields := []zap.Field{
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("body_bytes", len(responseBody)),
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		fields = append(fields, zap.String("content_type", contentType))
+	}
+	if shouldLogDetailedUpstreamBody(c) {
+		fields = append(fields, zap.ByteString("body", responseBody))
+	} else {
+		fields = append(fields, zap.Bool("body_logging_suppressed", true))
+	}
+	lg.Debug("got response from upstream", fields...)
 
 	// Close the original response body
 	if err = resp.Body.Close(); err != nil {
@@ -565,7 +760,12 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 		}, nil
 	}
 
-	if calls := countWebSearchSearchActions(responseAPIResp.Output); calls > 0 {
+	calls := countWebSearchSearchActions(responseAPIResp.Output)
+	if derived, usedFallback := deriveWebSearchInvocationCount(calls, responseAPIResp.Usage); usedFallback {
+		lg.Debug("web search count derived from usage details", zap.Int("web_search_requests", derived))
+		calls = derived
+	}
+	if calls > 0 {
 		c.Set(ctxkey.WebSearchCallCount, calls)
 	}
 
@@ -627,8 +827,11 @@ func ResponseAPIHandler(c *gin.Context, resp *http.Response, promptTokens int, m
 	}
 
 	// Set response status and send the converted response to client
+	newLength := strconv.Itoa(len(jsonResponse))
+	c.Writer.Header().Set("Content-Length", newLength)
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
+	lg.Debug("adjusted response content length", zap.String("original_content_length", resp.Header.Get("Content-Length")), zap.String("rewritten_content_length", newLength))
 	if _, err = c.Writer.Write(jsonResponse); err != nil {
 		// Return usage even on write failure so billing can proceed for forwarded requests
 		return ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), &chatCompletionResp.Usage
@@ -645,6 +848,7 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 	responseText := ""
 	reasoningText := ""
 	var usage *model.Usage
+	var lastUsage *ResponseAPIUsage
 	webSearchSeen := make(map[string]struct{})
 	webSearchCount := 0
 	toolStates := make(map[string]*responseStreamToolCallState)
@@ -913,6 +1117,9 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 		}
 
 		// Accumulate usage information
+		if responseAPIChunk.Usage != nil {
+			lastUsage = responseAPIChunk.Usage
+		}
 		if chatCompletionChunk.Usage != nil {
 			usage = chatCompletionChunk.Usage
 		}
@@ -1066,6 +1273,10 @@ func ResponseAPIStreamHandler(c *gin.Context, resp *http.Response, relayMode int
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), responseText, usage
 	}
 
+	if derived, usedFallback := deriveWebSearchInvocationCount(webSearchCount, lastUsage); usedFallback {
+		gmw.GetLogger(c).Debug("web search count derived from usage details (stream)", zap.Int("web_search_requests", derived))
+		webSearchCount = derived
+	}
 	if webSearchCount > 0 {
 		c.Set(ctxkey.WebSearchCallCount, webSearchCount)
 	}
@@ -1086,8 +1297,19 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 		return ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
 	}
 
-	// Log the response body for debugging
-	gmw.GetLogger(c).Debug("got response from upstream", zap.ByteString("body", responseBody))
+	fields := []zap.Field{
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("body_bytes", len(responseBody)),
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		fields = append(fields, zap.String("content_type", contentType))
+	}
+	if shouldLogDetailedUpstreamBody(c) {
+		fields = append(fields, zap.ByteString("body", responseBody))
+	} else {
+		fields = append(fields, zap.Bool("body_logging_suppressed", true))
+	}
+	gmw.GetLogger(c).Debug("got response from upstream", fields...)
 
 	// Close the original response body
 	if err = resp.Body.Close(); err != nil {
@@ -1108,7 +1330,12 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 		}, nil
 	}
 
-	if calls := countWebSearchSearchActions(responseAPIResp.Output); calls > 0 {
+	calls := countWebSearchSearchActions(responseAPIResp.Output)
+	if derived, usedFallback := deriveWebSearchInvocationCount(calls, responseAPIResp.Usage); usedFallback {
+		gmw.GetLogger(c).Debug("web search count derived from usage details", zap.Int("web_search_requests", derived))
+		calls = derived
+	}
+	if calls > 0 {
 		c.Set(ctxkey.WebSearchCallCount, calls)
 	}
 
@@ -1151,8 +1378,11 @@ func ResponseAPIDirectHandler(c *gin.Context, resp *http.Response, promptTokens 
 	}
 
 	// Set response status and send the response directly to client
+	newLength := strconv.Itoa(len(responseBody))
+	c.Writer.Header().Set("Content-Length", newLength)
 	c.Writer.Header().Set("Content-Type", "application/json")
 	c.Writer.WriteHeader(resp.StatusCode)
+	gmw.GetLogger(c).Debug("adjusted response content length", zap.String("original_content_length", resp.Header.Get("Content-Length")), zap.String("rewritten_content_length", newLength))
 	if _, err = c.Writer.Write(responseBody); err != nil {
 		// Return usage even on write failure so billing can proceed for forwarded requests
 		return ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), finalUsage
@@ -1170,6 +1400,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 	// Initialize accumulators for the response
 	responseText := ""
 	var usage *model.Usage
+	var lastUsage *ResponseAPIUsage
 	webSearchSeen := make(map[string]struct{})
 	webSearchCount := 0
 	var lastFullResponse *ResponseAPIResponse
@@ -1239,6 +1470,7 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 
 		// Accumulate usage information
 		if responseAPIChunk.Usage != nil {
+			lastUsage = responseAPIChunk.Usage
 			if convertedUsage := responseAPIChunk.Usage.ToModelUsage(); convertedUsage != nil {
 				usage = convertedUsage
 			}
@@ -1261,6 +1493,10 @@ func ResponseAPIDirectStreamHandler(c *gin.Context, resp *http.Response, relayMo
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), responseText, usage
 	}
 
+	if derived, usedFallback := deriveWebSearchInvocationCount(webSearchCount, lastUsage); usedFallback {
+		gmw.GetLogger(c).Debug("web search count derived from usage details (direct stream)", zap.Int("web_search_requests", derived))
+		webSearchCount = derived
+	}
 	if webSearchCount > 0 {
 		c.Set(ctxkey.WebSearchCallCount, webSearchCount)
 	}

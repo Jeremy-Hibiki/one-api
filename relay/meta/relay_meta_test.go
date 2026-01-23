@@ -7,12 +7,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/songquanpeng/one-api/common/ctxkey"
 	"github.com/songquanpeng/one-api/model"
 )
 
 func TestGetByContext_ChannelRetry(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	// Create a test context
@@ -73,6 +75,7 @@ func TestGetByContext_ChannelRetry(t *testing.T) {
 }
 
 func TestGetByContext_NoChannelChange(t *testing.T) {
+	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	// Create a test context
@@ -115,23 +118,17 @@ func TestGetByContext_NoChannelChange(t *testing.T) {
 }
 
 func TestEnsureActualModelName(t *testing.T) {
+	t.Parallel()
 	meta := &Meta{
 		ModelMapping: map[string]string{"alias": "mapped"},
 	}
 
 	meta.EnsureActualModelName("alias")
 
-	if meta.OriginModelName != "alias" {
-		t.Fatalf("expected OriginModelName to be backfilled, got %q", meta.OriginModelName)
-	}
-
-	if meta.ActualModelName != "mapped" {
-		t.Fatalf("expected ActualModelName to be mapped value, got %q", meta.ActualModelName)
-	}
+	require.Equal(t, "alias", meta.OriginModelName, "expected OriginModelName to be backfilled")
+	require.Equal(t, "mapped", meta.ActualModelName, "expected ActualModelName to be mapped value")
 
 	// Calling again with blank fallback should keep existing values
 	meta.EnsureActualModelName("")
-	if meta.ActualModelName != "mapped" {
-		t.Fatalf("expected ActualModelName to remain unchanged, got %q", meta.ActualModelName)
-	}
+	require.Equal(t, "mapped", meta.ActualModelName, "expected ActualModelName to remain unchanged")
 }

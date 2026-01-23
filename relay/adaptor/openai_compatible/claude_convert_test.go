@@ -28,6 +28,7 @@ func newGinTestContext() (*gin.Context, *flushRecorder) {
 }
 
 func TestConvertOpenAIResponseToClaudeResponse_ChatCompletions(t *testing.T) {
+	t.Parallel()
 	// Build a minimal OpenAI chat completion style response JSON
 	body := `{
         "id":"chatcmpl-1",
@@ -87,6 +88,7 @@ func TestConvertOpenAIResponseToClaudeResponse_ChatCompletions(t *testing.T) {
 }
 
 func TestConvertOpenAIResponseToClaudeResponse_ResponseAPI(t *testing.T) {
+	t.Parallel()
 	body := `{
         "id":"resp_1",
         "object":"response",
@@ -123,7 +125,41 @@ func TestConvertOpenAIResponseToClaudeResponse_ResponseAPI(t *testing.T) {
 	assert.GreaterOrEqual(t, types["tool_use"], 1)
 }
 
+func TestConvertOpenAIResponseToClaudeResponse_ResponseAPIOutputJSON(t *testing.T) {
+	t.Parallel()
+	body := `{
+	    "id":"resp_json",
+	    "object":"response",
+	    "model":"gpt-resp",
+	    "output":[
+	        {"type":"message","role":"assistant","content":[{"type":"output_json","json":{"topic":"AI","confidence":0.92}}]}
+	    ],
+	    "usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},
+	    "created_at": 1,
+	    "status":"completed"
+	}`
+
+	resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+	got, errResp := ConvertOpenAIResponseToClaudeResponse(nil, resp)
+	require.Nil(t, errResp)
+	bytes, readErr := io.ReadAll(got.Body)
+	require.NoError(t, readErr)
+
+	var cr relaymodel.ClaudeResponse
+	require.NoError(t, json.Unmarshal(bytes, &cr))
+	require.NotEmpty(t, cr.Content)
+	found := false
+	for _, block := range cr.Content {
+		if block.Type == "text" {
+			found = true
+			assert.Equal(t, "{\"topic\":\"AI\",\"confidence\":0.92}", block.Text)
+		}
+	}
+	assert.True(t, found, "expected JSON text block")
+}
+
 func TestConvertOpenAIStreamToClaudeSSE_BasicsAndUsage(t *testing.T) {
+	t.Parallel()
 	c, w := newGinTestContext()
 
 	// Build a minimal OpenAI-style SSE stream with text, tool delta, and usage
@@ -156,6 +192,7 @@ func TestConvertOpenAIStreamToClaudeSSE_BasicsAndUsage(t *testing.T) {
 }
 
 func TestConvertOpenAIStreamToClaudeSSE_NoUpstreamUsage_Computed(t *testing.T) {
+	t.Parallel()
 	c, w := newGinTestContext()
 
 	// No usage event; should compute from accumulated text + tool args
@@ -183,6 +220,7 @@ func TestConvertOpenAIStreamToClaudeSSE_NoUpstreamUsage_Computed(t *testing.T) {
 }
 
 func TestConvertOpenAIStreamToClaudeSSE_ResponseAPIToolCall(t *testing.T) {
+	t.Parallel()
 	c, w := newGinTestContext()
 
 	chunks := []string{
@@ -206,6 +244,7 @@ func TestConvertOpenAIStreamToClaudeSSE_ResponseAPIToolCall(t *testing.T) {
 }
 
 func TestConvertOpenAIStreamToClaudeSSE_ResponseAPIStructuredJSON(t *testing.T) {
+	t.Parallel()
 	c, w := newGinTestContext()
 
 	chunks := []string{

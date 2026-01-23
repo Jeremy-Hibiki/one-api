@@ -1,5 +1,7 @@
 package ratio
 
+// ImageSizeRatios defines base multipliers for image generation models by size.
+// These ratios are used to adjust pricing based on the requested image dimensions.
 var ImageSizeRatios = map[string]map[string]float64{
 	"dall-e-2": {
 		"256x256":   1,
@@ -15,6 +17,26 @@ var ImageSizeRatios = map[string]map[string]float64{
 		"1024x1024": 1,
 		"1024x1536": 16.0 / 11,
 		"1536x1024": 16.0 / 11,
+	},
+	"gpt-image-1-mini": {
+		"1024x1024": 1,
+		"1024x1536": 0.006 / 0.005,
+		"1536x1024": 0.006 / 0.005,
+	},
+	"chatgpt-image-latest": {
+		"1024x1024": 1,
+		"1024x1536": 13.0 / 9.0,
+		"1536x1024": 13.0 / 9.0,
+	},
+	"gpt-image-1.5": {
+		"1024x1024": 1,
+		"1024x1536": 13.0 / 9.0,
+		"1536x1024": 13.0 / 9.0,
+	},
+	"gpt-image-1.5-2025-12-16": {
+		"1024x1024": 1,
+		"1024x1536": 13.0 / 9.0,
+		"1536x1024": 13.0 / 9.0,
 	},
 	"ali-stable-diffusion-xl": {
 		"512x1024":  1,
@@ -55,6 +77,10 @@ var ImageGenerationAmounts = map[string][2]int{
 	"dall-e-2":                  {1, 10},
 	"dall-e-3":                  {1, 1}, // OpenAI allows n=1 currently.
 	"gpt-image-1":               {1, 1},
+	"gpt-image-1-mini":          {1, 1},
+	"chatgpt-image-latest":      {1, 1},
+	"gpt-image-1.5":             {1, 1},
+	"gpt-image-1.5-2025-12-16":  {1, 1},
 	"ali-stable-diffusion-xl":   {1, 4}, // Ali
 	"ali-stable-diffusion-v1.5": {1, 4}, // Ali
 	"wanx-v1":                   {1, 4}, // Ali
@@ -68,6 +94,10 @@ var ImagePromptLengthLimitations = map[string]int{
 	"dall-e-2":                  1000,
 	"dall-e-3":                  4000,
 	"gpt-image-1":               4000,
+	"gpt-image-1-mini":          4000,
+	"chatgpt-image-latest":      4000,
+	"gpt-image-1.5":             4000,
+	"gpt-image-1.5-2025-12-16":  4000,
 	"ali-stable-diffusion-xl":   4000,
 	"ali-stable-diffusion-v1.5": 4000,
 	"wanx-v1":                   4000,
@@ -89,7 +119,7 @@ var ImageOriginModelName = map[string]string{
 //
 // Quality "default" applies when no specific quality tier is set.
 var ImageTierTables = map[string]map[string]map[string]float64{
-	// DALL·E 2: default tiers from ImageSizeRatios
+	// DALL-E 2: default tiers from ImageSizeRatios
 	"dall-e-2": {
 		"default": {
 			"256x256":   1,
@@ -97,7 +127,7 @@ var ImageTierTables = map[string]map[string]map[string]float64{
 			"1024x1024": 1.25,
 		},
 	},
-	// DALL·E 3: default + hd tiers
+	// DALL-E 3: default + hd tiers
 	"dall-e-3": {
 		"default": {
 			"1024x1024": 1,
@@ -137,6 +167,114 @@ var ImageTierTables = map[string]map[string]map[string]float64{
 			"1024x1024": 167.0 / 11,
 			"1024x1536": 250.0 / 11,
 			"1536x1024": 250.0 / 11,
+		},
+	},
+	"gpt-image-1-mini": {
+		"default": {
+			"1024x1024": 1,
+			"1024x1536": 0.006 / 0.005,
+			"1536x1024": 0.006 / 0.005,
+		},
+		"low": {
+			"1024x1024": 1,
+			"1024x1536": 0.006 / 0.005,
+			"1536x1024": 0.006 / 0.005,
+		},
+		"medium": {
+			"1024x1024": 0.011 / 0.005,
+			"1024x1536": 0.015 / 0.005,
+			"1536x1024": 0.015 / 0.005,
+		},
+		"high": {
+			"1024x1024": 0.036 / 0.005,
+			"1024x1536": 0.052 / 0.005,
+			"1536x1024": 0.052 / 0.005,
+		},
+		"auto": { // same as high
+			"1024x1024": 0.036 / 0.005,
+			"1024x1536": 0.052 / 0.005,
+			"1536x1024": 0.052 / 0.005,
+		},
+	},
+	"chatgpt-image-latest": {
+		"default": {
+			"1024x1024": 1,
+			"1024x1536": 13.0 / 9.0,
+			"1536x1024": 13.0 / 9.0,
+		},
+		"low": {
+			"1024x1024": 1,
+			"1024x1536": 13.0 / 9.0,
+			"1536x1024": 13.0 / 9.0,
+		},
+		"medium": {
+			"1024x1024": 34.0 / 9.0,
+			"1024x1536": 50.0 / 9.0,
+			"1536x1024": 50.0 / 9.0,
+		},
+		"high": {
+			"1024x1024": 133.0 / 9.0,
+			"1024x1536": 200.0 / 9.0,
+			"1536x1024": 200.0 / 9.0,
+		},
+		"auto": { // same as high
+			"1024x1024": 133.0 / 9.0,
+			"1024x1536": 200.0 / 9.0,
+			"1536x1024": 200.0 / 9.0,
+		},
+	},
+	"gpt-image-1.5": {
+		"default": {
+			"1024x1024": 1,
+			"1024x1536": 13.0 / 9.0,
+			"1536x1024": 13.0 / 9.0,
+		},
+		"low": {
+			"1024x1024": 1,
+			"1024x1536": 13.0 / 9.0,
+			"1536x1024": 13.0 / 9.0,
+		},
+		"medium": {
+			"1024x1024": 34.0 / 9.0,
+			"1024x1536": 50.0 / 9.0,
+			"1536x1024": 50.0 / 9.0,
+		},
+		"high": {
+			"1024x1024": 133.0 / 9.0,
+			"1024x1536": 200.0 / 9.0,
+			"1536x1024": 200.0 / 9.0,
+		},
+		"auto": { // same as high
+			"1024x1024": 133.0 / 9.0,
+			"1024x1536": 200.0 / 9.0,
+			"1536x1024": 200.0 / 9.0,
+		},
+	},
+	"gpt-image-1.5-2025-12-16": {
+		"default": {
+			"1024x1024": 1,
+			"1024x1536": 13.0 / 9.0,
+			"1536x1024": 13.0 / 9.0,
+		},
+		"low": {
+			"1024x1024": 1,
+			"1024x1536": 13.0 / 9.0,
+			"1536x1024": 13.0 / 9.0,
+		},
+		"medium": {
+			"1024x1024": 34.0 / 9.0,
+			"1024x1536": 50.0 / 9.0,
+			"1536x1024": 50.0 / 9.0,
+		},
+		"high": {
+			"1024x1024": 133.0 / 9.0,
+			"1024x1536": 200.0 / 9.0,
+			"1536x1024": 200.0 / 9.0,
+		},
+		"auto": { // same as high
+			"1024x1024": 133.0 / 9.0,
+			"1024x1536": 200.0 / 9.0,
+			"1536x1024": 200.0 / 9.0,
 		},
 	},
 	// Ali SD variants and others: copy defaults from ImageSizeRatios

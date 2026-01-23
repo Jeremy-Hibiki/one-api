@@ -4,6 +4,8 @@ import (
 	"net/http"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
 	"github.com/songquanpeng/one-api/common/ctxkey"
@@ -39,6 +41,52 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	}
 
 	geminiRequest := gemini.ConvertRequest(*request)
+	lg := gmw.GetLogger(c)
+	if geminiRequest == nil {
+		lg.Error("gemini request conversion returned nil",
+			zap.String("model", request.Model))
+		return nil, errors.New("converted request is nil")
+	}
+
+	lastRole := ""
+	if len(geminiRequest.Contents) > 0 {
+		lastRole = geminiRequest.Contents[len(geminiRequest.Contents)-1].Role
+	}
+
+	lg.Debug("gemini vertex convert summary",
+		zap.String("model", request.Model),
+		zap.Int("content_count", len(geminiRequest.Contents)),
+		zap.String("last_role", lastRole),
+		zap.Bool("has_system_instruction", geminiRequest.SystemInstruction != nil),
+	)
+
+	var functionNames []string
+	var parameterTypes []string
+	for _, tool := range geminiRequest.Tools {
+		functions, ok := tool.FunctionDeclarations.([]model.Function)
+		if !ok {
+			continue
+		}
+
+		for _, fn := range functions {
+			functionNames = append(functionNames, fn.Name)
+			if params, ok := fn.Parameters.(map[string]any); ok {
+				if typeVal, ok := params["type"].(string); ok {
+					parameterTypes = append(parameterTypes, typeVal)
+					continue
+				}
+			}
+			parameterTypes = append(parameterTypes, "")
+		}
+	}
+
+	if len(functionNames) > 0 {
+		lg.Debug("gemini vertex tools normalized",
+			zap.Int("function_count", len(functionNames)),
+			zap.Strings("function_names", functionNames),
+			zap.Strings("function_param_types", parameterTypes),
+		)
+	}
 	c.Set(ctxkey.RequestModel, request.Model)
 	c.Set(ctxkey.ConvertedRequest, geminiRequest)
 	return geminiRequest, nil

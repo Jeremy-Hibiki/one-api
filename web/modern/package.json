@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build --emptyOutDir",
     "build:prod": "tsc -b && vite build --mode production --emptyOutDir",
     "preview": "vite preview",
@@ -50,6 +50,7 @@
     "recharts": "^2.12.7",
     "rehype-highlight": "^7.0.2",
     "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
     "remark-emoji": "^5.0.2",
     "remark-gfm": "^4.0.1",

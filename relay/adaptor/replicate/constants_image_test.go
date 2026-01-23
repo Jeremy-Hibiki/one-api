@@ -1,9 +1,14 @@
 package replicate
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 // Ensure key Replicate image models have non-zero per-image pricing
 func TestReplicateImageModelPrices(t *testing.T) {
+	t.Parallel()
 	cases := []string{
 		"black-forest-labs/flux-schnell",
 		"black-forest-labs/flux-pro",
@@ -11,11 +16,8 @@ func TestReplicateImageModelPrices(t *testing.T) {
 	}
 	for _, model := range cases {
 		cfg, ok := ModelRatios[model]
-		if !ok {
-			t.Fatalf("model %s not found in ModelRatios", model)
-		}
-		if cfg.ImagePriceUsd <= 0 {
-			t.Fatalf("expected ImagePriceUsd > 0 for %s, got %v", model, cfg.ImagePriceUsd)
-		}
+		require.True(t, ok, "model %s not found in ModelRatios", model)
+		require.NotNil(t, cfg.Image, "expected Image config for %s", model)
+		require.Greater(t, cfg.Image.PricePerImageUsd, float64(0), "expected price_per_image_usd > 0 for %s", model)
 	}
 }

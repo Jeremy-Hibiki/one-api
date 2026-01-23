@@ -7,6 +7,8 @@ func ToAPIType(channelType int) int {
 	switch channelType {
 	case Anthropic:
 		apiType = apitype.Anthropic
+	case ClaudeCompatible:
+		apiType = apitype.Anthropic
 	case Baidu:
 		apiType = apitype.Baidu
 	case PaLM:
@@ -51,6 +53,8 @@ func ToAPIType(channelType int) int {
 		apiType = apitype.Moonshot
 	case XAI:
 		apiType = apitype.XAI
+	case Copilot:
+		apiType = apitype.Copilot
 	}
 
 	return apiType
@@ -96,6 +100,8 @@ func IdToName(channelType int) string {
 		return "aigc2d"
 	case Anthropic:
 		return "anthropic"
+	case ClaudeCompatible:
+		return "claudecompatible"
 	case Baidu:
 		return "baidu"
 	case Zhipu:
@@ -170,6 +176,8 @@ func IdToName(channelType int) string {
 		return "openaicompatible"
 	case GeminiOpenAICompatible:
 		return "geminiopenaicompatible"
+	case Copilot:
+		return "copilot"
 	case Dummy:
 		return "dummy"
 	default:

@@ -120,6 +120,9 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.PUT("/", controller.UpdateToken)
 			tokenRoute.DELETE("/:id", controller.DeleteToken)
 			apiRouter.POST("/token/consume", middleware.TokenAuth(), controller.ConsumeToken)
+			apiRouter.GET("/token/balance", middleware.TokenAuth(), controller.GetTokenBalance)
+			apiRouter.GET("/token/transactions", middleware.TokenAuth(), controller.GetTokenTransactions)
+			apiRouter.GET("/token/logs", middleware.TokenAuth(), controller.GetTokenLogs)
 		}
 		costRoute := apiRouter.Group("/cost")
 		{
@@ -155,6 +158,28 @@ func SetApiRouter(router *gin.Engine) {
 		groupRoute.Use(middleware.AdminAuth())
 		{
 			groupRoute.GET("/", controller.GetGroups)
+		}
+
+		mcpServerRoute := apiRouter.Group("/mcp_servers")
+		mcpServerRoute.Use(middleware.AdminAuth())
+		{
+			mcpServerRoute.GET("/", controller.GetMCPServers)
+			mcpServerRoute.GET("", controller.GetMCPServers)
+			mcpServerRoute.GET("/:id", controller.GetMCPServer)
+			mcpServerRoute.POST("/", controller.CreateMCPServer)
+			mcpServerRoute.POST("", controller.CreateMCPServer)
+			mcpServerRoute.PUT("/:id", controller.UpdateMCPServer)
+			mcpServerRoute.DELETE("/:id", controller.DeleteMCPServer)
+			mcpServerRoute.POST("/:id/sync", controller.SyncMCPServer)
+			mcpServerRoute.POST("/:id/test", controller.TestMCPServer)
+			mcpServerRoute.GET("/:id/tools", controller.ListMCPServerTools)
+		}
+
+		mcpToolRoute := apiRouter.Group("/mcp_tools")
+		mcpToolRoute.Use(middleware.AdminAuth())
+		{
+			mcpToolRoute.GET("/", controller.GetMCPTools)
+			mcpToolRoute.GET("", controller.GetMCPTools)
 		}
 	}
 }

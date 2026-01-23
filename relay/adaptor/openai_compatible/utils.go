@@ -22,6 +22,18 @@ const (
 	Done             = "[DONE]"
 )
 
+func shouldLogDetailedUpstreamBody(c *gin.Context) bool {
+	if c == nil {
+		return true
+	}
+	if skipRaw, exists := c.Get(ctxkey.SkipAdaptorResponseBodyLog); exists {
+		if flag, ok := skipRaw.(bool); ok {
+			return !flag
+		}
+	}
+	return true
+}
+
 // ChatCompletionsStreamResponse represents the streaming response structure
 type ChatCompletionsStreamResponse struct {
 	Id      string                                `json:"id"`
@@ -88,7 +100,7 @@ func ErrorWrapper(err error, code string, statusCode int) *model.ErrorWithStatus
 	return &model.ErrorWithStatusCode{
 		Error: model.Error{
 			Message:  err.Error(),
-			Type:     "one_api_error",
+			Type:     model.ErrorTypeOneAPI,
 			Code:     code,
 			RawError: err,
 		},
@@ -160,7 +172,19 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStat
 		return ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
 	}
 
-	logger.Debug("receive embedding response from upstream channel", zap.ByteString("response_body", responseBody))
+	fields := []zap.Field{
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("body_bytes", len(responseBody)),
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		fields = append(fields, zap.String("content_type", contentType))
+	}
+	if shouldLogDetailedUpstreamBody(c) {
+		fields = append(fields, zap.ByteString("response_body", responseBody))
+	} else {
+		fields = append(fields, zap.Bool("body_logging_suppressed", true))
+	}
+	logger.Debug("receive embedding response from upstream channel", fields...)
 	if err = resp.Body.Close(); err != nil {
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
@@ -199,7 +223,7 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStat
 			embeddingResponse.Error.RawError = errors.New(embeddingResponse.Error.Message)
 		}
 		logger.Debug("upstream returned embedding error response",
-			zap.String("error_type", embeddingResponse.Error.Type),
+			zap.String("error_type", string(embeddingResponse.Error.Type)),
 			zap.String("error_message", embeddingResponse.Error.Message),
 			// Prefer recording the raw upstream error for diagnostics
 			zap.Error(embeddingResponse.Error.RawError))
@@ -244,7 +268,19 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		return ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
 	}
 
-	logger.Debug("receive from upstream channel", zap.ByteString("response_body", responseBody))
+	fields := []zap.Field{
+		zap.Int("status_code", resp.StatusCode),
+		zap.Int("body_bytes", len(responseBody)),
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		fields = append(fields, zap.String("content_type", contentType))
+	}
+	if shouldLogDetailedUpstreamBody(c) {
+		fields = append(fields, zap.ByteString("response_body", responseBody))
+	} else {
+		fields = append(fields, zap.Bool("body_logging_suppressed", true))
+	}
+	logger.Debug("receive from upstream channel", fields...)
 	if err = resp.Body.Close(); err != nil {
 		return ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
 	}
@@ -271,7 +307,7 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 			textResponse.Error.RawError = errors.New(textResponse.Error.Message)
 		}
 		logger.Debug("upstream returned error response",
-			zap.String("error_type", textResponse.Error.Type),
+			zap.String("error_type", string(textResponse.Error.Type)),
 			zap.String("error_message", textResponse.Error.Message),
 			// Prefer recording the raw upstream error for diagnostics
 			zap.Error(textResponse.Error.RawError))
@@ -446,7 +482,7 @@ func ExtractThinkingContent(content string) (thinkingContent, regularContent str
 // This specialized handler is designed for Other provider sequential thinking format where thinking content
 // comes first, followed by the actual response content.
 //
-// Note: This now Optimized for efficiency with large streams using [strings.Builder] to avoid O(n²) string concatenation.
+// Note: This now Optimized for efficiency with large streams using [strings.Builder] to avoid O(n^2) string concatenation.
 func StreamHandlerWithThinking(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*model.ErrorWithStatusCode, *model.Usage) {
 	return UnifiedStreamProcessing(c, resp, promptTokens, modelName, true)
 }
@@ -487,7 +523,7 @@ func HandlerWithThinking(c *gin.Context, resp *http.Response, promptTokens int, 
 			textResponse.Error.RawError = errors.New(textResponse.Error.Message)
 		}
 		logger.Debug("upstream returned error response",
-			zap.String("error_type", textResponse.Error.Type),
+			zap.String("error_type", string(textResponse.Error.Type)),
 			zap.String("error_message", textResponse.Error.Message),
 			// Prefer recording the raw upstream error for diagnostics
 			zap.Error(textResponse.Error.RawError))

@@ -20,6 +20,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/aws"
 	"github.com/songquanpeng/one-api/relay/adaptor/baichuan"
 	"github.com/songquanpeng/one-api/relay/adaptor/baidu"
+	"github.com/songquanpeng/one-api/relay/adaptor/baiduv2"
 	"github.com/songquanpeng/one-api/relay/adaptor/cloudflare"
 	"github.com/songquanpeng/one-api/relay/adaptor/cohere"
 	"github.com/songquanpeng/one-api/relay/adaptor/coze"
@@ -37,6 +38,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/openai"
 	"github.com/songquanpeng/one-api/relay/adaptor/openrouter"
 	"github.com/songquanpeng/one-api/relay/adaptor/palm"
+	"github.com/songquanpeng/one-api/relay/adaptor/proxy"
 	"github.com/songquanpeng/one-api/relay/adaptor/replicate"
 	"github.com/songquanpeng/one-api/relay/adaptor/siliconflow"
 	"github.com/songquanpeng/one-api/relay/adaptor/stepfun"
@@ -45,6 +47,7 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/vertexai"
 	"github.com/songquanpeng/one-api/relay/adaptor/xai"
 	"github.com/songquanpeng/one-api/relay/adaptor/xunfei"
+	"github.com/songquanpeng/one-api/relay/adaptor/xunfeiv2"
 	"github.com/songquanpeng/one-api/relay/adaptor/zhipu"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
@@ -119,7 +122,7 @@ func getAllAdapterTestCases() []AdapterTestCase {
 			ChannelType:            channeltype.Gemini,
 			SupportsChatCompletion: true,
 			SupportsClaudeMessages: true,
-			TestModel:              "gemini-pro",
+			TestModel:              "gemini-2.5-flash",
 		},
 		{
 			Name:                   "Ali",
@@ -167,7 +170,7 @@ func getAllAdapterTestCases() []AdapterTestCase {
 			ChannelType:            channeltype.VertextAI,
 			SupportsChatCompletion: true,
 			SupportsClaudeMessages: true,
-			TestModel:              "gemini-pro",
+			TestModel:              "gemini-2.5-flash",
 		},
 		{
 			Name:                   "Replicate",
@@ -233,7 +236,7 @@ func getAllAdapterTestCases() []AdapterTestCase {
 			ChannelType:            channeltype.XAI,
 			SupportsChatCompletion: true,
 			SupportsClaudeMessages: true,
-			TestModel:              "grok-beta",
+			TestModel:              "grok-3",
 		},
 		{
 			Name:                   "TogetherAI",
@@ -348,6 +351,33 @@ func getAllAdapterTestCases() []AdapterTestCase {
 			SupportsChatCompletion: true,
 			SupportsClaudeMessages: true,
 			TestModel:              "coze-model",
+		},
+		{
+			Name:                   "BaiduV2",
+			Adapter:                &baiduv2.Adaptor{},
+			ChannelType:            channeltype.BaiduV2,
+			SupportsChatCompletion: true,
+			SupportsClaudeMessages: true,
+			TestModel:              "ernie-4.0",
+			IsStubImplementation:   true,
+		},
+		{
+			Name:                   "XunfeiV2",
+			Adapter:                &xunfeiv2.Adaptor{},
+			ChannelType:            channeltype.XunfeiV2,
+			SupportsChatCompletion: true,
+			SupportsClaudeMessages: true,
+			TestModel:              "spark-4.0-ultra",
+			IsStubImplementation:   true,
+		},
+		{
+			Name:                   "Proxy",
+			Adapter:                &proxy.Adaptor{},
+			ChannelType:            channeltype.Proxy,
+			SupportsChatCompletion: true,
+			SupportsClaudeMessages: true,
+			TestModel:              "any-model",
+			IsStubImplementation:   true,
 		},
 
 		// Adapters with Limited or No Claude Messages Support
@@ -483,8 +513,11 @@ func TestAdapterChatCompletionSupport(t *testing.T) {
 			}
 
 			// Test GetModelList method
+			// Proxy adaptor returns nil because it's a pass-through channel without predefined models
 			models := tc.Adapter.GetModelList()
-			assert.NotEmpty(t, models, "GetModelList should return models for %s", tc.Name)
+			if tc.Name != "Proxy" {
+				assert.NotEmpty(t, models, "GetModelList should return models for %s", tc.Name)
+			}
 
 			// Test GetChannelName method
 			channelName := tc.Adapter.GetChannelName()
@@ -614,7 +647,7 @@ func TestClaudeMessagesRequestConversion(t *testing.T) {
 	}{
 		{"OpenAI", &openai.Adaptor{}, channeltype.OpenAI, "gpt-4o-mini", false},
 		{"DeepSeek", &deepseek.Adaptor{}, channeltype.DeepSeek, "deepseek-chat", false},
-		{"Groq", &groq.Adaptor{}, channeltype.Groq, "llama3-8b-8192", false},
+		{"Groq", &groq.Adaptor{}, channeltype.Groq, "llama-3.1-8b-instant", false},
 		{"Anthropic", &anthropic.Adaptor{}, channeltype.Anthropic, "claude-3-sonnet-20240229", false},
 	}
 

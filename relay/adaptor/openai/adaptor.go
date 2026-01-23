@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Laisky/errors/v2"
@@ -16,10 +16,9 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/image"
-
 	"github.com/songquanpeng/one-api/common/config"
 	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/songquanpeng/one-api/common/image"
 	imgutil "github.com/songquanpeng/one-api/common/image"
 	"github.com/songquanpeng/one-api/relay/adaptor"
 	"github.com/songquanpeng/one-api/relay/adaptor/alibailian"
@@ -29,7 +28,6 @@ import (
 	"github.com/songquanpeng/one-api/relay/adaptor/minimax"
 	"github.com/songquanpeng/one-api/relay/adaptor/novita"
 	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
 	"github.com/songquanpeng/one-api/relay/channeltype"
 	"github.com/songquanpeng/one-api/relay/meta"
 	"github.com/songquanpeng/one-api/relay/model"
@@ -37,6 +35,7 @@ import (
 )
 
 type Adaptor struct {
+	adaptor.DefaultPricingMethods
 	// failed to inline image URL; sending original URL upstream
 	// logger.Logger.Warn("failed to inline image URL; sending original URL upstream",
 	//     zap.String("url", url),
@@ -48,6 +47,12 @@ type Adaptor struct {
 func azureRequiresResponseAPI(modelName string) bool {
 	normalized := normalizedModelName(modelName)
 	return strings.HasPrefix(normalized, "gpt-5")
+}
+
+// AzureRequiresResponseAPI reports whether an Azure deployment must be called via the Response API surface.
+// Exposed so controllers can keep conversion heuristics in sync with the adaptor's routing logic.
+func AzureRequiresResponseAPI(modelName string) bool {
+	return azureRequiresResponseAPI(modelName)
 }
 
 // shouldForceResponseAPI reports whether the upstream request must use the Response API surface.
@@ -76,46 +81,16 @@ func shouldForceResponseAPI(metaInfo *meta.Meta) bool {
 	}
 }
 
-// webSearchCallUSDPerThousand returns the USD cost per 1000 calls for the given model name
-//
-//   - https://openai.com/api/pricing/
-//   - https://platform.openai.com/docs/pricing#built-in-tools
-func webSearchCallUSDPerThousand(modelName string) float64 {
-	lower := normalizedModelName(modelName)
-
-	if isModelSupportedReasoning(lower) {
-		return 10.0
-	}
-
-	if isWebSearchPreviewModel(lower) {
-		return 25.0
-	}
-
-	if strings.Contains(lower, "-web-search") || strings.Contains(lower, "-search") {
-		return 10.0
-	}
-
-	return 25.0
-}
-
 func normalizedModelName(modelName string) string {
 	return strings.ToLower(strings.TrimSpace(modelName))
 }
 
-func isWebSearchPreviewModel(lower string) bool {
-	if lower == "" {
-		return false
-	}
-	return strings.Contains(lower, "search-preview") || strings.Contains(lower, "web-search-preview")
-}
-
-func webSearchCallQuotaPerInvocation(modelName string) int64 {
-	usd := webSearchCallUSDPerThousand(modelName)
-	if usd <= 0 {
-		return 0
-	}
-	return int64(math.Ceil(usd / 1000.0 * ratio.QuotaPerUsd))
-}
+// func isWebSearchPreviewModel(lower string) bool {
+// 	if lower == "" {
+// 		return false
+// 	}
+// 	return strings.Contains(lower, "search-preview") || strings.Contains(lower, "web-search-preview")
+// }
 
 func (a *Adaptor) Init(meta *meta.Meta) {
 	a.ChannelType = meta.ChannelType
@@ -297,14 +272,47 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 }
 
 // isModelSupportedReasoning checks if the model supports reasoning features
-func isModelSupportedReasoning(modelName string) bool {
-	switch {
-	case strings.HasPrefix(modelName, "o"),
-		strings.HasPrefix(modelName, "gpt-5") && !strings.HasPrefix(modelName, "gpt-5-chat"):
-		return true
-	default:
-		return false
+// extractGptVersion returns the numeric GPT major/minor version if present in the model name.
+// It expects normalized lowercase model names and only parses names starting with "gpt-".
+func extractGptVersion(modelName string) (float64, bool) {
+	lower := normalizedModelName(modelName)
+	if !strings.HasPrefix(lower, "gpt-") {
+		return 0, false
 	}
+
+	remainder := strings.TrimPrefix(lower, "gpt-")
+	cutIdx := strings.IndexFunc(remainder, func(r rune) bool {
+		return !(r == '.' || (r >= '0' && r <= '9'))
+	})
+	if cutIdx == 0 {
+		return 0, false
+	}
+	if cutIdx > 0 {
+		remainder = remainder[:cutIdx]
+	}
+
+	version, err := strconv.ParseFloat(remainder, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	return version, true
+}
+
+func isModelSupportedReasoning(modelName string) bool {
+	lower := normalizedModelName(modelName)
+	if strings.HasPrefix(lower, "o") {
+		return true
+	}
+
+	if version, ok := extractGptVersion(lower); ok && version >= 5 {
+		if strings.HasPrefix(lower, "gpt-5-chat-latest") || lower == "gpt-5-chat" {
+			return false
+		}
+		return true
+	}
+
+	return false
 }
 
 // isWebSearchModel returns true when the upstream OpenAI model uses the web search surface
@@ -317,18 +325,46 @@ func isDeepResearchModel(modelName string) bool {
 	return strings.Contains(modelName, "deep-research")
 }
 
-func defaultReasoningEffortForModel(modelName string) string {
-	if isDeepResearchModel(modelName) {
-		return "medium"
+// isMediumOnlyReasoningModel returns true if the model only supports medium reasoning effort,
+// not support high.
+func isMediumOnlyReasoningModel(modelName string) bool {
+	lower := normalizedModelName(modelName)
+	if lower == "" {
+		return false
 	}
-	return "high"
+
+	if strings.HasPrefix(lower, "o") {
+		return true
+	}
+
+	if version, ok := extractGptVersion(lower); ok && version >= 5 {
+		if strings.Contains(lower, "-chat") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// defaultReasoningEffortForModel returns the default reasoning effort level for the given model.
+func defaultReasoningEffortForModel(modelName string) string {
+	// some models do not support high reasoning effort, default to medium
+	return "medium"
+
+	// switch {
+	// case isDeepResearchModel(modelName),
+	// 	isMediumOnlyReasoningModel(modelName):
+	// 	return "medium"
+	// default:
+	// 	return "high"
+	// }
 }
 
 func isReasoningEffortAllowedForModel(modelName, effort string) bool {
 	if effort == "" {
 		return false
 	}
-	if isDeepResearchModel(modelName) {
+	if isDeepResearchModel(modelName) || isMediumOnlyReasoningModel(modelName) {
 		return effort == "medium"
 	}
 	switch effort {
@@ -519,9 +555,10 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 	if meta != nil {
 		channelType = meta.ChannelType
 	}
+	supportsReasoning := isModelSupportedReasoning(actualModel)
 
 	// o1/o3/o4/gpt-5 do not support system prompt/temperature variations
-	if isModelSupportedReasoning(actualModel) {
+	if supportsReasoning {
 		targetsResponseAPI := meta.Mode == relaymode.ResponseAPI ||
 			(meta.ChannelType == channeltype.OpenAI && !IsModelsOnlySupportedByChatCompletionAPI(actualModel))
 
@@ -544,6 +581,8 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 
 			return
 		}(request.Messages)
+	} else {
+		request.ReasoningEffort = nil
 	}
 
 	// web search models do not support system prompt/max_tokens/temperature overrides
@@ -689,9 +728,7 @@ func normalizeClaudeToolChoice(choice any) any {
 	case map[string]any:
 		// Clone the map so we do not mutate the original request payload.
 		cloned := make(map[string]any, len(src))
-		for k, v := range src {
-			cloned[k] = v
-		}
+		maps.Copy(cloned, src)
 
 		typeVal, _ := cloned["type"].(string)
 		switch strings.ToLower(typeVal) {
@@ -737,9 +774,7 @@ func cloneMap(input map[string]any) map[string]any {
 		return nil
 	}
 	cloned := make(map[string]any, len(input))
-	for k, v := range input {
-		cloned[k] = v
-	}
+	maps.Copy(cloned, input)
 	return cloned
 }
 
@@ -758,6 +793,123 @@ func toDataURL(url string) (string, error) {
 	return fmt.Sprintf("data:%s;base64,%s", mime, data), nil
 }
 
+// recordWebSearchPreviewInvocation infers at least one web search tool call for
+// OpenAI chat completion requests using search-preview models when upstream
+// responses omit invocation counts. It skips recording when upstream already
+// provided web search counts to avoid double billing.
+func recordWebSearchPreviewInvocation(c *gin.Context, metaInfo *meta.Meta) {
+	if c == nil || metaInfo == nil {
+		return
+	}
+
+	if metaInfo.ChannelType != channeltype.OpenAI || metaInfo.Mode != relaymode.ChatCompletions {
+		return
+	}
+
+	modelName := strings.ToLower(strings.TrimSpace(metaInfo.ActualModelName))
+	if modelName == "" || !isWebSearchModel(modelName) {
+		return
+	}
+
+	if hasRecordedWebSearchCount(c) {
+		return
+	}
+
+	toolName := "web_search_preview_non_reasoning"
+	if isModelSupportedReasoning(modelName) {
+		toolName = "web_search_preview_reasoning"
+	}
+
+	counts := normalizeToolInvocationCounts(c)
+	counts[toolName]++
+	c.Set(ctxkey.ToolInvocationCounts, counts)
+
+	gmw.GetLogger(c).Debug("recorded implicit web search preview call",
+		zap.String("model", modelName),
+		zap.String("tool", toolName),
+		zap.Int("count", counts[toolName]),
+	)
+}
+
+// hasRecordedWebSearchCount reports whether the context already carries any web
+// search invocation counters, either from explicit upstream metadata or prior
+// bookkeeping.
+func hasRecordedWebSearchCount(c *gin.Context) bool {
+	if raw, ok := c.Get(ctxkey.WebSearchCallCount); ok {
+		if intFromAny(raw) > 0 {
+			return true
+		}
+	}
+
+	if raw, ok := c.Get(ctxkey.ToolInvocationCounts); ok {
+		existing := normalizeToolInvocationCountsFromRaw(raw)
+		if existing["web_search"] > 0 || existing["web_search_preview_reasoning"] > 0 || existing["web_search_preview_non_reasoning"] > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// normalizeToolInvocationCounts merges any pre-existing invocation counters on
+// the context into a lowercase map so additional counts can be appended safely.
+func normalizeToolInvocationCounts(c *gin.Context) map[string]int {
+	counts := make(map[string]int)
+	if raw, ok := c.Get(ctxkey.ToolInvocationCounts); ok {
+		mergeToolInvocationCounts(counts, raw)
+	}
+	return counts
+}
+
+// normalizeToolInvocationCountsFromRaw converts a raw invocation counter map to
+// a normalized lowercase map without mutating the source.
+func normalizeToolInvocationCountsFromRaw(raw any) map[string]int {
+	counts := make(map[string]int)
+	mergeToolInvocationCounts(counts, raw)
+	return counts
+}
+
+// mergeToolInvocationCounts accumulates invocation counters of varying numeric
+// types into the destination map, lowercasing tool identifiers.
+func mergeToolInvocationCounts(dst map[string]int, raw any) {
+	switch typed := raw.(type) {
+	case map[string]int:
+		for name, count := range typed {
+			dst[strings.ToLower(strings.TrimSpace(name))] += count
+		}
+	case map[string]int64:
+		for name, count := range typed {
+			dst[strings.ToLower(strings.TrimSpace(name))] += int(count)
+		}
+	case map[string]float64:
+		for name, count := range typed {
+			dst[strings.ToLower(strings.TrimSpace(name))] += int(count)
+		}
+	case map[string]any:
+		for name, count := range typed {
+			dst[strings.ToLower(strings.TrimSpace(name))] += intFromAny(count)
+		}
+	}
+}
+
+// intFromAny safely converts supported numeric representations to int.
+func intFromAny(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 func (a *Adaptor) DoRequest(c *gin.Context,
 	meta *meta.Meta,
 	requestBody io.Reader) (*http.Response, error) {
@@ -768,7 +920,6 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 	resp *http.Response,
 	meta *meta.Meta) (usage *model.Usage,
 	err *model.ErrorWithStatusCode) {
-	skipUsageAdjustments := false
 	if meta.IsStream {
 		var responseText string
 		handledClaudeStream := false
@@ -834,9 +985,12 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 			// For direct Response API requests, pass through the response directly
 			// without conversion back to ChatCompletion format
 			err, usage = ResponseAPIDirectHandler(c, resp, meta.PromptTokens, meta.ActualModelName)
+		case relaymode.Videos:
+			err, usage = VideoHandler(c, resp)
+		case relaymode.ClaudeMessages:
+			// Skip Handler so convertToClaudeResponse can reformat the upstream payload later
 		case relaymode.ChatCompletions:
 			if shouldConvertToClaude {
-				skipUsageAdjustments = true
 				// Skip Handler to keep body intact for Claude conversion.
 				break
 			}
@@ -853,16 +1007,14 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 				// Regular ChatCompletion request
 				err, usage = Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
 			}
+		case relaymode.Embeddings:
+			err, usage = EmbeddingHandler(c, resp, meta.PromptTokens, meta.ActualModelName)
 		default:
 			err, usage = Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
 		}
 	}
 
-	if !skipUsageAdjustments {
-		if errCost := applyWebSearchToolCost(c, &usage, meta); errCost != nil {
-			return nil, errCost
-		}
-	}
+	recordWebSearchPreviewInvocation(c, meta)
 
 	// Handle Claude Messages response conversion
 	// Streaming conversions are handled inline; do not re-read an already drained body.
@@ -886,55 +1038,10 @@ func (a *Adaptor) DoResponse(c *gin.Context,
 	return
 }
 
-func applyWebSearchToolCost(c *gin.Context, usage **model.Usage, meta *meta.Meta) *model.ErrorWithStatusCode {
-	if usage == nil || meta == nil {
-		return nil
-	}
-
-	ensureUsage := func() *model.Usage {
-		if *usage == nil {
-			*usage = &model.Usage{}
-		}
-		return *usage
-	}
-
-	modelName := meta.ActualModelName
-	perCallQuota := webSearchCallQuotaPerInvocation(modelName)
-
-	if callCountAny, ok := c.Get(ctxkey.WebSearchCallCount); ok {
-		count := 0
-		switch v := callCountAny.(type) {
-		case int:
-			count = v
-		case int32:
-			count = int(v)
-		case int64:
-			count = int(v)
-		case float64:
-			count = int(v)
-		}
-		if count < 0 {
-			count = 0
-		}
-		if count > 0 {
-			usagePtr := ensureUsage()
-			enforceWebSearchTokenPolicy(usagePtr, modelName, count)
-			if perCallQuota > 0 {
-				usagePtr.ToolsCost += int64(count) * perCallQuota
-			}
-		}
-	}
-
-	return nil
-}
-
-func enforceWebSearchTokenPolicy(usage *model.Usage, modelName string, callCount int) {
-	if usage == nil || callCount <= 0 {
-		return
-	}
-
-	_ = modelName // model retained for possible future policy tuning
-	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+// DefaultToolingConfig returns OpenAI's upstream tooling defaults so channel
+// policy resolution can merge in provider pricing and allowlists.
+func (a *Adaptor) DefaultToolingConfig() adaptor.ChannelToolConfig {
+	return OpenAIToolingDefaults
 }
 
 // convertToClaudeResponse converts OpenAI response format to Claude Messages format
@@ -1181,7 +1288,7 @@ func (a *Adaptor) ConvertResponseAPIToClaudeResponse(c *gin.Context, resp *http.
 }
 
 // convertStreamingToClaudeResponse converts a streaming OpenAI response to Claude format
-func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Response, body []byte) (*http.Response, *model.ErrorWithStatusCode) {
+func (a *Adaptor) convertStreamingToClaudeResponse(_ *gin.Context, resp *http.Response, body []byte) (*http.Response, *model.ErrorWithStatusCode) {
 	// For streaming responses, we need to convert each SSE event
 	// This is more complex and would require parsing SSE events and converting them
 	// For now, we'll create a simple streaming converter
@@ -1262,19 +1369,15 @@ func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 }
 
 func (a *Adaptor) GetModelRatio(modelName string) float64 {
-	pricing := a.GetDefaultModelPricing()
-	if price, exists := pricing[modelName]; exists {
+	if price, exists := ModelRatios[modelName]; exists {
 		return price.Ratio
 	}
-	// Fallback to global pricing for unknown models
-	return ratio.GetModelRatio(modelName, a.ChannelType)
+	return a.DefaultPricingMethods.GetModelRatio(modelName)
 }
 
 func (a *Adaptor) GetCompletionRatio(modelName string) float64 {
-	pricing := a.GetDefaultModelPricing()
-	if price, exists := pricing[modelName]; exists {
+	if price, exists := ModelRatios[modelName]; exists {
 		return price.CompletionRatio
 	}
-	// Fallback to global pricing for unknown models
-	return ratio.GetCompletionRatio(modelName, a.ChannelType)
+	return a.DefaultPricingMethods.GetCompletionRatio(modelName)
 }

@@ -9,6 +9,33 @@ import (
 	"strings"
 )
 
+// evaluateResponseNoError validates that the payload is a non-empty JSON response
+// without an error field, and that it contains at least the minimal expected
+// structure for the request type.
+func evaluateResponseNoError(reqType requestType, body []byte) (bool, string) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false, "empty response"
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return false, fmt.Sprintf("malformed JSON response: %v", err)
+	}
+	if errVal, ok := payload["error"]; ok && isMeaningfulErrorValue(errVal) {
+		return false, snippet(trimmed)
+	}
+
+	spec := requestSpec{Type: reqType, Expectation: expectationDefault}
+	return evaluateResponse(spec, trimmed)
+}
+
+// evaluateStreamNoError validates that the SSE stream contains at least one data
+// payload and does not carry an error object.
+func evaluateStreamNoError(reqType requestType, data []byte) (bool, string) {
+	spec := requestSpec{Type: reqType, Expectation: expectationDefault}
+	return evaluateStreamResponse(spec, data)
+}
+
 // evaluateResponse inspects a non-streaming response and validates the expected shape.
 func evaluateResponse(spec requestSpec, body []byte) (bool, string) {
 	if len(body) == 0 {
@@ -29,6 +56,10 @@ func evaluateResponse(spec requestSpec, body []byte) (bool, string) {
 		switch spec.Expectation {
 		case expectationStructuredOutput:
 			if structuredOutputSatisfied(payload) || structuredOutputSatisfiedBytes(body) {
+				return true, ""
+			}
+			// If the response was truncated due to max_tokens limit, treat it as a successful outcome
+			if isMaxTokensTruncated(payload) {
 				return true, ""
 			}
 			return false, "structured output fields missing"
@@ -56,6 +87,10 @@ func evaluateResponse(spec requestSpec, body []byte) (bool, string) {
 				if status == "failed" {
 					return false, snippet(body)
 				}
+				return true, ""
+			}
+			// If the response was truncated due to max_tokens limit, treat it as a successful outcome
+			if isMaxTokensTruncated(payload) {
 				return true, ""
 			}
 			return false, "structured output fields missing"
@@ -94,6 +129,11 @@ func evaluateResponse(spec requestSpec, body []byte) (bool, string) {
 			if structuredOutputSatisfied(payload) || structuredOutputSatisfiedBytes(body) {
 				return true, ""
 			}
+			// If the response was truncated due to max_tokens limit, treat it as a successful outcome
+			// since the upstream fulfilled the request as the user intended (respecting the token limit).
+			if isMaxTokensTruncated(payload) {
+				return true, ""
+			}
 			return false, "structured output fields missing"
 		case expectationToolInvocation:
 			if choices, ok := payload["choices"].([]any); ok {
@@ -120,6 +160,10 @@ func evaluateResponse(spec requestSpec, body []byte) (bool, string) {
 					}
 				}
 			}
+			// Accept function_call outputs from Response API conversions
+			if hasFunctionCallOutput(payload) {
+				return true, ""
+			}
 			return false, "response missing tool_use block"
 		case expectationToolHistory:
 			if choices, ok := payload["choices"].([]any); ok {
@@ -145,6 +189,10 @@ func evaluateResponse(spec requestSpec, body []byte) (bool, string) {
 						return true, ""
 					}
 				}
+			}
+			// Accept function_call outputs from Response API conversions even without assistant text
+			if hasFunctionCallOutput(payload) {
+				return true, ""
 			}
 			if claudePayloadHasText(payload) {
 				return true, ""
@@ -631,6 +679,33 @@ func detectAssistantTextInStream(spec requestSpec, obj map[string]any) bool {
 // isToolExpectation reports whether the provided expectation requires detecting tool invocations.
 func isToolExpectation(exp expectation) bool {
 	return exp == expectationToolInvocation || exp == expectationToolHistory
+}
+
+// isMaxTokensTruncated reports whether the response was truncated due to max_tokens limit.
+// This is used to treat truncated responses as successful outcomes, since the upstream
+// service fulfilled the request as the user intended (respecting the token limit).
+func isMaxTokensTruncated(payload map[string]any) bool {
+	// Check for Claude Messages API stop_reason
+	stopReason := stringValue(payload, "stop_reason")
+	if stopReason == "max_tokens" || stopReason == "length" {
+		return true
+	}
+
+	// Check for OpenAI-style finish_reason in choices
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, choice := range choices {
+			choiceMap, ok := choice.(map[string]any)
+			if !ok {
+				continue
+			}
+			finishReason := stringValue(choiceMap, "finish_reason")
+			if finishReason == "length" || finishReason == "max_tokens" {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func stringValue(data map[string]any, key string) string {

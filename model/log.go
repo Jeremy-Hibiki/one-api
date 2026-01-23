@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -22,12 +23,12 @@ import (
 // Log represents a persisted usage or management entry emitted by the billing pipeline.
 type Log struct {
 	Id                int    `json:"id"`
-	UserId            int    `json:"user_id" gorm:"index"`
+	UserId            int    `json:"user_id" gorm:"index;index:idx_user_token,priority:1"`
 	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_type"`
 	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
 	Content           string `json:"content" gorm:"type:text"`
 	Username          string `json:"username" gorm:"index:index_username_model_name,priority:2;default:''"`
-	TokenName         string `json:"token_name" gorm:"index;default:''"`
+	TokenName         string `json:"token_name" gorm:"index;index:idx_user_token,priority:2;default:''"`
 	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
 	Quota             int    `json:"quota" gorm:"default:0;index"`             // Added index for sorting
 	PromptTokens      int    `json:"prompt_tokens" gorm:"default:0;index"`     // Added index for sorting
@@ -58,7 +59,26 @@ const (
 	LogMetadataKeyCacheWrite5m = "ephemeral_5m"
 	// LogMetadataKeyCacheWrite1h records the count of 1-hour window cache write tokens.
 	LogMetadataKeyCacheWrite1h = "ephemeral_1h"
+	// LogMetadataKeyToolUsage stores structured metadata about built-in tool usage and charges.
+	LogMetadataKeyToolUsage = "tool_usage"
 )
+
+// ToolUsageEntry captures per-tool usage metadata for logging.
+type ToolUsageEntry struct {
+	Tool     string
+	Source   string
+	ServerID int
+	Count    int
+	Cost     int64
+}
+
+// ToolUsageSummary captures built-in tool invocation details for billing and logging purposes.
+type ToolUsageSummary struct {
+	TotalCost  int64            // Aggregated quota consumed by tools
+	Counts     map[string]int   // Invocation counts per tool
+	CostByTool map[string]int64 // Quota charged per tool
+	Entries    []ToolUsageEntry // Optional detailed entries
+}
 
 // Value converts LogMetadata to a driver-compatible JSON representation.
 func (m LogMetadata) Value() (driver.Value, error) {
@@ -121,9 +141,7 @@ func CloneLogMetadata(src LogMetadata) LogMetadata {
 	}
 
 	clone := LogMetadata{}
-	for k, v := range src {
-		clone[k] = v
-	}
+	maps.Copy(clone, src)
 	return clone
 }
 
@@ -151,6 +169,50 @@ func AppendCacheWriteTokensMetadata(metadata LogMetadata, cacheWrite5m, cacheWri
 	}
 
 	metadata[LogMetadataKeyCacheWriteTokens] = existing
+	return metadata
+}
+
+// AppendToolUsageMetadata attaches tool invocation details to the metadata map when present.
+func AppendToolUsageMetadata(metadata LogMetadata, summary *ToolUsageSummary) LogMetadata {
+	if summary == nil {
+		return metadata
+	}
+	if summary.TotalCost == 0 && len(summary.Counts) == 0 && len(summary.CostByTool) == 0 {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = LogMetadata{}
+	}
+
+	entry := make(map[string]any, 3)
+	if summary.TotalCost != 0 {
+		entry["total_cost"] = summary.TotalCost
+	}
+	if len(summary.Counts) > 0 {
+		countsCopy := make(map[string]int, len(summary.Counts))
+		maps.Copy(countsCopy, summary.Counts)
+		entry["counts"] = countsCopy
+	}
+	if len(summary.CostByTool) > 0 {
+		costCopy := make(map[string]int64, len(summary.CostByTool))
+		maps.Copy(costCopy, summary.CostByTool)
+		entry["cost_by_tool"] = costCopy
+	}
+	if len(summary.Entries) > 0 {
+		entries := make([]map[string]any, 0, len(summary.Entries))
+		for _, item := range summary.Entries {
+			entries = append(entries, map[string]any{
+				"tool":      item.Tool,
+				"source":    item.Source,
+				"server_id": item.ServerID,
+				"count":     item.Count,
+				"cost":      item.Cost,
+			})
+		}
+		entry["entries"] = entries
+	}
+
+	metadata[LogMetadataKeyToolUsage] = entry
 	return metadata
 }
 
@@ -369,7 +431,8 @@ func GetLogOrderClause(sortBy string, sortOrder string) string {
 // We need a systematic audit of every function that attempts to fetch values
 // from `context.Context` and change the design to pass those values explicitly
 // as parameters, rather than trying to read them from a generic `context.Context`.
-func recordLogHelper(_ context.Context, log *Log) {
+func recordLogHelper(ctx context.Context, log *Log) {
+	lg := logger.FromContext(ctx)
 	// IDs must be pre-populated by the caller from gin.Context
 	ensureLogContent(log)
 
@@ -377,7 +440,7 @@ func recordLogHelper(_ context.Context, log *Log) {
 	if err != nil {
 		// For billing logs (consume type), this is critical as it means we sent upstream request but failed to log it
 		if log.Type == LogTypeConsume {
-			logger.Logger.Error("failed to record billing log - audit trail incomplete",
+			lg.Error("failed to record billing log - audit trail incomplete",
 				zap.Error(err),
 				zap.Int("userId", log.UserId),
 				zap.Int("channelId", log.ChannelId),
@@ -386,13 +449,13 @@ func recordLogHelper(_ context.Context, log *Log) {
 				zap.String("requestId", log.RequestId),
 				zap.String("note", "billing completed successfully but log recording failed"))
 		} else {
-			logger.Logger.Error("failed to record log", zap.Error(err))
+			lg.Error("failed to record log", zap.Error(err))
 		}
 
 		return
 	}
 
-	logger.Logger.Info("record log",
+	lg.Info("record log",
 		zap.Int("user_id", log.UserId),
 		zap.String("username", log.Username),
 		zap.Int64("created_at", log.CreatedAt),

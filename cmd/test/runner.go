@@ -39,9 +39,7 @@ func run(ctx context.Context, logger glog.Logger) error {
 		results   []testResult
 		collectWg sync.WaitGroup
 	)
-	collectWg.Add(1)
-	go func() {
-		defer collectWg.Done()
+	collectWg.Go(func() {
 		for res := range resultsCh {
 			results = append(results, res)
 			switch {
@@ -51,8 +49,10 @@ func run(ctx context.Context, logger glog.Logger) error {
 					zap.String("variant", res.Label),
 					zap.String("type", string(res.Type)),
 					zap.Bool("stream", res.Stream),
+					zap.Int("attempts", res.AttemptCount),
 					zap.Duration("duration", res.Duration),
 					zap.Int("status", res.StatusCode),
+					zap.String("warning", res.Warning),
 				)
 			case res.Skipped:
 				logger.Info("request skipped",
@@ -60,6 +60,7 @@ func run(ctx context.Context, logger glog.Logger) error {
 					zap.String("variant", res.Label),
 					zap.String("type", string(res.Type)),
 					zap.Bool("stream", res.Stream),
+					zap.Int("attempts", res.AttemptCount),
 					zap.Int("status", res.StatusCode),
 					zap.String("reason", res.ErrorReason),
 				)
@@ -69,6 +70,7 @@ func run(ctx context.Context, logger glog.Logger) error {
 					zap.String("variant", res.Label),
 					zap.String("type", string(res.Type)),
 					zap.Bool("stream", res.Stream),
+					zap.Int("attempts", res.AttemptCount),
 					zap.Duration("duration", res.Duration),
 					zap.Int("status", res.StatusCode),
 					zap.String("error", res.ErrorReason),
@@ -77,7 +79,7 @@ func run(ctx context.Context, logger glog.Logger) error {
 				)
 			}
 		}
-	}()
+	})
 
 	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, modelName := range cfg.Models {
@@ -148,6 +150,7 @@ func buildRequestSpecs(model string, variants []requestVariant) []requestSpec {
 	specs := make([]requestSpec, 0, len(variants))
 	for _, variant := range variants {
 		var body any
+		var attemptBodies []any
 		switch variant.Type {
 		case requestTypeChatCompletion:
 			body = chatCompletionPayload(model, variant.Stream, variant.Expectation)
@@ -156,12 +159,18 @@ func buildRequestSpecs(model string, variants []requestVariant) []requestSpec {
 		case requestTypeClaudeMessages:
 			body = claudeMessagesPayload(model, variant.Stream, variant.Expectation)
 		}
+
+		attemptBodies = toolAttemptPayloads(variant.Type, model, variant.Stream, variant.Expectation)
+		if len(attemptBodies) > 0 {
+			body = attemptBodies[0]
+		}
 		specs = append(specs, requestSpec{
 			RequestFormat: variant.Key,
 			Label:         variant.Header,
 			Type:          variant.Type,
 			Path:          variant.Path,
 			Body:          body,
+			AttemptBodies: attemptBodies,
 			Stream:        variant.Stream,
 			Expectation:   variant.Expectation,
 		})
@@ -173,17 +182,18 @@ func buildRequestSpecs(model string, variants []requestVariant) []requestSpec {
 // shouldSkipVariant reports whether the provided request specification should be skipped for the model.
 // The second return value describes the reason when the combination is unsupported.
 func shouldSkipVariant(model string, spec requestSpec) (bool, string) {
-	if spec.Expectation == expectationToolHistory {
-		if reasons, ok := toolHistoryVariantSkips[spec.RequestFormat]; ok {
-			if reason, exists := reasons[strings.ToLower(model)]; exists {
-				return true, reason
-			}
+	lower := strings.ToLower(model)
+
+	// Check Azure EOF-prone variants (non-streaming Response API)
+	if lower == "azure-gpt-5-nano" {
+		if _, prone := azureEOFProneVariants[spec.RequestFormat]; prone {
+			return true, "Azure non-streaming Response API requests close prematurely (upstream EOF)"
 		}
 	}
 
 	if spec.Expectation == expectationStructuredOutput {
 		if reasons, ok := structuredVariantSkips[spec.RequestFormat]; ok {
-			if reason, exists := reasons[strings.ToLower(model)]; exists {
+			if reason, exists := reasons[lower]; exists {
 				return true, reason
 			}
 		}
@@ -193,7 +203,6 @@ func shouldSkipVariant(model string, spec requestSpec) (bool, string) {
 		return false, ""
 	}
 
-	lower := strings.ToLower(model)
 	if _, unsupported := visionUnsupportedModels[lower]; unsupported {
 		return true, "vision input unsupported by model " + model
 	}

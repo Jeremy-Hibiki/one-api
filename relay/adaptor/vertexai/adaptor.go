@@ -1,5 +1,3 @@
-// Note: This Vertex AI adapter has been refactored to be more easily leveraged and maintained.
-
 package vertexai
 
 import (
@@ -37,13 +35,11 @@ const channelName = "vertexai"
 //
 //   - https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-pro
 //   - https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations#global-preview
+//
+// IsRequireGlobalEndpoint determines if the given model requires a global endpoint
+// by checking whether its numeric version is at least 2.5.
 func IsRequireGlobalEndpoint(model string) bool {
-	// gemini-2.5-pro-preview models use global endpoint
-	if strings.HasPrefix(model, "gemini-2.5") {
-		return true
-	}
-
-	return false
+	return geminiOpenaiCompatible.GeminiVersionAtLeast(model, 2.5)
 }
 
 type Adaptor struct {
@@ -228,7 +224,7 @@ func (a *Adaptor) GetModelList() []string {
 	models = append(models, adaptor.GetModelListFromPricing(qwen.ModelRatios)...)
 
 	// Add VertexAI-specific models
-	models = append(models, "text-embedding-004", "aqa")
+	models = append(models, "gemini-embedding-001", "aqa")
 
 	return models
 }
@@ -268,7 +264,7 @@ func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 	// Using global ratio.MilliTokensUsd = 0.5 for consistent quota-based pricing
 
 	// VertexAI-specific models
-	pricing["text-embedding-004"] = adaptor.ModelConfig{Ratio: 0.00001 * ratio.MilliTokensUsd, CompletionRatio: 1}
+	pricing["gemini-embedding-001"] = adaptor.ModelConfig{Ratio: 0.15 * ratio.MilliTokensUsd, CompletionRatio: 1}
 	pricing["aqa"] = adaptor.ModelConfig{Ratio: 1, CompletionRatio: 1}
 
 	return pricing
@@ -290,6 +286,11 @@ func (a *Adaptor) GetCompletionRatio(modelName string) float64 {
 	}
 	// Default completion ratio for VertexAI
 	return 3.0
+}
+
+// DefaultToolingConfig returns Vertex AI tooling defaults (grounding, enterprise search, and Claude web search fees).
+func (a *Adaptor) DefaultToolingConfig() adaptor.ChannelToolConfig {
+	return VertexAIToolingDefaults
 }
 
 // ModelEndpointType represents different endpoint types for VertexAI models

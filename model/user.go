@@ -33,28 +33,29 @@ const (
 // User if you add sensitive fields, don't forget to clean them in setupLogin function.
 // Otherwise, the sensitive information will be saved on local storage in plain text!
 type User struct {
-	Id               int    `json:"id"`
-	Username         string `json:"username" gorm:"unique;index" validate:"max=30"`
-	Password         string `json:"password" gorm:"not null;" validate:"min=8,max=20"`
-	DisplayName      string `json:"display_name" gorm:"index" validate:"max=20"`
-	Role             int    `json:"role" gorm:"type:int;default:1"`   // admin, util
-	Status           int    `json:"status" gorm:"type:int;default:1"` // enabled, disabled
-	Email            string `json:"email" gorm:"index" validate:"max=50"`
-	GitHubId         string `json:"github_id" gorm:"column:github_id;index"`
-	WeChatId         string `json:"wechat_id" gorm:"column:wechat_id;index"`
-	LarkId           string `json:"lark_id" gorm:"column:lark_id;index"`
-	OidcId           string `json:"oidc_id" gorm:"column:oidc_id;index"`
-	VerificationCode string `json:"verification_code" gorm:"-:all"`                                    // this field is only for Email verification, don't save it to database!
-	AccessToken      string `json:"access_token" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
-	TotpSecret       string `json:"totp_secret,omitempty" gorm:"type:varchar(64);column:totp_secret"`  // TOTP secret for 2FA, omit from JSON when empty
-	Quota            int64  `json:"quota" gorm:"bigint;default:0"`
-	UsedQuota        int64  `json:"used_quota" gorm:"bigint;default:0;column:used_quota"` // used quota
-	RequestCount     int    `json:"request_count" gorm:"type:int;default:0;"`             // request number
-	Group            string `json:"group" gorm:"type:varchar(32);default:'default'"`
-	AffCode          string `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
-	InviterId        int    `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
-	CreatedAt        int64  `json:"created_at" gorm:"bigint;autoCreateTime:milli"`
-	UpdatedAt        int64  `json:"updated_at" gorm:"bigint;autoUpdateTime:milli"`
+	Id               int             `json:"id"`
+	Username         string          `json:"username" gorm:"unique;index" validate:"max=30"`
+	Password         string          `json:"password" gorm:"not null;" validate:"min=8,max=20"`
+	DisplayName      string          `json:"display_name" gorm:"index" validate:"max=20"`
+	Role             int             `json:"role" gorm:"type:int;default:1"`   // admin, util
+	Status           int             `json:"status" gorm:"type:int;default:1"` // enabled, disabled
+	Email            string          `json:"email" gorm:"index" validate:"max=50"`
+	GitHubId         string          `json:"github_id" gorm:"column:github_id;index"`
+	WeChatId         string          `json:"wechat_id" gorm:"column:wechat_id;index"`
+	LarkId           string          `json:"lark_id" gorm:"column:lark_id;index"`
+	OidcId           string          `json:"oidc_id" gorm:"column:oidc_id;index"`
+	VerificationCode string          `json:"verification_code" gorm:"-:all"`                                    // this field is only for Email verification, don't save it to database!
+	AccessToken      string          `json:"access_token" gorm:"type:char(32);column:access_token;uniqueIndex"` // this token is for system management
+	TotpSecret       string          `json:"totp_secret,omitempty" gorm:"type:varchar(64);column:totp_secret"`  // TOTP secret for 2FA, omit from JSON when empty
+	Quota            int64           `json:"quota" gorm:"bigint;default:0"`
+	UsedQuota        int64           `json:"used_quota" gorm:"bigint;default:0;column:used_quota"` // used quota
+	RequestCount     int             `json:"request_count" gorm:"type:int;default:0;"`             // request number
+	Group            string          `json:"group" gorm:"type:varchar(32);default:'default'"`
+	AffCode          string          `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
+	InviterId        int             `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
+	MCPToolBlacklist JSONStringSlice `json:"mcp_tool_blacklist" gorm:"type:text"`
+	CreatedAt        int64           `json:"created_at" gorm:"bigint;autoCreateTime:milli"`
+	UpdatedAt        int64           `json:"updated_at" gorm:"bigint;autoUpdateTime:milli"`
 }
 
 func GetMaxUserId() int {
@@ -168,11 +169,11 @@ func (user *User) Insert(ctx context.Context, inviterId int) error {
 	}
 	if inviterId != 0 {
 		if config.QuotaForInvitee > 0 {
-			_ = IncreaseUserQuota(user.Id, config.QuotaForInvitee)
+			_ = IncreaseUserQuota(ctx, user.Id, config.QuotaForInvitee)
 			RecordLog(ctx, user.Id, LogTypeSystem, fmt.Sprintf("Gifted %s for using invitation code", common.LogQuota(config.QuotaForInvitee)))
 		}
 		if config.QuotaForInviter > 0 {
-			_ = IncreaseUserQuota(inviterId, config.QuotaForInviter)
+			_ = IncreaseUserQuota(ctx, inviterId, config.QuotaForInviter)
 			RecordLog(ctx, inviterId, LogTypeSystem, fmt.Sprintf("Gifted %s for inviting user", common.LogQuota(config.QuotaForInviter)))
 		}
 	}
@@ -205,9 +206,10 @@ func (user *User) Update(updatePassword bool) error {
 			return errors.Wrapf(err, "failed to hash password for user update: id=%d, username=%s", user.Id, user.Username)
 		}
 	}
-	if user.Status == UserStatusDisabled {
+	switch user.Status {
+	case UserStatusDisabled:
 		blacklist.BanUser(user.Id)
-	} else if user.Status == UserStatusEnabled {
+	case UserStatusEnabled:
 		blacklist.UnbanUser(user.Id)
 	}
 	err = DB.Model(user).Updates(user).Error
@@ -435,7 +437,12 @@ func GetUserGroup(id int) (group string, err error) {
 	return group, nil
 }
 
-func IncreaseUserQuota(id int, quota int64) (err error) {
+// IncreaseUserQuota increases the quota for a user by the given amount.
+// ctx is the context for the operation; if nil, context.Background() is used.
+func IncreaseUserQuota(ctx context.Context, id int, quota int64) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if quota < 0 {
 		return errors.New("quota cannot be negative!")
 	}
@@ -443,11 +450,14 @@ func IncreaseUserQuota(id int, quota int64) (err error) {
 		addNewRecord(BatchUpdateTypeUserQuota, id, quota)
 		return nil
 	}
-	return increaseUserQuota(id, quota)
+	return increaseUserQuota(ctx, id, quota)
 }
 
-func increaseUserQuota(id int, quota int64) (err error) {
-	err = runWithSQLiteBusyRetry(nil, func() error {
+func increaseUserQuota(ctx context.Context, id int, quota int64) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	err = runWithSQLiteBusyRetry(ctx, func() error {
 		return DB.Model(&User{}).Where("id = ?", id).Update("quota", gorm.Expr("quota + ?", quota)).Error
 	})
 	if err != nil {
@@ -456,7 +466,12 @@ func increaseUserQuota(id int, quota int64) (err error) {
 	return nil
 }
 
-func DecreaseUserQuota(id int, quota int64) (err error) {
+// DecreaseUserQuota decreases the quota for a user by the given amount.
+// ctx is the context for the operation; if nil, context.Background() is used.
+func DecreaseUserQuota(ctx context.Context, id int, quota int64) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if quota < 0 {
 		return errors.New("quota cannot be negative!")
 	}
@@ -464,12 +479,15 @@ func DecreaseUserQuota(id int, quota int64) (err error) {
 		addNewRecord(BatchUpdateTypeUserQuota, id, -quota)
 		return nil
 	}
-	return decreaseUserQuota(id, quota)
+	return decreaseUserQuota(ctx, id, quota)
 }
 
-func decreaseUserQuota(id int, quota int64) (err error) {
+func decreaseUserQuota(ctx context.Context, id int, quota int64) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var result *gorm.DB
-	err = runWithSQLiteBusyRetry(nil, func() error {
+	err = runWithSQLiteBusyRetry(ctx, func() error {
 		result = DB.Model(&User{}).
 			Where("id = ? AND quota >= ?", id, quota).
 			Update("quota", gorm.Expr("quota - ?", quota))
@@ -560,11 +578,12 @@ func GetSiteWideQuotaStats() (totalQuota int64, usedQuota int64, status string, 
 	usedQuota = result.UsedQuota
 
 	// Determine overall status based on active vs total users
-	if result.ActiveUsers == 0 {
+	switch result.ActiveUsers {
+	case 0:
 		status = "No Active Users"
-	} else if result.ActiveUsers == result.TotalUsers {
+	case result.TotalUsers:
 		status = "All Active"
-	} else {
+	default:
 		status = fmt.Sprintf("%d/%d Active", result.ActiveUsers, result.TotalUsers)
 	}
 

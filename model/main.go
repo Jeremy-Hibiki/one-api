@@ -3,15 +3,19 @@ package model
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Laisky/errors/v2"
 	"github.com/Laisky/zap"
+	"go.opentelemetry.io/otel"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/plugin/opentelemetry/tracing"
 
 	"github.com/songquanpeng/one-api/common"
 	"github.com/songquanpeng/one-api/common/config"
@@ -109,10 +113,68 @@ func openMySQL(dsn string) (*gorm.DB, error) {
 func openSQLite() (*gorm.DB, error) {
 	logger.Logger.Info("SQL_DSN not set, using SQLite as database")
 	common.UsingSQLite.Store(true)
-	dsn := fmt.Sprintf("%s?_busy_timeout=%d", common.SQLitePath, common.SQLiteBusyTimeout)
+	sqlitePath, err := ensureSQLitePath()
+	if err != nil {
+		return nil, errors.Wrap(err, "prepare sqlite path")
+	}
+
+	logger.Logger.Debug("using SQLite database", zap.String("path", sqlitePath), zap.Int("busy_timeout_ms", common.SQLiteBusyTimeout))
+
+	dsn := fmt.Sprintf("%s?_busy_timeout=%d", sqlitePath, common.SQLiteBusyTimeout)
 	return gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		PrepareStmt: true, // precompile SQL
 	})
+}
+
+// ensureSQLitePath prepares the SQLite file path by creating the parent directory if needed
+// and verifying basic write access so startup can surface permission issues early.
+func ensureSQLitePath() (string, error) {
+	absPath, err := filepath.Abs(common.SQLitePath)
+	if err != nil {
+		return "", errors.Wrap(err, "resolve sqlite path")
+	}
+
+	parentDir := filepath.Dir(absPath)
+	if err = os.MkdirAll(parentDir, 0o770); err != nil {
+		return "", errors.Wrap(err, "create sqlite directory")
+	}
+
+	probeFile := filepath.Join(parentDir, ".sqlite-permission-check")
+	probe, err := os.OpenFile(probeFile, os.O_CREATE|os.O_RDWR, 0o660)
+	if err != nil {
+		return "", errors.Wrap(err, "sqlite directory not writable")
+	}
+
+	if closeErr := probe.Close(); closeErr != nil {
+		return "", errors.Wrap(closeErr, "close sqlite permission probe")
+	}
+
+	if rmErr := os.Remove(probeFile); rmErr != nil && !os.IsNotExist(rmErr) {
+		logger.Logger.Debug("failed to remove sqlite probe file", zap.Error(rmErr), zap.String("path", probeFile))
+	}
+
+	return absPath, nil
+}
+
+// enableGormOpenTelemetry attaches the OpenTelemetry plugin to the provided GORM DB instance.
+func enableGormOpenTelemetry(db *gorm.DB, dbName string) error {
+	if !config.OpenTelemetryEnabled {
+		return nil
+	}
+
+	if db == nil {
+		return errors.Errorf("gorm db is nil for OpenTelemetry registration (%s)", dbName)
+	}
+
+	plugin := tracing.NewPlugin(
+		tracing.WithTracerProvider(otel.GetTracerProvider()),
+	)
+
+	if err := db.Use(plugin); err != nil {
+		return errors.Wrapf(err, "attach OpenTelemetry plugin to %s database", dbName)
+	}
+
+	return nil
 }
 
 func InitDB() {
@@ -121,6 +183,13 @@ func InitDB() {
 	if err != nil {
 		logger.Logger.Fatal("failed to initialize database", zap.Error(err))
 		return
+	}
+
+	if config.OpenTelemetryEnabled {
+		if err = enableGormOpenTelemetry(DB, "primary"); err != nil {
+			logger.Logger.Fatal("failed to enable OpenTelemetry for primary database", zap.Error(err))
+			return
+		}
 	}
 
 	if config.DebugSQLEnabled {
@@ -140,7 +209,16 @@ func InitDB() {
 
 	logger.Logger.Info("database migration started")
 
-	// STEP 1: Pre-migrations
+	// STEP 0: Ensure GORM has created every table/column before bespoke migrations touch them.
+	// AutoMigrate adds any missing schema elements without attempting destructive changes, giving
+	// a stable baseline so subsequent migrations can safely assume column presence.
+	if err = migrateDB(); err != nil {
+		logger.Logger.Fatal("failed to ensure base database schema", zap.Error(err))
+		return
+	}
+	logger.Logger.Info("database base schema ensured")
+
+	// STEP 1: Schema normalization prior to the main AutoMigrate pass
 	// 1a) Normalize legacy ability suspend_until column types before AutoMigrate touches the table
 	if err = MigrateAbilitySuspendUntilColumn(); err != nil {
 		logger.Logger.Fatal("failed to migrate ability suspend_until column", zap.Error(err))
@@ -166,8 +244,7 @@ func InitDB() {
 		return
 	}
 
-	// STEP 2: Run GORM AutoMigrate on all models
-	// This will now work correctly since field types have been pre-migrated
+	// STEP 2: Run GORM AutoMigrate on all models to pick up any structural changes introduced above
 	if err = migrateDB(); err != nil {
 		logger.Logger.Fatal("failed to migrate database", zap.Error(err))
 		return
@@ -192,6 +269,10 @@ func InitDB() {
 		// Don't fail startup for this migration, just log the error
 	}
 
+	if err = MigrateChannelLegacyImagePricing(); err != nil {
+		logger.Logger.Error("failed to migrate legacy image pricing", zap.Error(err))
+	}
+
 	logger.Logger.Info("database migration completed")
 }
 
@@ -204,7 +285,9 @@ func migrateDB() error {
 		return errors.Wrapf(err, "failed to migrate Token")
 	}
 	if err = DB.AutoMigrate(&User{}); err != nil {
-		return errors.Wrapf(err, "failed to migrate User")
+		if !shouldIgnoreDuplicateColumn(err, "mcp_tool_blacklist") {
+			return errors.Wrapf(err, "failed to migrate User")
+		}
 	}
 	if err = DB.AutoMigrate(&Option{}); err != nil {
 		return errors.Wrapf(err, "failed to migrate Option")
@@ -227,7 +310,28 @@ func migrateDB() error {
 	if err = DB.AutoMigrate(&Trace{}); err != nil {
 		return errors.Wrapf(err, "failed to migrate Trace")
 	}
+	if err = DB.AutoMigrate(&AsyncTaskBinding{}); err != nil {
+		return errors.Wrapf(err, "failed to migrate AsyncTaskBinding")
+	}
+	if err = DB.AutoMigrate(&MCPServer{}); err != nil {
+		if !shouldIgnoreDuplicateColumn(err, "priority") {
+			return errors.Wrapf(err, "failed to migrate MCPServer")
+		}
+	}
+	if err = DB.AutoMigrate(&MCPTool{}); err != nil {
+		return errors.Wrapf(err, "failed to migrate MCPTool")
+	}
 	return nil
+}
+
+// shouldIgnoreDuplicateColumn reports whether a migration error can be ignored.
+// This avoids startup failures when a column already exists.
+func shouldIgnoreDuplicateColumn(err error, column string) bool {
+	if err == nil || strings.TrimSpace(column) == "" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "duplicate column") && strings.Contains(message, strings.ToLower(column))
 }
 
 func InitLogDB() {
@@ -242,6 +346,13 @@ func InitLogDB() {
 	if err != nil {
 		logger.Logger.Fatal("failed to initialize secondary database", zap.Error(err))
 		return
+	}
+
+	if config.OpenTelemetryEnabled && LOG_DB != DB {
+		if err = enableGormOpenTelemetry(LOG_DB, "log"); err != nil {
+			logger.Logger.Fatal("failed to enable OpenTelemetry for log database", zap.Error(err))
+			return
+		}
 	}
 
 	setDBConns(LOG_DB)
