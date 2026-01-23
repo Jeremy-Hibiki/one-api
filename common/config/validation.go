@@ -381,20 +381,6 @@ func ValidateAllEnvVars() *ValidationResult {
 		result.Errors = append(result.Errors, err)
 	}
 
-	// Rate limit validators (must be positive)
-	if err := ValidatePositiveInt("GLOBAL_API_RATE_LIMIT", GlobalApiRateLimitNum); err != nil {
-		result.Errors = append(result.Errors, err)
-	}
-	if err := ValidatePositiveInt("GLOBAL_WEB_RATE_LIMIT", GlobalWebRateLimitNum); err != nil {
-		result.Errors = append(result.Errors, err)
-	}
-	if err := ValidatePositiveInt("GLOBAL_RELAY_RATE_LIMIT", GlobalRelayRateLimitNum); err != nil {
-		result.Errors = append(result.Errors, err)
-	}
-	if err := ValidatePositiveInt("CRITICAL_RATE_LIMIT", CriticalRateLimitNum); err != nil {
-		result.Errors = append(result.Errors, err)
-	}
-
 	// String format validators
 	if err := ValidateTokenKeyPrefix(TokenKeyPrefix); err != nil {
 		result.Errors = append(result.Errors, err)
