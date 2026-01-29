@@ -821,6 +821,18 @@ func ClaudeNativeStreamHandler(c *gin.Context, resp *http.Response) (*model.Erro
 
 		logger.Debug("stream received", zap.String("data", data))
 
+		if data == "[DONE]" {
+			// Send final data: [DONE] to close the stream
+			c.Writer.Write([]byte("data: [DONE]\n\n"))
+			c.Writer.(http.Flusher).Flush()
+
+			err := resp.Body.Close()
+			if err != nil {
+				return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
+			}
+			return nil, &usage
+		}
+
 		// For Claude native streaming, we pass through the events directly
 		c.Writer.Write([]byte("data: " + data + "\n\n"))
 		c.Writer.(http.Flusher).Flush()
