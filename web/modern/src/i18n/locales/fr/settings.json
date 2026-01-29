@@ -98,130 +98,6 @@
       "view_releases": "Voir les publications GitHub"
     }
   },
-  "system_settings": {
-    "description": "Configurer les paramètres et options globaux du système.",
-    "descriptions": {
-      "About": "Contenu de la page À propos (Markdown/HTML pris en charge côté frontend).",
-      "ApproximateTokenEnabled": "Utiliser une estimation plus rapide du comptage des tokens pour de meilleures performances (légèrement moins précise).",
-      "AutomaticDisableChannelEnabled": "Désactiver automatiquement les canaux présentant des échecs répétés.",
-      "AutomaticEnableChannelEnabled": "Réactiver automatiquement les canaux désactivés lorsqu'ils redeviennent stables.",
-      "ChannelDisableThreshold": "Taux d'échec (en %) entraînant la désactivation automatique d'un canal. Par défaut : 5 %.",
-      "ChatLink": "Lien externe de chat/assistance affiché dans l'interface.",
-      "DisplayInCurrencyEnabled": "Afficher l'utilisation et les quotas en devise dans l'interface, selon la conversion configurée.",
-      "DisplayTokenStatEnabled": "Afficher les statistiques de tokens dans les journaux et tableaux de bord lorsque disponibles.",
-      "EmailDomainRestrictionEnabled": "N'autoriser l'inscription qu'aux domaines listés ci-dessous.",
-      "EmailDomainWhitelist": "Domaines e-mail autorisés séparés par des virgules (ex. gmail.com, example.com).",
-      "EmailVerificationEnabled": "Exiger la vérification par e-mail pour l'inscription ou la réinitialisation du mot de passe.",
-      "Footer": "Texte ou HTML du pied de page affiché sur tout le site.",
-      "GitHubClientId": "ID client OAuth GitHub utilisé pour la connexion.",
-      "GitHubClientSecret": "Secret client OAuth GitHub pour échanger les codes d'autorisation (stocké de façon sécurisée).",
-      "GitHubOAuthEnabled": "Activer la connexion OAuth GitHub. Nécessite l'ID client et le secret.",
-      "GroupRatio": "Mapping JSON des ratios de facturation par groupe. Gère remises et majorations.",
-      "HomePageContent": "Contenu affiché sur la page d'accueil.",
-      "LarkClientId": "ID d'application Lark pour la connexion OAuth.",
-      "LarkClientSecret": "Secret d'application Lark utilisé pendant le flux OAuth (stocké de façon sécurisée).",
-      "LogConsumeEnabled": "Enregistrer les journaux d'utilisation/consommation. Désactivez pour réduire le stockage.",
-      "Logo": "URL du logo affiché dans l'en-tête/l'écran de connexion.",
-      "MessagePusherAddress": "Adresse de l'outil de notifications/alertes pour les journaux.",
-      "MessagePusherToken": "Jeton d'authentification du service d'alertes (stocké de façon sécurisée).",
-      "Notice": "Annonce globale affichée à tous les utilisateurs.",
-      "OidcAuthorizationEndpoint": "URL de l'endpoint d'autorisation OIDC.",
-      "OidcClientId": "ID client OIDC utilisé lors du lancement du flux OIDC.",
-      "OidcClientSecret": "Secret client OIDC utilisé pendant l'échange de jetons (stocké de façon sécurisée).",
-      "OidcEnabled": "Activer la connexion OpenID Connect (OIDC). Nécessite endpoints et identifiants.",
-      "OidcTokenEndpoint": "URL de l'endpoint de jeton OIDC.",
-      "OidcUserinfoEndpoint": "URL de l'endpoint userinfo OIDC.",
-      "OidcWellKnown": "URL well-known OIDC (ex. https://issuer/.well-known/openid-configuration).",
-      "PasswordLoginEnabled": "Autoriser la connexion par e-mail et mot de passe. Désactivez pour imposer OAuth ou d'autres fournisseurs.",
-      "PasswordRegisterEnabled": "Autoriser les nouvelles inscriptions par e-mail/mot de passe.",
-      "PreConsumedQuota": "Quota réservé au lancement de la requête pour éviter les abus. La partie non utilisée est restituée après facturation.",
-      "QuotaForInvitee": "Récompense de quota accordée à l'invité une fois inscrit.",
-      "QuotaForInviter": "Récompense de quota accordée à l'invitant après une invitation réussie.",
-      "QuotaForNewUser": "Quota initial accordé à chaque nouvel utilisateur.",
-      "QuotaPerUnit": "Ratio de conversion pour l'affichage en devise. Valeur plus élevée = plus de quota par dollar.",
-      "QuotaRemindThreshold": "Seuil de rappel lorsque le quota restant est inférieur à la valeur indiquée.",
-      "RegisterEnabled": "Interrupteur principal des inscriptions utilisateur. Désactivez pour bloquer les nouveaux comptes.",
-      "RetryTimes": "Nombre de tentatives automatiques pour les erreurs amont transitoires.",
-      "ServerAddress": "URL publique de ce serveur (utilisée dans les liens/rappels).",
-      "SMTPAccount": "Nom d'utilisateur ou adresse e-mail SMTP utilisé pour l'authentification.",
-      "SMTPFrom": "Adresse d'expéditeur utilisée pour les e-mails sortants.",
-      "SMTPPort": "Port du serveur SMTP (ex. 587 pour STARTTLS, 465 pour SMTPS).",
-      "SMTPServer": "Nom d'hôte du serveur SMTP pour l'envoi d'e-mails.",
-      "SMTPToken": "Mot de passe ou jeton SMTP utilisé pour s'authentifier (stocké de façon sécurisée).",
-      "SystemName": "Nom d'affichage du système dans l'interface et les e-mails.",
-      "Theme": "Thème UI (default, berry, air, modern).",
-      "TopUpLink": "Lien externe permettant d'acheter ou recharger du quota.",
-      "TurnstileCheckEnabled": "Activer Cloudflare Turnstile sur les actions critiques (inscription/réinitialisation).",
-      "TurnstileSecretKey": "Clé secrète Turnstile utilisée côté serveur (à conserver confidentielle).",
-      "TurnstileSiteKey": "Clé site Turnstile utilisée côté frontend.",
-      "WeChatAccountQRCodeImageURL": "URL de l'image du QR code du compte WeChat affiché aux utilisateurs.",
-      "WeChatAuthEnabled": "Activer la connexion WeChat. Nécessite la configuration du serveur WeChat.",
-      "WeChatServerAddress": "URL de base du relais/serveur WeChat.",
-      "WeChatServerToken": "Jeton de vérification pour l'intégration WeChat (stocké de façon sécurisée)."
-    },
-    "groups": {
-      "authentication": {
-        "description": "Contrôlez la façon dont les utilisateurs s'inscrivent et se connectent à votre espace de travail.",
-        "title": "Authentification et inscription"
-      },
-      "branding": {
-        "description": "Personnalisez l'apparence et l'expérience produit.",
-        "title": "Image de marque et contenu"
-      },
-      "channels": {
-        "description": "Réagissez automatiquement à l'état des canaux amont et à leur stratégie de reprise.",
-        "title": "Canaux et fiabilité"
-      },
-      "email": {
-        "description": "Configurer l'envoi d'e-mails sortants.",
-        "title": "E-mail (SMTP)"
-      },
-      "links": {
-        "description": "Contrôlez les liens externes exposés aux utilisateurs finaux.",
-        "title": "Liens"
-      },
-      "logging": {
-        "description": "Ajustez l'observabilité et les intégrations aval.",
-        "title": "Journalisation, métriques et intégrations"
-      },
-      "oauth": {
-        "description": "Connectez des fournisseurs d'identité tiers pour une connexion transparente.",
-        "title": "Fournisseurs OAuth / SSO"
-      },
-      "other": {
-        "description": "Clés de configuration non encore catégorisées.",
-        "title": "Autres paramètres"
-      },
-      "quota": {
-        "description": "Gérer les quotas, ratios de facturation et affichage en devise.",
-        "title": "Quota et facturation"
-      },
-      "security": {
-        "description": "Configurer la protection anti-robots et les contrôles de sécurité.",
-        "title": "Anti-bot et sécurité"
-      }
-    },
-    "loading": "Chargement des options...",
-    "no_options": "Aucune option disponible ou permissions insuffisantes.",
-    "refresh": "Actualiser",
-    "save": "Enregistrer",
-    "save_failed": "Échec de l'enregistrement",
-    "saved_message": "{{key}} mis à jour avec succès.",
-    "saved_success": "Paramètre enregistré",
-    "saving": "Enregistrement...",
-    "sensitive_hint": "La valeur stockée est masquée. Saisissez une nouvelle valeur pour remplacer le secret existant.",
-    "title": "Paramètres système"
-  },
-  "settings": {
-    "description": "Configurez votre compte et les paramètres du système",
-    "tabs": {
-      "operation": "Opération",
-      "other": "Autres",
-      "personal": "Personnel",
-      "system": "Système"
-    },
-    "title": "Paramètres"
-  },
   "personal_settings": {
     "access_token": {
       "description": "Générez des tokens d'accès et des liens d'invitation.",
@@ -277,5 +153,136 @@
       "verify_placeholder": "Entrez le code à 6 chiffres de votre application",
       "verify_placeholder_mobile": "Entrez un code à 6 chiffres"
     }
+  },
+  "settings": {
+    "description": "Configurez votre compte et les paramètres du système",
+    "tabs": {
+      "operation": "Opération",
+      "other": "Autres",
+      "personal": "Personnel",
+      "system": "Système"
+    },
+    "title": "Paramètres"
+  },
+  "system_settings": {
+    "description": "Configurer les paramètres et options globaux du système.",
+    "descriptions": {
+      "About": "Contenu de la page À propos (Markdown/HTML pris en charge côté frontend).",
+      "ApproximateTokenEnabled": "Utiliser une estimation plus rapide du comptage des tokens pour de meilleures performances (légèrement moins précise).",
+      "AutomaticDisableChannelEnabled": "Désactiver automatiquement les canaux présentant des échecs répétés.",
+      "AutomaticEnableChannelEnabled": "Réactiver automatiquement les canaux désactivés lorsqu'ils redeviennent stables.",
+      "ChannelDisableThreshold": "Taux d'échec (en %) entraînant la désactivation automatique d'un canal. Par défaut : 5 %.",
+      "ChatLink": "Lien externe de chat/assistance affiché dans l'interface.",
+      "DisplayInCurrencyEnabled": "Afficher l'utilisation et les quotas en devise dans l'interface, selon la conversion configurée.",
+      "DisplayTokenStatEnabled": "Afficher les statistiques de tokens dans les journaux et tableaux de bord lorsque disponibles.",
+      "EmailDomainRestrictionEnabled": "N'autoriser l'inscription qu'aux domaines listés ci-dessous.",
+      "EmailDomainWhitelist": "Domaines e-mail autorisés séparés par des virgules (ex. gmail.com, example.com).",
+      "EmailVerificationEnabled": "Exiger la vérification par e-mail pour l'inscription ou la réinitialisation du mot de passe.",
+      "Footer": "Texte ou HTML du pied de page affiché sur tout le site.",
+      "GitHubClientId": "ID client OAuth GitHub utilisé pour la connexion.",
+      "GitHubClientSecret": "Secret client OAuth GitHub pour échanger les codes d'autorisation (stocké de façon sécurisée).",
+      "GitHubOAuthEnabled": "Activer la connexion OAuth GitHub. Nécessite l'ID client et le secret.",
+      "GroupRatio": "Mapping JSON des ratios de facturation par groupe. Gère remises et majorations.",
+      "HomePageContent": "Contenu affiché sur la page d'accueil.",
+      "LarkClientId": "ID d'application Lark pour la connexion OAuth.",
+      "LarkClientSecret": "Secret d'application Lark utilisé pendant le flux OAuth (stocké de façon sécurisée).",
+      "LogConsumeEnabled": "Enregistrer les journaux d'utilisation/consommation. Désactivez pour réduire le stockage.",
+      "Logo": "URL du logo affiché dans l'en-tête/l'écran de connexion.",
+      "MessagePusherAddress": "Adresse de l'outil de notifications/alertes pour les journaux.",
+      "MessagePusherToken": "Jeton d'authentification du service d'alertes (stocké de façon sécurisée).",
+      "Notice": "Annonce globale affichée à tous les utilisateurs.",
+      "OidcAuthorizationEndpoint": "URL de l'endpoint d'autorisation OIDC.",
+      "OidcClientId": "ID client OIDC utilisé lors du lancement du flux OIDC.",
+      "OidcClientSecret": "Secret client OIDC utilisé pendant l'échange de jetons (stocké de façon sécurisée).",
+      "OidcEnabled": "Activer la connexion OpenID Connect (OIDC). Nécessite endpoints et identifiants.",
+      "OidcTokenEndpoint": "URL de l'endpoint de jeton OIDC.",
+      "OidcUserinfoEndpoint": "URL de l'endpoint userinfo OIDC.",
+      "OidcWellKnown": "URL well-known OIDC (ex. https://issuer/.well-known/openid-configuration).",
+      "PasswordLoginEnabled": "Autoriser la connexion par e-mail et mot de passe. Désactivez pour imposer OAuth ou d'autres fournisseurs.",
+      "PasswordRegisterEnabled": "Autoriser les nouvelles inscriptions par e-mail/mot de passe.",
+      "PreConsumedQuota": "Quota réservé au lancement de la requête pour éviter les abus. La partie non utilisée est restituée après facturation.",
+      "QuotaForInvitee": "Récompense de quota accordée à l'invité une fois inscrit.",
+      "QuotaForInviter": "Récompense de quota accordée à l'invitant après une invitation réussie.",
+      "QuotaForNewUser": "Quota initial accordé à chaque nouvel utilisateur.",
+      "QuotaPerUnit": "Ratio de conversion pour l'affichage en devise. Valeur plus élevée = plus de quota par dollar.",
+      "QuotaRemindThreshold": "Seuil de rappel lorsque le quota restant est inférieur à la valeur indiquée.",
+      "RegisterEnabled": "Interrupteur principal des inscriptions utilisateur. Désactivez pour bloquer les nouveaux comptes.",
+      "RetryTimes": "Nombre de tentatives automatiques pour les erreurs amont transitoires.",
+      "SMTPAccount": "Nom d'utilisateur ou adresse e-mail SMTP utilisé pour l'authentification.",
+      "SMTPFrom": "Adresse d'expéditeur utilisée pour les e-mails sortants.",
+      "SMTPPort": "Port du serveur SMTP (ex. 587 pour STARTTLS, 465 pour SMTPS).",
+      "SMTPServer": "Nom d'hôte du serveur SMTP pour l'envoi d'e-mails.",
+      "SMTPToken": "Mot de passe ou jeton SMTP utilisé pour s'authentifier (stocké de façon sécurisée).",
+      "ServerAddress": "URL publique de ce serveur (utilisée dans les liens/rappels).",
+      "SystemName": "Nom d'affichage du système dans l'interface et les e-mails.",
+      "Theme": "Thème UI (default, berry, air, modern).",
+      "TopUpLink": "Lien externe permettant d'acheter ou recharger du quota.",
+      "TurnstileCheckEnabled": "Activer Cloudflare Turnstile sur les actions critiques (inscription/réinitialisation).",
+      "TurnstileSecretKey": "Clé secrète Turnstile utilisée côté serveur (à conserver confidentielle).",
+      "TurnstileSiteKey": "Clé site Turnstile utilisée côté frontend.",
+      "WeChatAccountQRCodeImageURL": "URL de l'image du QR code du compte WeChat affiché aux utilisateurs.",
+      "WeChatAuthEnabled": "Activer la connexion WeChat. Nécessite la configuration du serveur WeChat.",
+      "WeChatServerAddress": "URL de base du relais/serveur WeChat.",
+      "WeChatServerToken": "Jeton de vérification pour l'intégration WeChat (stocké de façon sécurisée)."
+    },
+    "disabled": "Désactivé",
+    "enabled": "Activé",
+    "groups": {
+      "authentication": {
+        "description": "Contrôlez la façon dont les utilisateurs s'inscrivent et se connectent à votre espace de travail.",
+        "title": "Authentification et inscription"
+      },
+      "branding": {
+        "description": "Personnalisez l'apparence et l'expérience produit.",
+        "title": "Image de marque et contenu"
+      },
+      "channels": {
+        "description": "Réagissez automatiquement à l'état des canaux amont et à leur stratégie de reprise.",
+        "title": "Canaux et fiabilité"
+      },
+      "email": {
+        "description": "Configurer l'envoi d'e-mails sortants.",
+        "title": "E-mail (SMTP)"
+      },
+      "links": {
+        "description": "Contrôlez les liens externes exposés aux utilisateurs finaux.",
+        "title": "Liens"
+      },
+      "logging": {
+        "description": "Ajustez l'observabilité et les intégrations aval.",
+        "title": "Journalisation, métriques et intégrations"
+      },
+      "oauth": {
+        "description": "Connectez des fournisseurs d'identité tiers pour une connexion transparente.",
+        "title": "Fournisseurs OAuth / SSO"
+      },
+      "other": {
+        "description": "Clés de configuration non encore catégorisées.",
+        "title": "Autres paramètres"
+      },
+      "quota": {
+        "description": "Gérer les quotas, ratios de facturation et affichage en devise.",
+        "title": "Quota et facturation"
+      },
+      "security": {
+        "description": "Configurer la protection anti-robots et les contrôles de sécurité.",
+        "title": "Anti-bot et sécurité"
+      }
+    },
+    "info_about": "Infos sur {{key}}",
+    "loading": "Chargement des options...",
+    "no_description": "Aucune description disponible pour ce paramètre pour l’instant.",
+    "no_options": "Aucune option disponible ou permissions insuffisantes.",
+    "option_value_aria": "Valeur de {{key}}",
+    "refresh": "Actualiser",
+    "save": "Enregistrer",
+    "save_failed": "Échec de l'enregistrement",
+    "saved_message": "{{key}} mis à jour avec succès.",
+    "saved_success": "Paramètre enregistré",
+    "saving": "Enregistrement...",
+    "select_value": "Sélectionner une valeur",
+    "sensitive_hint": "La valeur stockée est masquée. Saisissez une nouvelle valeur pour remplacer le secret existant.",
+    "sensitive_placeholder": "Valeur masquée ; saisir pour mettre à jour",
+    "title": "Paramètres système"
   }
 }
