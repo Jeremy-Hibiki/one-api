@@ -4,6 +4,8 @@
 
 The purpose of the one‑api project is to let users freely use any of the ChatCompletion API, Response API, or Claude Messages API formats to request any model on any channel. one‑api transparently handles the request and response format conversions. Please make sure that all adapters support conversion among the three API formats.
 
+Local tools and debugging related sensitive information is saved in .github/instructions/laisky.instructions.md.
+
 ### Codes
 
 All code must be written in English. Avoid using any other languages in code, comments, or documentation.
@@ -39,6 +41,12 @@ Multiple agents might be modifying the code at the same time. If you come across
 Should use TODOs tool to track tasks and progress.
 
 After making any code changes, always verify that the code is correct: the syntax must be valid, the project should still build successfully(via `go vet ./...`, `go test -race ./...` or `make build-frontend-modern`), and all unit tests must pass. If any test fails, investigate whether the problem lies in the implementation or the test itself, and, respecting the user's specifications, fix the issue carefully.
+
+### Security
+
+Always use constant time comparison for sensitive data. Follow OWASP recommendations for password hashing iterations (minimum 10,000 in this context).
+
+Never use user input directly in database queries to prevent SQL injection attacks. Always sanitize and validate user inputs before using them in queries.
 
 ### TimeZone
 

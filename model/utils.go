@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -148,6 +149,23 @@ func addNewRecord(type_ int, id int, value int64) {
 	} else {
 		batchUpdateStores[type_][id] += value
 	}
+}
+
+// ValidateOrderClause ensures that the sort field and order are valid to prevent SQL injection.
+// It returns a sanitized ORDER BY clause string.
+func ValidateOrderClause(sortBy, sortOrder string, allowed map[string]string, defaultClause string) string {
+	sortBy = strings.ToLower(strings.TrimSpace(sortBy))
+	sortOrder = strings.ToLower(strings.TrimSpace(sortOrder))
+
+	if sortOrder != "asc" && sortOrder != "desc" {
+		sortOrder = "desc"
+	}
+
+	if col, ok := allowed[sortBy]; ok {
+		return col + " " + sortOrder
+	}
+
+	return defaultClause
 }
 
 // batchUpdate flushes all accumulated changes to the database.
