@@ -1,9 +1,9 @@
 package router
 
 import (
-	"github.com/songquanpeng/one-api/controller"
-	"github.com/songquanpeng/one-api/controller/auth"
-	"github.com/songquanpeng/one-api/middleware"
+	"github.com/Laisky/one-api/controller"
+	"github.com/Laisky/one-api/controller/auth"
+	"github.com/Laisky/one-api/middleware"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
@@ -16,9 +16,11 @@ func SetApiRouter(router *gin.Engine) {
 	{
 		apiRouter.GET("/status", controller.GetStatus)
 		apiRouter.GET("/status/channel", controller.GetChannelStatus)
-		apiRouter.GET("/models", middleware.UserAuth(), controller.DashboardListModels)
+		apiRouter.GET("/models", middleware.AdminAuth(), controller.DashboardListModels)
 		// Public endpoint: anonymous users see all supported models; logged-in users see only allowed models
-		apiRouter.GET("/models/display", controller.GetModelsDisplay)
+		apiRouter.GET("/models/display", middleware.OptionalUserAuth(), controller.GetModelsDisplay)
+		// Public endpoint: list enabled MCP servers and their enabled tools
+		apiRouter.GET("/tools/display", controller.GetToolsDisplay)
 		apiRouter.GET("/notice", controller.GetNotice)
 		apiRouter.GET("/about", controller.GetAbout)
 		apiRouter.GET("/home_page_content", controller.GetHomePageContent)
@@ -39,7 +41,9 @@ func SetApiRouter(router *gin.Engine) {
 		userRoute := apiRouter.Group("/user")
 		{
 			userRoute.POST("/register", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.Register)
-			userRoute.POST("/login", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.Login)
+			userRoute.POST("/login", middleware.CriticalRateLimit(), controller.Login)
+			userRoute.POST("/passkey/login/begin", middleware.CriticalRateLimit(), controller.PasskeyLoginBegin)
+			userRoute.POST("/passkey/login/finish", middleware.CriticalRateLimit(), controller.PasskeyLoginFinish)
 			userRoute.GET("/logout", controller.Logout)
 
 			selfRoute := userRoute.Group("/")
@@ -58,6 +62,13 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.GET("/totp/setup", controller.SetupTotp)
 				selfRoute.POST("/totp/confirm", controller.ConfirmTotp)
 				selfRoute.POST("/totp/disable", controller.DisableTotp)
+
+				// Passkey (WebAuthn) management – authenticated users
+				selfRoute.GET("/passkey", controller.PasskeyList)
+				selfRoute.POST("/passkey/register/begin", controller.PasskeyRegisterBegin)
+				selfRoute.POST("/passkey/register/finish", controller.PasskeyRegisterFinish)
+				selfRoute.DELETE("/passkey/:id", controller.PasskeyDelete)
+				selfRoute.PUT("/passkey/:id", controller.PasskeyRename)
 			}
 
 			adminRoute := userRoute.Group("/")
@@ -123,6 +134,15 @@ func SetApiRouter(router *gin.Engine) {
 			apiRouter.GET("/token/balance", middleware.TokenAuth(), controller.GetTokenBalance)
 			apiRouter.GET("/token/transactions", middleware.TokenAuth(), controller.GetTokenTransactions)
 			apiRouter.GET("/token/logs", middleware.TokenAuth(), controller.GetTokenLogs)
+		}
+		// Admin-scoped read-only token visibility (cross-user). Write ops stay on /api/token
+		// under UserAuth so admins can never silently mutate another user's credentials.
+		adminTokenRoute := apiRouter.Group("/admin/tokens")
+		adminTokenRoute.Use(middleware.AdminAuth())
+		{
+			adminTokenRoute.GET("/", controller.AdminGetAllTokens)
+			adminTokenRoute.GET("/search", controller.AdminSearchTokens)
+			adminTokenRoute.GET("/:id", controller.AdminGetToken)
 		}
 		costRoute := apiRouter.Group("/cost")
 		{

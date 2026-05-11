@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,8 +15,51 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/model"
 )
+
+// TestEmbeddingHandlerFallsBackToPromptTokens verifies Gemini embedding responses keep the locally counted prompt tokens when upstream omits usage.
+// Parameters: t coordinates the test case execution. Returns: no values.
+func TestEmbeddingHandlerFallsBackToPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set(ctxkey.EmbeddingPromptTokensDetails, &model.UsagePromptTokensDetails{
+		TextTokens:  10,
+		ImageTokens: 32,
+	})
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+		Body: io.NopCloser(strings.NewReader(`{"embeddings":[{"values":[0.1,0.2]}]}`)),
+	}
+
+	apiErr, usage := EmbeddingHandler(c, resp, 42)
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	require.Equal(t, 42, usage.PromptTokens)
+	require.Equal(t, 42, usage.TotalTokens)
+	require.NotNil(t, usage.PromptTokensDetails)
+	require.Equal(t, 10, usage.PromptTokensDetails.TextTokens)
+	require.Equal(t, 32, usage.PromptTokensDetails.ImageTokens)
+
+	var body struct {
+		Usage model.Usage `json:"usage"`
+	}
+	err := json.Unmarshal(recorder.Body.Bytes(), &body)
+	require.NoError(t, err)
+	require.Equal(t, 42, body.Usage.PromptTokens)
+	require.Equal(t, 42, body.Usage.TotalTokens)
+	require.NotNil(t, body.Usage.PromptTokensDetails)
+	require.Equal(t, 10, body.Usage.PromptTokensDetails.TextTokens)
+	require.Equal(t, 32, body.Usage.PromptTokensDetails.ImageTokens)
+}
 
 func TestCleanFunctionParameters(t *testing.T) {
 	t.Parallel()
@@ -263,6 +309,41 @@ func TestCleanFunctionParameters(t *testing.T) {
 			require.JSONEq(t, string(expectedJSON), string(resultJSON), "cleanFunctionParameters() mismatch")
 		})
 	}
+}
+
+// TestStreamHandler_OversizedChunk verifies oversized Gemini stream chunks bypass scanner limits.
+func TestStreamHandler_OversizedChunk(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	largeText := strings.Repeat("g", 128*1024)
+	chunk := ChatResponse{
+		Candidates: []ChatCandidate{{
+			FinishReason: "STOP",
+			Content:      ChatContent{Parts: []Part{{Text: largeText}}},
+		}},
+	}
+	chunkBytes, err := json.Marshal(chunk)
+	require.NoError(t, err)
+
+	sse := "data: " + string(chunkBytes) + "\n\n" + "data: [DONE]\n\n"
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+
+	apiErr, responseText := StreamHandler(c, resp)
+	require.Nil(t, apiErr)
+	require.Equal(t, largeText, responseText)
+
+	body := recorder.Body.String()
+	require.Contains(t, body, largeText[:1024])
+	require.Contains(t, body, largeText[len(largeText)-1024:])
+	require.Contains(t, body, "[DONE]")
 }
 
 func TestConvertRequestSetsToolConfig(t *testing.T) {

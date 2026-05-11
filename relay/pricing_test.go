@@ -5,10 +5,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/adaptor/ali"
-	"github.com/songquanpeng/one-api/relay/adaptor/openrouter"
-	"github.com/songquanpeng/one-api/relay/adaptor/xai"
-	"github.com/songquanpeng/one-api/relay/apitype"
+	"github.com/Laisky/one-api/relay/adaptor/ali"
+	"github.com/Laisky/one-api/relay/adaptor/openrouter"
+	"github.com/Laisky/one-api/relay/adaptor/xai"
+	"github.com/Laisky/one-api/relay/apitype"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
 )
 
 // TestAdapterPricingImplementations tests that all major adapters have proper pricing implementations
@@ -133,14 +134,16 @@ func TestSpecificAdapterPricing(t *testing.T) {
 		require.NotNil(t, adaptor, "xAI_Pricing not found")
 
 		testModels := map[string]string{
-			"grok-code-fast-1":          "$0.20 input, $0.02 cached input, $1.50 output",
-			"grok-4-0709":               "$3.00 input, $15.00 output",
-			"grok-4-fast-reasoning":     "$0.20 input, $0.05 cached input, $0.50 output",
-			"grok-4-fast":               "$0.20 input, $0.05 cached input, $0.50 output",
-			"grok-4-fast-non-reasoning": "$0.20 input, $0.05 cached input, $0.50 output",
-			"grok-3":                    "$3.00 input, $15.00 output",
-			"grok-3-mini":               "$0.30 input, $0.50 output",
-			"grok-2-vision-1212":        "$2.00 input, $10.00 output",
+			"grok-code-fast-1":             "$0.20 input, $0.02 cached input, $1.50 output",
+			"grok-4-0709":                  "$3.00 input, $15.00 output",
+			"grok-4.20-0309-reasoning":     "$2.00 input, $0.20 cached input, $6.00 output",
+			"grok-4.20-0309-non-reasoning": "$2.00 input, $0.20 cached input, $6.00 output",
+			"grok-4.20-multi-agent-0309":   "$2.00 input, $0.20 cached input, $6.00 output",
+			"grok-4-1-fast-reasoning":      "$0.20 input, $0.05 cached input, $0.50 output",
+			"grok-4-1-fast-non-reasoning":  "$0.20 input, $0.05 cached input, $0.50 output",
+			"grok-3":                       "$3.00 input, $15.00 output",
+			"grok-3-mini":                  "$0.30 input, $0.50 output",
+			"grok-2-vision-1212":           "$2.00 input, $10.00 output",
 		}
 
 		for model, description := range testModels {
@@ -160,7 +163,7 @@ func TestSpecificAdapterPricing(t *testing.T) {
 				description)
 		}
 
-		imageModels := []string{"grok-2-image-1212", "grok-2-image"}
+		imageModels := []string{"grok-imagine-image", "grok-imagine-image-pro", "grok-2-image-1212", "grok-2-image"}
 		for _, imageModel := range imageModels {
 			expectedImageConfig, ok := xai.ModelRatios[imageModel]
 			require.True(t, ok, "xAI image model %s missing from ModelRatios", imageModel)
@@ -177,6 +180,11 @@ func TestSpecificAdapterPricing(t *testing.T) {
 				imageModel, imageModelRatio, expectedImageConfig.Ratio, imageModelCompletionRatio, expectedImageConfig.CompletionRatio,
 				expectedImageConfig.Image.PricePerImageUsd)
 		}
+
+		videoCfg, ok := xai.ModelRatios["grok-imagine-video"]
+		require.True(t, ok, "xAI video model grok-imagine-video missing from ModelRatios")
+		require.NotNil(t, videoCfg.Video, "expected video pricing metadata for grok-imagine-video")
+		require.InDelta(t, 0.05, videoCfg.Video.PerSecondUsd, 1e-12)
 	})
 
 	t.Run("Gemini_Pricing", func(t *testing.T) {
@@ -191,7 +199,7 @@ func TestSpecificAdapterPricing(t *testing.T) {
 		}{
 			"gemini-2.5-pro":   {1.25 * 0.5, 10.0 / 1.25},
 			"gemini-2.5-flash": {0.30 * 0.5, 2.5 / 0.30},
-			"gemini-2.0-flash": {0.10 * 0.5, 0.40 / 0.10},
+			"gemini-2.0-flash": {0.15 * 0.5, 0.60 / 0.15},
 		}
 
 		for model, expected := range testModels {
@@ -298,6 +306,33 @@ func TestFallbackPricing(t *testing.T) {
 			require.Greater(t, completionRatio, 0.0, "%s: Fallback completion ratio for unknown model should be > 0, got %.2f", adapter.name, completionRatio)
 
 			t.Logf("%s fallback pricing: ratio=%.9f, completion_ratio=%.2f", adapter.name, ratio, completionRatio)
+		})
+	}
+}
+
+// TestFallbackPricingUsesQuotaUnits verifies unknown-model fallback values remain in the
+// internal quota-per-token unit instead of raw USD-per-token values.
+func TestFallbackPricingUsesQuotaUnits(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		apiType  int
+		expected float64
+	}{
+		{name: "Anthropic", apiType: apitype.Anthropic, expected: 3 * billingratio.MilliTokensUsd},
+		{name: "AWS Bedrock", apiType: apitype.AwsClaude, expected: 3 * billingratio.MilliTokensUsd},
+		{name: "Cohere", apiType: apitype.Cohere, expected: 0.5 * billingratio.MilliTokensUsd},
+		{name: "Ollama", apiType: apitype.Ollama, expected: 2.5 * billingratio.MilliTokensUsd},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			adaptor := GetAdaptor(tc.apiType)
+			require.NotNil(t, adaptor)
+			require.Equal(t, tc.expected, adaptor.GetModelRatio("unknown-test-model-12345"))
 		})
 	}
 }

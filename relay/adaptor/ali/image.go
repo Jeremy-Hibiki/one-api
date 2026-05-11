@@ -12,9 +12,9 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func ImageHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
@@ -115,7 +115,7 @@ func asyncTaskWait(taskID string, key string) (*TaskResponse, []byte, error) {
 		rsp, err, body := asyncTask(taskID, key)
 		responseBody = body
 		if err != nil {
-			return &taskResponse, responseBody, err
+			return &taskResponse, responseBody, errors.Wrap(err, "ali async image task")
 		}
 
 		if rsp.Output.TaskStatus == "" {
@@ -142,8 +142,12 @@ func asyncTaskWait(taskID string, key string) (*TaskResponse, []byte, error) {
 }
 
 func responseAli2OpenAIImage(response *TaskResponse, responseFormat string) *openai.ImageResponse {
+	// Pre-size Data to a non-nil empty slice so JSON-encoded responses always emit
+	// `"data":[]` instead of `null` when every upstream result fails the b64 fetch
+	// or when no results are returned at all.
 	imageResponse := openai.ImageResponse{
 		Created: helper.GetTimestamp(),
+		Data:    make([]openai.ImageData, 0, len(response.Output.Results)),
 	}
 
 	for _, data := range response.Output.Results {

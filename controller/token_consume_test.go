@@ -17,12 +17,12 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/model"
 )
 
 // setupConsumeTokenTest prepares an isolated in-memory database and test user/token for ConsumeToken tests.
@@ -170,6 +170,9 @@ func TestConsumeTokenPreAndPostFlow(t *testing.T) {
 		require.NoError(t, model.LOG_DB.First(&logEntry, *txn.LogId).Error)
 		require.Equal(t, 80, logEntry.Quota)
 		require.Contains(t, logEntry.Content, "finalized")
+		// External billing rows are tool-typed so they appear in the dashboard's
+		// tool charts instead of the model usage charts.
+		require.Equal(t, model.LogTypeTool, logEntry.Type)
 	}
 
 	refreshedUser, err = model.GetUserById(user.Id, true)
@@ -218,6 +221,7 @@ func TestConsumeTokenCancelFlow(t *testing.T) {
 		require.NoError(t, model.LOG_DB.First(&logEntry, *txn.LogId).Error)
 		require.Equal(t, 0, logEntry.Quota)
 		require.Contains(t, logEntry.Content, "canceled")
+		require.Equal(t, model.LogTypeTool, logEntry.Type)
 	}
 }
 
@@ -253,7 +257,46 @@ func TestConsumeTokenAutoConfirmTimeout(t *testing.T) {
 		var logEntry model.Log
 		require.NoError(t, model.LOG_DB.First(&logEntry, *txn.LogId).Error)
 		require.Contains(t, logEntry.Content, "auto-confirmed")
+		require.Equal(t, model.LogTypeTool, logEntry.Type)
 	}
+}
+
+func TestConsumeTokenZeroQuotaSinglePhase(t *testing.T) {
+	cleanup, user, token := setupConsumeTokenTest(t)
+	defer cleanup()
+
+	body := `{"add_used_quota":0,"add_reason":"file_list","phase":"single"}`
+	c, recorder := newConsumeTokenContext(t, http.MethodPost, body, user.Id, token.Id, "req-zero")
+
+	ConsumeToken(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.True(t, resp["success"].(bool))
+
+	data := resp["data"].(map[string]any)
+	require.EqualValues(t, token.RemainQuota, data["remain_quota"])
+
+	transaction := resp["transaction"].(map[string]any)
+	require.Equal(t, "confirmed", transaction["status"])
+	require.EqualValues(t, 0, transaction["final_quota"])
+	require.EqualValues(t, 0, transaction["pre_quota"])
+
+	refreshedToken, err := model.GetTokenByIds(token.Id, user.Id)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), refreshedToken.RemainQuota)
+
+	refreshedUser, err := model.GetUserById(user.Id, true)
+	require.NoError(t, err)
+	require.Equal(t, int64(1000), refreshedUser.Quota)
+
+	var logRows []model.Log
+	require.NoError(t, model.LOG_DB.Where("request_id = ?", "req-zero").Find(&logRows).Error)
+	require.Len(t, logRows, 1)
+	require.Equal(t, model.LogTypeTool, logRows[0].Type)
+	require.Equal(t, "file_list", logRows[0].ModelName)
+	require.Equal(t, 0, logRows[0].Quota)
 }
 
 func TestConsumeTokenDefaultsToSinglePhase(t *testing.T) {
@@ -284,4 +327,14 @@ func TestConsumeTokenDefaultsToSinglePhase(t *testing.T) {
 	refreshedUser, err := model.GetUserById(user.Id, true)
 	require.NoError(t, err)
 	require.Equal(t, int64(880), refreshedUser.Quota)
+
+	// Confirm the resulting log row is tool-typed so the dashboard tool charts
+	// pick it up via the LogTypeTool aggregation path.
+	var logRows []model.Log
+	require.NoError(t, model.LOG_DB.Where("request_id = ?", "req-single").Find(&logRows).Error)
+	require.NotEmpty(t, logRows)
+	for _, row := range logRows {
+		require.Equal(t, model.LogTypeTool, row.Type)
+		require.Equal(t, "serviceD", row.ModelName)
+	}
 }

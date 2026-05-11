@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/billing/ratio"
 )
 
 func TestGeminiWebSearchPricingApplied(t *testing.T) {
@@ -50,9 +50,33 @@ func TestGemini3FlashPricing(t *testing.T) {
 
 func TestGeminiEmbeddingConfig(t *testing.T) {
 	t.Parallel()
-	cfg, ok := ModelRatios["gemini-embedding-001"]
-	require.True(t, ok, "gemini-embedding-001 missing from pricing map")
-	require.InDelta(t, 0.15*ratio.MilliTokensUsd, cfg.Ratio, 1e-12)
+	testCases := []struct {
+		model         string
+		expectedRatio float64
+	}{
+		{model: "gemini-embedding-001", expectedRatio: geminiEmbedding001TextPrice * ratio.MilliTokensUsd},
+		{model: "gemini-embedding-2-preview", expectedRatio: geminiEmbedding2PreviewTextPrice * ratio.MilliTokensUsd},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			cfg, ok := ModelRatios[tc.model]
+			require.True(t, ok, "%s missing from pricing map", tc.model)
+			require.InDelta(t, tc.expectedRatio, cfg.Ratio, 1e-12)
+			require.InDelta(t, 1.0, cfg.CompletionRatio, 1e-12)
+			if tc.model == "gemini-embedding-2-preview" {
+				require.NotNil(t, cfg.Embedding, "expected multimodal embedding pricing metadata")
+				require.InDelta(t, geminiEmbedding2PreviewImagePrice*ratio.MilliTokensUsd, cfg.Embedding.ImageTokenRatio, 1e-12)
+				require.InDelta(t, geminiEmbedding2PreviewAudioPrice*ratio.MilliTokensUsd, cfg.Embedding.AudioTokenRatio, 1e-12)
+				require.InDelta(t, geminiEmbedding2PreviewVideoPrice*ratio.MilliTokensUsd, cfg.Embedding.VideoTokenRatio, 1e-12)
+				require.InDelta(t, geminiEmbedding2PreviewUsdPerImage, cfg.Embedding.UsdPerImage, 1e-12)
+				require.InDelta(t, geminiEmbedding2PreviewUsdPerAudioSecond, cfg.Embedding.UsdPerAudioSecond, 1e-12)
+				require.InDelta(t, geminiEmbedding2PreviewUsdPerVideoFrame, cfg.Embedding.UsdPerVideoFrame, 1e-12)
+			}
+		})
+	}
 }
 
 func TestGemini3ProImagePreviewPricing(t *testing.T) {
@@ -67,6 +91,35 @@ func TestGemini3ProImagePreviewPricing(t *testing.T) {
 	require.Contains(t, cfg.Image.SizeMultipliers, "2048x2048")
 	require.Contains(t, cfg.Image.SizeMultipliers, "4096x4096")
 	require.InDelta(t, gemini3ProImage4KPrice/gemini3ProImageBasePrice, cfg.Image.SizeMultipliers["4096x4096"], 1e-12)
+}
+
+func TestGemini31FlashImagePreviewPricing(t *testing.T) {
+	t.Parallel()
+	cfg, ok := ModelRatios["gemini-3.1-flash-image-preview"]
+	require.True(t, ok, "gemini-3.1-flash-image-preview missing from pricing map")
+	require.InDelta(t, 0.50*ratio.MilliTokensUsd, cfg.Ratio, 1e-12)
+	require.InDelta(t, 3.00/0.50, cfg.CompletionRatio, 1e-9)
+	require.NotNil(t, cfg.Image, "expected image pricing metadata for gemini-3.1-flash-image-preview")
+	require.InDelta(t, gemini31FlashImage1KPrice, cfg.Image.PricePerImageUsd, 1e-12)
+	require.Contains(t, cfg.Image.SizeMultipliers, "512x512")
+	require.Contains(t, cfg.Image.SizeMultipliers, "1024x1024")
+	require.Contains(t, cfg.Image.SizeMultipliers, "2048x2048")
+	require.Contains(t, cfg.Image.SizeMultipliers, "4096x4096")
+	require.InDelta(t, gemini31FlashImage512Price/gemini31FlashImage1KPrice, cfg.Image.SizeMultipliers["512x512"], 1e-12)
+	require.InDelta(t, gemini31FlashImage2KPrice/gemini31FlashImage1KPrice, cfg.Image.SizeMultipliers["2048x2048"], 1e-12)
+	require.InDelta(t, gemini31FlashImage4KPrice/gemini31FlashImage1KPrice, cfg.Image.SizeMultipliers["4096x4096"], 1e-12)
+}
+
+func TestGemini31FlashLivePreviewPricing(t *testing.T) {
+	t.Parallel()
+
+	cfg, ok := ModelRatios["gemini-3.1-flash-live-preview"]
+	require.True(t, ok, "gemini-3.1-flash-live-preview missing from pricing map")
+	require.InDelta(t, 0.75*ratio.MilliTokensUsd, cfg.Ratio, 1e-12)
+	require.InDelta(t, 4.50/0.75, cfg.CompletionRatio, 1e-12)
+	require.NotNil(t, cfg.Audio, "expected live preview audio pricing metadata")
+	require.InDelta(t, 3.00/0.75, cfg.Audio.PromptRatio, 1e-12)
+	require.InDelta(t, 12.00/4.50, cfg.Audio.CompletionRatio, 1e-12)
 }
 
 func TestGetModelModalitiesGeminiVersionCutoff(t *testing.T) {
@@ -113,4 +166,35 @@ func TestGeminiVersionAtLeast(t *testing.T) {
 	for _, tc := range testCases {
 		require.Equal(t, tc.expected, GeminiVersionAtLeast(tc.model, tc.min), tc.model)
 	}
+}
+
+// TestGeminiMetadataOverrides verifies researched model limits and feature metadata for Gemini image and flash families.
+// Parameter t drives test execution. Returns no values.
+func TestGeminiMetadataOverrides(t *testing.T) {
+	t.Parallel()
+
+	flashCfg, ok := ModelRatios["gemini-3-flash-preview"]
+	require.True(t, ok)
+	require.EqualValues(t, 65536, flashCfg.MaxOutputTokens)
+
+	flashLiteCfg, ok := ModelRatios["gemini-3.1-flash-lite-preview"]
+	require.True(t, ok)
+	require.EqualValues(t, 65536, flashLiteCfg.MaxOutputTokens)
+
+	flashImageCfg, ok := ModelRatios["gemini-3.1-flash-image-preview"]
+	require.True(t, ok)
+	require.EqualValues(t, 131072, flashImageCfg.ContextLength)
+	require.EqualValues(t, 32768, flashImageCfg.MaxOutputTokens)
+	require.ElementsMatch(t, []string{"json_mode", "structured_outputs"}, flashImageCfg.SupportedFeatures)
+
+	proImageCfg, ok := ModelRatios["gemini-3-pro-image-preview"]
+	require.True(t, ok)
+	require.EqualValues(t, 65536, proImageCfg.ContextLength)
+	require.EqualValues(t, 32768, proImageCfg.MaxOutputTokens)
+
+	flash25ImageCfg, ok := ModelRatios["gemini-2.5-flash-image"]
+	require.True(t, ok)
+	require.EqualValues(t, 65536, flash25ImageCfg.ContextLength)
+	require.EqualValues(t, 32768, flash25ImageCfg.MaxOutputTokens)
+	require.ElementsMatch(t, []string{"json_mode", "structured_outputs"}, flash25ImageCfg.SupportedFeatures)
 }

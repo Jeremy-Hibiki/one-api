@@ -9,11 +9,11 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	quotautil "github.com/songquanpeng/one-api/relay/quota"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	quotautil "github.com/Laisky/one-api/relay/quota"
 )
 
 // ErrQuotaExceeded indicates the user's quota was exhausted during streaming.
@@ -28,8 +28,10 @@ type QuotaTrackerParams struct {
 	ModelName              string
 	PromptTokens           int
 	ModelRatio             float64
+	ChannelModelRatio      map[string]float64
 	GroupRatio             float64
 	PreConsumedQuota       int64
+	ChannelModelConfigs    map[string]model.ModelConfigLocal
 	ChannelCompletionRatio map[string]float64
 	PricingAdaptor         adaptor.Adaptor
 	FlushInterval          time.Duration
@@ -222,7 +224,9 @@ func (t *QuotaTracker) computeTargetQuotaLocked() int64 {
 		Usage:                  usage,
 		ModelName:              t.params.ModelName,
 		ModelRatio:             t.params.ModelRatio,
+		ChannelModelRatio:      t.params.ChannelModelRatio,
 		GroupRatio:             t.params.GroupRatio,
+		ChannelModelConfigs:    t.params.ChannelModelConfigs,
 		ChannelCompletionRatio: t.params.ChannelCompletionRatio,
 		PricingAdaptor:         t.params.PricingAdaptor,
 	})
@@ -234,7 +238,7 @@ func (t *QuotaTracker) ensureQuotaLocked(delta int64) error {
 	if delta <= 0 {
 		return nil
 	}
-	remaining, err := model.GetUserQuota(t.params.UserID)
+	remaining, err := model.CacheGetUserQuota(t.params.Ctx, t.params.UserID)
 	if err != nil {
 		return errors.Wrap(err, "get user quota during streaming flush")
 	}

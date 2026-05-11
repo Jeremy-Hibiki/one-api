@@ -18,17 +18,17 @@ import (
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/blacklist"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
-	"github.com/songquanpeng/one-api/common/utils"
-	"github.com/songquanpeng/one-api/dto"
-	"github.com/songquanpeng/one-api/middleware"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/blacklist"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/random"
+	"github.com/Laisky/one-api/common/utils"
+	"github.com/Laisky/one-api/dto"
+	"github.com/Laisky/one-api/middleware"
+	"github.com/Laisky/one-api/model"
 )
 
 type LoginRequest struct {
@@ -58,6 +58,7 @@ func jsonRawIsNull(raw json.RawMessage) bool {
 
 func Login(c *gin.Context) {
 	ctx := gmw.Ctx(c)
+
 	var loginRequest LoginRequest
 	err := json.NewDecoder(c.Request.Body).Decode(&loginRequest)
 	if err != nil {
@@ -76,14 +77,55 @@ func Login(c *gin.Context) {
 		})
 		return
 	}
+
+	// If this username has had a recent failed login and Turnstile is enabled, require verification.
+	turnstileRequired := config.TurnstileCheckEnabled && middleware.HasLoginFailure(username)
+	if turnstileRequired {
+		if err := middleware.VerifyTurnstileToken(c.Query("turnstile"), c.ClientIP()); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": err.Error(),
+				"data": gin.H{
+					"turnstile_required": true,
+				},
+			})
+			return
+		}
+	}
+
 	user := model.User{
 		Username: username,
 		Password: password,
 	}
 	err = user.ValidateAndFill()
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
+		// Record failed attempt so next login for this username requires Turnstile.
+		middleware.RecordLoginFailure(username)
+		resp := gin.H{
 			"message": err.Error(),
+			"success": false,
+		}
+		if config.TurnstileCheckEnabled {
+			resp["data"] = gin.H{
+				"turnstile_required": true,
+			}
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
+	// Enforce PasswordLoginEnabled: when the admin disables password login,
+	// only root users may still authenticate with username/password (so a
+	// site operator can recover access if the SSO/IdP is unreachable).
+	// All other roles must use a third-party method such as OIDC. The check
+	// runs after ValidateAndFill so we never reveal account existence to
+	// callers that supplied wrong credentials.
+	if !config.PasswordLoginEnabled && user.Role < model.RoleRootUser {
+		logger.Logger.Debug("password login rejected: feature disabled for non-root user",
+			zap.Int("user_id", user.Id),
+			zap.Int("role", user.Role))
+		c.JSON(http.StatusOK, gin.H{
+			"message": "The administrator has disabled password login. Please use a third-party authentication method (e.g. OIDC) to log in.",
 			"success": false,
 		})
 		return
@@ -99,7 +141,6 @@ func Login(c *gin.Context) {
 				"message": "totp_required",
 				"data": gin.H{
 					"totp_required": true,
-					"user_id":       user.Id,
 				},
 			})
 			return
@@ -124,6 +165,8 @@ func Login(c *gin.Context) {
 		}
 	}
 
+	// Successful login — clear any failed login records for this username.
+	middleware.ClearLoginFailure(username)
 	SetupLogin(&user, c)
 }
 
@@ -478,6 +521,36 @@ func GetUserDashboard(c *gin.Context) {
 		return
 	}
 
+	toolStats, err := model.SearchToolLogsByDayAndTool(targetUserId, int(startTs), int(endTsExclusive))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "Failed to get tool usage data: " + err.Error(),
+			"data":    nil,
+		})
+		return
+	}
+
+	toolUserStats, err := model.SearchToolLogsByDayAndUser(targetUserId, int(startTs), int(endTsExclusive))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "Failed to get tool user usage data: " + err.Error(),
+			"data":    nil,
+		})
+		return
+	}
+
+	toolTokenStats, err := model.SearchToolLogsByDayAndToken(targetUserId, int(startTs), int(endTsExclusive))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "Failed to get tool token usage data: " + err.Error(),
+			"data":    nil,
+		})
+		return
+	}
+
 	// Get quota and status information
 	var totalQuota, usedQuota int64
 	var status string
@@ -520,12 +593,15 @@ func GetUserDashboard(c *gin.Context) {
 
 	// Create response with both log data and quota/status info
 	response := gin.H{
-		"logs":        dashboards,
-		"user_logs":   userStats,
-		"token_logs":  tokenStats,
-		"total_quota": totalQuota,
-		"used_quota":  usedQuota,
-		"status":      status,
+		"logs":            dashboards,
+		"user_logs":       userStats,
+		"token_logs":      tokenStats,
+		"tool_logs":       toolStats,
+		"tool_user_logs":  toolUserStats,
+		"tool_token_logs": toolTokenStats,
+		"total_quota":     totalQuota,
+		"used_quota":      usedQuota,
+		"status":          status,
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -926,21 +1002,21 @@ func UpdateUser(c *gin.Context) {
 			}
 			updates["group"] = group
 		}
+	}
 
-		if rawFieldPresent(raw, "mcp_tool_blacklist") {
-			if jsonRawIsNull(raw["mcp_tool_blacklist"]) {
-				updates["mcp_tool_blacklist"] = nil
-			} else {
-				var blacklist []string
-				if err := json.Unmarshal(raw["mcp_tool_blacklist"], &blacklist); err != nil {
-					c.JSON(http.StatusOK, gin.H{
-						"success": false,
-						"message": invalidParameterMessage,
-					})
-					return
-				}
-				updates["mcp_tool_blacklist"] = blacklist
+	if rawFieldPresent(raw, "mcp_tool_blacklist") {
+		if jsonRawIsNull(raw["mcp_tool_blacklist"]) {
+			updates["mcp_tool_blacklist"] = nil
+		} else {
+			var blacklist model.JSONStringSlice
+			if err := json.Unmarshal(raw["mcp_tool_blacklist"], &blacklist); err != nil {
+				c.JSON(http.StatusOK, gin.H{
+					"success": false,
+					"message": invalidParameterMessage,
+				})
+				return
 			}
+			updates["mcp_tool_blacklist"] = blacklist
 		}
 	}
 
@@ -969,6 +1045,44 @@ func UpdateUser(c *gin.Context) {
 		}
 	}
 
+	var (
+		metadataUpdated bool
+		mergedMetadata  model.UserMetadata
+	)
+
+	if rawFieldPresent(raw, "metadata") {
+		if jsonRawIsNull(raw["metadata"]) {
+			// nil => no change
+		} else {
+			var metaPayload dto.UserMetadataPayload
+			if err := json.Unmarshal(raw["metadata"], &metaPayload); err != nil {
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": invalidParameterMessage})
+				return
+			}
+			merged := originUser.Metadata
+			if metaPayload.PasswordLocked != nil {
+				if myRole != model.RoleRootUser {
+					c.JSON(http.StatusOK, gin.H{"success": false, "message": "Only root admin can change password lock"})
+					return
+				}
+				merged.PasswordLocked = *metaPayload.PasswordLocked
+			}
+			encoded, encErr := json.Marshal(merged)
+			if encErr != nil {
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": errors.Wrap(encErr, "encode user metadata").Error()})
+				return
+			}
+			updates["metadata"] = string(encoded)
+			mergedMetadata = merged
+			metadataUpdated = true
+		}
+	}
+
+	effectivePasswordLocked := originUser.Metadata.PasswordLocked
+	if metadataUpdated {
+		effectivePasswordLocked = mergedMetadata.PasswordLocked
+	}
+
 	if rawFieldPresent(raw, "password") {
 		if jsonRawIsNull(raw["password"]) {
 			// nil => no change
@@ -984,6 +1098,10 @@ func UpdateUser(c *gin.Context) {
 			password = strings.TrimSpace(password)
 			if password == "" {
 				c.JSON(http.StatusOK, gin.H{"success": false, "message": "Password cannot be empty"})
+				return
+			}
+			if effectivePasswordLocked {
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "Password is locked for this user"})
 				return
 			}
 			if utf8.RuneCountInString(password) < 8 || utf8.RuneCountInString(password) > 20 {
@@ -1088,14 +1206,61 @@ func UpdateUser(c *gin.Context) {
 
 func UpdateSelf(c *gin.Context) {
 	var user model.User
-	err := json.NewDecoder(c.Request.Body).Decode(&user)
-	if err != nil {
+	if err := common.UnmarshalBodyReusable(c, &user); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": invalidParameterMessage,
 		})
 		return
 	}
+
+	// Inspect the raw payload so we can distinguish "field omitted" from
+	// "field provided but empty". This matters for fields like display_name
+	// that the user may legitimately want to clear.
+	requestBody, err := common.GetRequestBody(c)
+	if err != nil {
+		helper.RespondError(c, errors.Wrap(err, "get request body"))
+		return
+	}
+	rawFields := make(map[string]json.RawMessage)
+	if len(requestBody) > 0 {
+		if err := json.Unmarshal(requestBody, &rawFields); err != nil {
+			helper.RespondError(c, errors.Wrap(err, "unmarshal raw user self payload"))
+			return
+		}
+	}
+	displayNameProvided := rawFieldPresent(rawFields, "display_name")
+
+	// When frontend sends only a subset of fields (e.g. password-only update),
+	// fill in missing username/display_name from the current user record so that
+	// partial updates don't fail with "cannot be empty" errors.
+	userId := c.GetInt(ctxkey.Id)
+	currentUser, fetchErr := model.GetUserById(userId, false)
+	if fetchErr != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": fetchErr.Error(),
+		})
+		return
+	}
+	// Username is the user's login identity (unique, max=30) and is treated as
+	// required. Keep the silent-restore so partial payloads (e.g. password-only)
+	// continue to work and never accidentally blank out the login key.
+	if strings.TrimSpace(user.Username) == "" {
+		user.Username = currentUser.Username
+	}
+	// DisplayName is optional; only fall back to the existing value when the
+	// caller did NOT supply the field at all. An explicitly provided empty
+	// string must clear the value.
+	if !displayNameProvided {
+		user.DisplayName = currentUser.DisplayName
+	}
+
+	if user.Password != "" && currentUser.Metadata.PasswordLocked {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Password is locked by administrator"})
+		return
+	}
+
 	if user.Password == "" {
 		user.Password = "$I_LOVE_U" // make Validator happy :)
 	}
@@ -1107,18 +1272,8 @@ func UpdateSelf(c *gin.Context) {
 		return
 	}
 
-	// Disallow empty username/display name
-	if strings.TrimSpace(user.Username) == "" {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Username cannot be empty"})
-		return
-	}
-	if strings.TrimSpace(user.DisplayName) == "" {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Display name cannot be empty"})
-		return
-	}
-
 	cleanUser := model.User{
-		Id:          c.GetInt(ctxkey.Id),
+		Id:          userId,
 		Username:    user.Username,
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
@@ -1134,6 +1289,18 @@ func UpdateSelf(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+
+	// User.Update relies on GORM's Updates(struct), which skips zero-value
+	// strings. To honor an explicit empty display_name we need a targeted
+	// update that includes the column unconditionally. Avoid logging the
+	// value itself (potential PII), only the user id.
+	if displayNameProvided && strings.TrimSpace(user.DisplayName) == "" {
+		if err := model.DB.Model(&model.User{}).Where("id = ?", userId).Update("display_name", "").Error; err != nil {
+			helper.RespondError(c, errors.Wrapf(err, "clear display_name for user: id=%d", userId))
+			return
+		}
+		logger.Logger.Debug("user cleared display_name", zap.Int("user_id", userId))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1205,6 +1372,7 @@ func DeleteSelf(c *gin.Context) {
 
 func CreateUser(c *gin.Context) {
 	ctx := gmw.Ctx(c)
+	lg := gmw.GetLogger(c)
 	var user model.User
 	err := json.NewDecoder(c.Request.Body).Decode(&user)
 	if err != nil || user.Username == "" || user.Password == "" {
@@ -1246,6 +1414,7 @@ func CreateUser(c *gin.Context) {
 		Username:    user.Username,
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
+		Email:       user.Email,
 	}
 	if err := cleanUser.Insert(ctx, 0); err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -1253,6 +1422,21 @@ func CreateUser(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+
+	// Apply admin-specified quota and group after Insert, which resets them to defaults.
+	postUpdates := map[string]any{}
+	if user.Quota > 0 {
+		postUpdates["quota"] = user.Quota
+	}
+	if user.Group != "" {
+		postUpdates["group"] = user.Group
+	}
+	if len(postUpdates) > 0 {
+		if err := model.DB.Model(&model.User{}).Where("id = ?", cleanUser.Id).Updates(postUpdates).Error; err != nil {
+			lg.Error("failed to apply admin overrides on created user",
+				zap.Int("user_id", cleanUser.Id), zap.Error(err))
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1497,7 +1681,14 @@ func SetupTotp(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": errors.Wrapf(err, "get user %d", userID).Error(),
+		})
+		return
+	}
+	if user.Metadata.PasswordLocked {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "MFA enrollment is locked by administrator",
 		})
 		return
 	}
@@ -1600,7 +1791,14 @@ func ConfirmTotp(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
-			"message": err.Error(),
+			"message": errors.Wrapf(err, "get user %d", userId).Error(),
+		})
+		return
+	}
+	if user.Metadata.PasswordLocked {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "MFA enrollment is locked by administrator",
 		})
 		return
 	}

@@ -23,20 +23,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/telemetry"
-	"github.com/songquanpeng/one-api/controller"
-	"github.com/songquanpeng/one-api/middleware"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/monitor"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/mcp"
-	"github.com/songquanpeng/one-api/router"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/telemetry"
+	"github.com/Laisky/one-api/controller"
+	"github.com/Laisky/one-api/middleware"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/monitor"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/mcp"
+	"github.com/Laisky/one-api/router"
 )
 
 //go:embed web/build/*
@@ -214,7 +214,7 @@ func main() {
 
 	// Add Prometheus metrics endpoint if enabled
 	if config.EnablePrometheusMetrics {
-		server.GET("/metrics", middleware.AdminAuth(), gin.WrapH(promhttp.Handler()))
+		server.GET("/metrics", middleware.MetricsAuth(), gin.WrapH(promhttp.Handler()))
 		logger.Logger.Info("Prometheus metrics endpoint available at /metrics")
 	}
 
@@ -229,7 +229,7 @@ func main() {
 	// Start server in background
 	go func() {
 		logger.Logger.Info("server started", zap.String("address", "http://localhost:"+port))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Logger.Fatal("failed to start HTTP server", zap.Error(err))
 		}
 	}()
@@ -272,12 +272,18 @@ func main() {
 }
 
 func isThemeValid() error {
+	// Backward compatibility: redirect "default" to "modern"
+	if config.Theme == "default" {
+		logger.Logger.Warn("the 'default' theme has been removed, automatically switching to 'modern'")
+		config.Theme = "modern"
+	}
+
 	if !config.ValidThemes[config.Theme] {
 		return errors.Errorf("invalid theme: %s", config.Theme)
 	}
 
 	if config.Theme != "modern" {
-		logger.Logger.Warn("recommend using the default modern theme, as the other themes are no longer being actively maintained.")
+		logger.Logger.Warn("recommend using the modern theme, as the other themes are no longer being actively maintained.")
 	}
 
 	return nil

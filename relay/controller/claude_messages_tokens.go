@@ -9,11 +9,33 @@ import (
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/Laisky/zap"
 
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 const claudeFileImageFallbackTokens = 853
+
+// fastTokenEstimateThreshold is the body size above which we use a fast byte-based
+// token estimation instead of full token counting. 1MB is chosen because full
+// tokenization of bodies above this size takes hundreds of milliseconds.
+const fastTokenEstimateThreshold = 1 * 1024 * 1024 // 1MB
+
+// estimateClaudeMessagesPromptTokens picks between fast byte-based estimation
+// (for large bodies) and accurate tokenizer-based counting (for small bodies).
+// The fast path uses bodySize/4 as a rough approximation (1 token ≈ 4 bytes on average).
+// This is only used for pre-consumption quota; final billing always uses upstream's actual count.
+func estimateClaudeMessagesPromptTokens(ctx context.Context, request *ClaudeMessagesRequest, bodySize int) int {
+	if bodySize > fastTokenEstimateThreshold {
+		estimated := bodySize / 4
+		gmw.GetLogger(ctx).Debug("using fast byte-based token estimation for large body",
+			zap.Int("body_size", bodySize),
+			zap.Int("estimated_tokens", estimated),
+			zap.String("model", request.Model),
+		)
+		return estimated
+	}
+	return getClaudeMessagesPromptTokens(ctx, request)
+}
 
 // getClaudeMessagesPromptTokens estimates the number of prompt tokens for Claude Messages API.
 func getClaudeMessagesPromptTokens(ctx context.Context, request *ClaudeMessagesRequest) int {
@@ -112,10 +134,16 @@ func countClaudeFileImageTokensFromBlocks(blocks []any) int {
 }
 
 // countClaudeToolsTokens estimates tokens for Claude tools.
+// Tools with DeferLoading=true are skipped as they are not loaded into context.
 func countClaudeToolsTokens(ctx context.Context, tools []relaymodel.ClaudeTool, model string) int {
 	totalTokens := 0
 
 	for _, tool := range tools {
+		// Skip deferred tools - they are not loaded into context
+		if tool.DeferLoading != nil && *tool.DeferLoading {
+			continue
+		}
+
 		// Count tokens for tool name and description
 		totalTokens += openai.CountTokenText(tool.Name, model)
 		totalTokens += openai.CountTokenText(tool.Description, model)

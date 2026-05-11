@@ -17,11 +17,11 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/plugin/opentelemetry/tracing"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/random"
 	// glogger "gorm.io/gorm/logger"
 )
 
@@ -120,7 +120,12 @@ func openSQLite() (*gorm.DB, error) {
 
 	logger.Logger.Debug("using SQLite database", zap.String("path", sqlitePath), zap.Int("busy_timeout_ms", common.SQLiteBusyTimeout))
 
-	dsn := fmt.Sprintf("%s?_busy_timeout=%d", sqlitePath, common.SQLiteBusyTimeout)
+	// WAL lets readers run concurrently with a writer; synchronous=NORMAL
+	// pairs safely with WAL (a crash loses at most the last commit, never
+	// corrupts the DB). busy_timeout is the cap a connection waits when the
+	// writer slot is held — combined with the existing sqlite_retry helper
+	// this is the standard recipe for SQLite under multi-goroutine workloads.
+	dsn := fmt.Sprintf("%s?_busy_timeout=%d&_journal_mode=WAL&_synchronous=NORMAL", sqlitePath, common.SQLiteBusyTimeout)
 	return gorm.Open(sqlite.Open(dsn), &gorm.Config{
 		PrepareStmt: true, // precompile SQL
 	})
@@ -209,56 +214,48 @@ func InitDB() {
 
 	logger.Logger.Info("database migration started")
 
-	// STEP 0: Ensure GORM has created every table/column before bespoke migrations touch them.
-	// AutoMigrate adds any missing schema elements without attempting destructive changes, giving
-	// a stable baseline so subsequent migrations can safely assume column presence.
-	if err = migrateDB(); err != nil {
-		logger.Logger.Fatal("failed to ensure base database schema", zap.Error(err))
-		return
-	}
-	logger.Logger.Info("database base schema ensured")
-
-	// STEP 1: Schema normalization prior to the main AutoMigrate pass
-	// 1a) Normalize legacy ability suspend_until column types before AutoMigrate touches the table
-	if err = MigrateAbilitySuspendUntilColumn(); err != nil {
-		logger.Logger.Fatal("failed to migrate ability suspend_until column", zap.Error(err))
-		return
-	}
-
-	// 1b) Migrate ModelConfigs and ModelMapping columns from varchar(1024) to text
-	// This must run BEFORE AutoMigrate to ensure schema compatibility
-	if err = MigrateChannelFieldsToText(); err != nil {
-		logger.Logger.Fatal("failed to migrate channel field types", zap.Error(err))
-		return
-	}
-
-	// 1c) Ensure traces.url can store long URLs (Turnstile tokens, etc.)
-	if err = MigrateTraceURLColumnToText(); err != nil {
-		logger.Logger.Fatal("failed to migrate traces.url column", zap.Error(err))
-		return
-	}
-
-	// 1d) Ensure user_request_costs has a unique index on request_id and deduplicate old data quietly
-	if err = MigrateUserRequestCostEnsureUniqueRequestID(); err != nil {
-		logger.Logger.Fatal("failed to migrate user_request_costs unique index", zap.Error(err))
-		return
-	}
-
-	// STEP 2: Run GORM AutoMigrate on all models to pick up any structural changes introduced above
+	// STEP 1: AutoMigrate on all models to create/update tables and columns.
+	// GORM's AutoMigrate is contractually idempotent, but gorm.io/driver/sqlite's
+	// ColumnTypes() introspection (regex-based parseDDL over sqlite_master.sql) is
+	// known to mis-parse certain DDL states after ALTER TABLE ADD COLUMN. Calling
+	// AutoMigrate more than once per process can therefore fail with
+	// "duplicate column name" on SQLite. Keep this to a single invocation.
 	if err = migrateDB(); err != nil {
 		logger.Logger.Fatal("failed to migrate database", zap.Error(err))
 		return
 	}
 	logger.Logger.Info("database schema migrated")
 
-	// Run post-migration adjustments to ensure new installs have expected schema specifics.
-	if err = MigrateUserRequestCostEnsureUniqueRequestID(); err != nil {
-		logger.Logger.Fatal("failed to finalize user_request_costs unique index", zap.Error(err))
+	// STEP 2: Custom migrations that normalize or adjust EXISTING columns/data.
+	// None of these add new columns or tables — those live in the struct
+	// definitions and are handled by STEP 1's AutoMigrate. Each is idempotent
+	// and safe to run on every startup.
+
+	// 2a) Normalize legacy ability suspend_until column values / type.
+	if err = MigrateAbilitySuspendUntilColumn(); err != nil {
+		logger.Logger.Fatal("failed to migrate ability suspend_until column", zap.Error(err))
 		return
 	}
 
-	// STEP 3: Migrate existing ModelConfigs data from old format to new format
-	// This handles data format changes after schema is correct
+	// 2b) Convert ModelConfigs / ModelMapping columns from varchar(1024) to text on legacy MySQL/PG installs.
+	if err = MigrateChannelFieldsToText(); err != nil {
+		logger.Logger.Fatal("failed to migrate channel field types", zap.Error(err))
+		return
+	}
+
+	// 2c) Ensure traces.url can store long URLs (Turnstile tokens, etc.).
+	if err = MigrateTraceURLColumnToText(); err != nil {
+		logger.Logger.Fatal("failed to migrate traces.url column", zap.Error(err))
+		return
+	}
+
+	// 2d) Ensure user_request_costs has a unique index on request_id and deduplicate old data quietly.
+	if err = MigrateUserRequestCostEnsureUniqueRequestID(); err != nil {
+		logger.Logger.Fatal("failed to migrate user_request_costs unique index", zap.Error(err))
+		return
+	}
+
+	// STEP 3: Data-format migrations (schema is already correct at this point).
 	if err = MigrateCustomChannelsToOpenAICompatible(); err != nil {
 		logger.Logger.Fatal("failed to migrate custom channels", zap.Error(err))
 		return
@@ -279,7 +276,9 @@ func InitDB() {
 func migrateDB() error {
 	var err error
 	if err = DB.AutoMigrate(&Channel{}); err != nil {
-		return errors.Wrapf(err, "failed to migrate Channel")
+		if !shouldIgnoreDuplicateColumn(err, "hidden_models") {
+			return errors.Wrapf(err, "failed to migrate Channel")
+		}
 	}
 	if err = DB.AutoMigrate(&Token{}); err != nil {
 		return errors.Wrapf(err, "failed to migrate Token")
@@ -320,6 +319,9 @@ func migrateDB() error {
 	}
 	if err = DB.AutoMigrate(&MCPTool{}); err != nil {
 		return errors.Wrapf(err, "failed to migrate MCPTool")
+	}
+	if err = DB.AutoMigrate(&PasskeyCredential{}); err != nil {
+		return errors.Wrapf(err, "failed to migrate PasskeyCredential")
 	}
 	return nil
 }

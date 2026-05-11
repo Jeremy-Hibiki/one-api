@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { TimestampDisplay } from '@/components/ui/timestamp';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '@/lib/api';
-import { LOG_TYPES, getLogTypeLabel } from '@/lib/constants/logs';
+import { getLogTypeLabel } from '@/lib/constants/logs';
 import { useAuthStore } from '@/lib/stores/auth';
 import { cn, renderQuota } from '@/lib/utils';
 import type { LogEntry, LogMetadata } from '@/types/log';
@@ -18,6 +18,7 @@ import {
   CheckCircle,
   Clock,
   Copy,
+  ExternalLink,
   FileText,
   Flag,
   Globe,
@@ -29,8 +30,9 @@ import {
   User,
   Zap,
 } from 'lucide-react';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 interface LogDetailsModalProps {
   open: boolean;
@@ -60,9 +62,9 @@ const formatLatency = (ms?: number) => {
 
 const getLatencyColor = (ms?: number) => {
   if (!ms) return '';
-  if (ms < 1000) return 'text-green-600';
-  if (ms < 3000) return 'text-yellow-600';
-  return 'text-red-600';
+  if (ms < 1000) return 'text-success';
+  if (ms < 3000) return 'text-warning';
+  return 'text-destructive';
 };
 
 const DetailItem = ({ label, value }: { label: string; value: ReactNode }) => (
@@ -131,27 +133,27 @@ const formatDuration = (milliseconds?: number): string => {
 };
 
 const getStatusColor = (status: number): string => {
-  if (status >= 200 && status < 300) return 'bg-green-500 text-white';
-  if (status >= 300 && status < 400) return 'bg-yellow-500 text-white';
-  if (status >= 400 && status < 500) return 'bg-orange-500 text-white';
-  if (status >= 500) return 'bg-red-500 text-white';
-  return 'bg-gray-500 text-white';
+  if (status >= 200 && status < 300) return 'bg-success text-white';
+  if (status >= 300 && status < 400) return 'bg-warning text-white';
+  if (status >= 400 && status < 500) return 'bg-warning text-white';
+  if (status >= 500) return 'bg-destructive text-destructive-foreground';
+  return 'bg-muted text-muted-foreground';
 };
 
 const getMethodColor = (method: string): string => {
   switch (method.toUpperCase()) {
     case 'GET':
-      return 'bg-blue-500 text-white';
+      return 'bg-info text-white';
     case 'POST':
-      return 'bg-green-500 text-white';
+      return 'bg-success text-white';
     case 'PUT':
-      return 'bg-yellow-500 text-white';
+      return 'bg-warning text-white';
     case 'DELETE':
-      return 'bg-red-500 text-white';
+      return 'bg-destructive text-destructive-foreground';
     case 'PATCH':
-      return 'bg-purple-500 text-white';
+      return 'bg-accent text-accent-foreground';
     default:
-      return 'bg-gray-500 text-white';
+      return 'bg-muted text-muted-foreground';
   }
 };
 
@@ -159,15 +161,21 @@ const getMethodColor = (method: string): string => {
 export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProps) {
   const { t } = useTranslation();
   const { user } = useAuthStore();
+  const navigate = useNavigate();
+
+  const navigateTo = useCallback(
+    (path: string) => {
+      navigate(path);
+    },
+    [navigate]
+  );
   const metadataJSON = useMemo(() => (log?.metadata ? JSON.stringify(log.metadata, null, 2) : null), [log]);
   const cacheWriteSummary = useMemo(() => getCacheWriteSummaries(log?.metadata), [log]);
   const [traceData, setTraceData] = useState<TraceData | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
   const [traceError, setTraceError] = useState<string | null>(null);
   const [traceCopied, setTraceCopied] = useState(false);
-  const hasTrace = Boolean(
-    log && log.trace_id && log.trace_id.trim() !== '' && typeof log.id === 'number' && log.type === LOG_TYPES.CONSUME
-  );
+  const hasTrace = Boolean(log && log.trace_id && log.trace_id.trim() !== '' && typeof log.id === 'number');
 
   const timelineEvents = useMemo(
     () => [
@@ -175,42 +183,42 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
         key: 'request_received' as keyof TraceTimestamps,
         title: t('logs.details.events.request_received', 'Request Received'),
         icon: Play,
-        color: 'text-blue-500',
+        color: 'text-info',
         description: t('logs.details.events.request_received_desc', 'Initial request received by the gateway'),
       },
       {
         key: 'request_forwarded' as keyof TraceTimestamps,
         title: t('logs.details.events.request_forwarded', 'Forwarded to Upstream'),
         icon: ArrowRight,
-        color: 'text-teal-500',
+        color: 'text-info',
         description: t('logs.details.events.request_forwarded_desc', 'Request forwarded to upstream service'),
       },
       {
         key: 'first_upstream_response' as keyof TraceTimestamps,
         title: t('logs.details.events.first_upstream_response', 'First Upstream Response'),
         icon: Reply,
-        color: 'text-purple-500',
+        color: 'text-primary',
         description: t('logs.details.events.first_upstream_response_desc', 'First response received from upstream'),
       },
       {
         key: 'first_client_response' as keyof TraceTimestamps,
         title: t('logs.details.events.first_client_response', 'First Client Response'),
         icon: Send,
-        color: 'text-orange-500',
+        color: 'text-warning',
         description: t('logs.details.events.first_client_response_desc', 'First response sent to client'),
       },
       {
         key: 'upstream_completed' as keyof TraceTimestamps,
         title: t('logs.details.events.upstream_completed', 'Upstream Completed'),
         icon: CheckCircle,
-        color: 'text-green-500',
+        color: 'text-success',
         description: t('logs.details.events.upstream_completed_desc', 'Upstream response completed (streaming)'),
       },
       {
         key: 'request_completed' as keyof TraceTimestamps,
         title: t('logs.details.events.request_completed', 'Request Completed'),
         icon: Flag,
-        color: 'text-green-600',
+        color: 'text-success',
         description: t('logs.details.events.request_completed_desc', 'Request fully completed'),
       },
     ],
@@ -398,7 +406,7 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
           key: call.key || `mcp_call_${index}`,
           title: t('logs.details.events.mcp_call', 'MCP Call'),
           icon: Plug,
-          color: call.is_error ? 'text-red-500' : 'text-indigo-500',
+          color: call.is_error ? 'text-destructive' : 'text-info',
           description: descriptionParts.join(' • '),
           timestamp: call.started_at,
           duration,
@@ -474,12 +482,29 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
     <div className="flex items-center gap-2">
       <span className="font-mono text-xs bg-muted rounded px-2 py-1 break-all flex-1">{value || '—'}</span>
       {value && (
-        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => handleCopy(value)}>
+        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => handleCopy(value)} aria-label="Copy to clipboard">
           <Copy className="h-3.5 w-3.5" />
         </Button>
       )}
     </div>
   );
+
+  const renderModelLink = (value?: string) => {
+    if (!value) {
+      return '—';
+    }
+
+    return (
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 underline underline-offset-2 decoration-blue-600/40 dark:decoration-blue-400/40 hover:decoration-blue-600 dark:hover:decoration-blue-400 cursor-pointer text-left transition-colors"
+        onClick={() => navigateTo(`/models?model=${encodeURIComponent(value)}`)}
+      >
+        {value}
+        <ExternalLink className="h-3 w-3 flex-shrink-0" />
+      </button>
+    );
+  };
 
   const renderSummary = () => {
     if (!log) return null;
@@ -489,9 +514,7 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
     const promptTokens = log.prompt_tokens ?? 0;
     const cachedPromptTokens = log.cached_prompt_tokens ?? 0;
     const completionTokens = log.completion_tokens ?? 0;
-    const cachedCompletionTokens = log.cached_completion_tokens ?? 0;
     const totalTokens = promptTokens + completionTokens;
-    const totalCachedTokens = cachedPromptTokens + cachedCompletionTokens;
     const quotaDisplay = renderQuota(log.quota ?? 0);
     const rawQuota = Number.isFinite(log.quota) ? log.quota : 0;
     const latencyValue = formatLatency(log.elapsed_time);
@@ -506,15 +529,61 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
             label={t('logs.details.recorded_at', 'Recorded At')}
             value={<TimestampDisplay timestamp={log.created_at} className="font-mono text-sm" />}
           />
-          <DetailItem label={t('logs.details.model', 'Model')} value={log.model_name || '—'} />
-          <DetailItem label={t('logs.details.user', 'User')} value={username} />
-          <DetailItem label={t('logs.details.token', 'Token')} value={log.token_name || '—'} />
-          <DetailItem label={t('logs.details.channel', 'Channel')} value={<span className="font-mono text-sm">{channelDisplay}</span>} />
-          <DetailItem label={t('logs.details.quota', 'Quota')} value={<span className="font-mono text-sm">{quotaDisplay}</span>} />
+          <DetailItem label={t('logs.details.model', 'Model')} value={renderModelLink(log.model_name)} />
+          <DetailItem label={t('logs.details.origin_model', 'Requested Model')} value={renderModelLink(log.origin_model_name)} />
           <DetailItem
-            label={t('logs.details.quota_raw', 'Quota (raw units)')}
-            value={<span className="font-mono text-sm">{rawQuota}</span>}
+            label={t('logs.details.user', 'User')}
+            value={
+              log.user_id ? (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 underline underline-offset-2 decoration-blue-600/40 dark:decoration-blue-400/40 hover:decoration-blue-600 dark:hover:decoration-blue-400 cursor-pointer text-left transition-colors"
+                  onClick={() => navigateTo(`/users/edit/${log.user_id}`)}
+                >
+                  {username}
+                  <ExternalLink className="h-3 w-3 flex-shrink-0" />
+                </button>
+              ) : (
+                username
+              )
+            }
           />
+          <DetailItem
+            label={t('logs.details.token', 'Token')}
+            value={
+              log.token_name ? (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 underline underline-offset-2 decoration-blue-600/40 dark:decoration-blue-400/40 hover:decoration-blue-600 dark:hover:decoration-blue-400 cursor-pointer text-left transition-colors"
+                  onClick={() => navigateTo(`/tokens?keyword=${encodeURIComponent(log.token_name!)}`)}
+                >
+                  {log.token_name}
+                  <ExternalLink className="h-3 w-3 flex-shrink-0" />
+                </button>
+              ) : (
+                '—'
+              )
+            }
+          />
+          <DetailItem
+            label={t('logs.details.channel', 'Channel')}
+            value={
+              log.channel != null ? (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 font-mono text-sm text-blue-600 dark:text-blue-400 underline underline-offset-2 decoration-blue-600/40 dark:decoration-blue-400/40 hover:decoration-blue-600 dark:hover:decoration-blue-400 cursor-pointer text-left transition-colors"
+                  onClick={() => navigateTo(`/channels/edit/${log.channel}`)}
+                >
+                  {channelDisplay}
+                  <ExternalLink className="h-3 w-3 flex-shrink-0" />
+                </button>
+              ) : (
+                <span className="font-mono text-sm">—</span>
+              )
+            }
+          />
+          <DetailItem label={t('logs.details.quota', 'Expense')} value={<span className="font-mono text-sm">{quotaDisplay}</span>} />
+          <DetailItem label={t('logs.details.quota_raw', 'Quota')} value={<span className="font-mono text-sm">{rawQuota}</span>} />
           <DetailItem
             label={t('logs.details.latency', 'Latency')}
             value={<span className={cn('font-mono text-sm', latencyColor)}>{latencyValue}</span>}
@@ -535,10 +604,6 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
             value={<span className="font-mono text-sm">{completionTokens}</span>}
           />
           <DetailItem
-            label={t('logs.details.completion_tokens_cached', 'Completion Tokens (cached)')}
-            value={<span className="font-mono text-sm">{cachedCompletionTokens}</span>}
-          />
-          <DetailItem
             label={t('logs.details.cache_write_5m', 'Cache Write 5m Tokens')}
             value={<span className="font-mono text-sm">{cacheWriteSummary.fiveMinute}</span>}
           />
@@ -550,10 +615,6 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
             label={t('logs.details.total_tokens', 'Total Tokens')}
             value={<span className="font-mono text-sm">{totalTokens}</span>}
           />
-          <DetailItem
-            label={t('logs.details.total_cached_tokens', 'Total Cached Tokens')}
-            value={<span className="font-mono text-sm">{totalCachedTokens}</span>}
-          />
         </div>
       </div>
     );
@@ -561,7 +622,7 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[90vh]">
+      <DialogContent className="max-h-[92vh] w-[calc(100vw-1rem)] max-w-[calc(100vw-1rem)] p-4 sm:max-w-3xl sm:p-6">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FileText className="h-5 w-5" />
@@ -580,7 +641,7 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
           )}
         </DialogHeader>
 
-        <ScrollArea className="max-h-[calc(90vh-8rem)] pr-2">
+        <ScrollArea className="max-h-[calc(92vh-7.5rem)] pr-1 sm:pr-2">
           <div className="space-y-6">
             {!log && (
               <p className="text-sm text-muted-foreground">{t('logs.details.select_hint', 'Select a log entry to view full details.')}</p>
@@ -634,7 +695,7 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
                     {t('logs.details.content', 'Content')}
                   </h3>
                   <div className="rounded border bg-muted/40 p-3">
-                    <pre className="whitespace-pre-wrap text-sm leading-relaxed">
+                    <pre className="whitespace-pre-wrap break-words text-sm leading-relaxed">
                       {log.content || t('logs.details.no_content', 'No content recorded.')}
                     </pre>
                   </div>
@@ -646,7 +707,7 @@ export function LogDetailsModal({ open, onOpenChange, log }: LogDetailsModalProp
                       {t('logs.details.metadata', 'Metadata')}
                     </h3>
                     <div className="rounded border bg-muted/40 p-3">
-                      <pre className="whitespace-pre-wrap text-sm leading-relaxed">{metadataJSON}</pre>
+                      <pre className="whitespace-pre-wrap break-all text-sm leading-relaxed">{metadataJSON}</pre>
                     </div>
                   </section>
                 )}

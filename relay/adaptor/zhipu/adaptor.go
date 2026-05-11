@@ -10,13 +10,13 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 type Adaptor struct {
@@ -41,6 +41,11 @@ func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 		return fmt.Sprintf("%s/api/paas/v4/images/generations", meta.BaseURL), nil
 	case relaymode.Embeddings:
 		return fmt.Sprintf("%s/api/paas/v4/embeddings", meta.BaseURL), nil
+	case relaymode.OCR:
+		return fmt.Sprintf("%s/api/paas/v4/layout_parsing", meta.BaseURL), nil
+	}
+	if isOCRModel(meta.ActualModelName) {
+		return fmt.Sprintf("%s/api/paas/v4/layout_parsing", meta.BaseURL), nil
 	}
 	a.SetVersionByModeName(meta.ActualModelName)
 	if a.APIVersion == "v4" {
@@ -67,8 +72,15 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	switch relayMode {
 	case relaymode.Embeddings:
 		baiduEmbeddingRequest, err := ConvertEmbeddingRequest(*request)
-		return baiduEmbeddingRequest, err
+		if err != nil {
+			return nil, errors.Wrap(err, "convert zhipu embedding request")
+		}
+		return baiduEmbeddingRequest, nil
 	default:
+		if isOCRModel(request.Model) {
+			return ConvertOCRRequest(*request)
+		}
+
 		// TopP [0.0, 1.0]
 		request.TopP = helper.Float64PtrMax(request.TopP, 1)
 		request.TopP = helper.Float64PtrMin(request.TopP, 0)
@@ -262,6 +274,10 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Met
 		err, usage = openai.ImageHandler(c, resp)
 		return
 	}
+	if isOCRModel(meta.ActualModelName) {
+		err, usage = OCRHandler(c, resp, meta.ActualModelName)
+		return
+	}
 	if a.APIVersion == "v4" {
 		return a.DoResponseV4(c, resp, meta)
 	}
@@ -324,4 +340,27 @@ func (a *Adaptor) GetCompletionRatio(modelName string) float64 {
 // DefaultToolingConfig returns Zhipu tooling defaults (search tool tiers and rates).
 func (a *Adaptor) DefaultToolingConfig() adaptor.ChannelToolConfig {
 	return ZhipuToolingDefaults
+}
+
+// ConvertOCRRequest converts the user-facing OCR request to the Zhipu-native format.
+func (a *Adaptor) ConvertOCRRequest(_ *gin.Context, request *model.OCRRequest) (any, error) {
+	if request == nil {
+		return nil, errors.New("OCR request is nil")
+	}
+	return &OCRRequest{
+		Model:                   request.Model,
+		File:                    request.File,
+		RequestID:               request.RequestID,
+		UserID:                  request.UserID,
+		ReturnCropImages:        request.ReturnCropImages,
+		NeedLayoutVisualization: request.NeedLayoutVisualization,
+		StartPageID:             request.StartPageID,
+		EndPageID:               request.EndPageID,
+	}, nil
+}
+
+// DoOCRResponse handles the upstream OCR response and writes the result to the client.
+func (a *Adaptor) DoOCRResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (usage *model.Usage, err *model.ErrorWithStatusCode) {
+	err, usage = OCRHandler(c, resp, meta.ActualModelName)
+	return
 }

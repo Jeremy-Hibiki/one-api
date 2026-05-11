@@ -1,16 +1,17 @@
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { useNotifications } from '@/components/ui/notifications';
+import { ResponsivePageContainer } from '@/components/ui/responsive-container';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { SelectionListManager } from '@/components/ui/selection-list-manager';
 import { Textarea } from '@/components/ui/textarea';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { api } from '@/lib/api';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Info } from 'lucide-react';
+import { Info, RefreshCw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
@@ -51,6 +52,7 @@ export function EditMCPServerPage() {
   const isEdit = Boolean(serverId);
   const [loading, setLoading] = useState(isEdit);
   const [tools, setTools] = useState<MCPTool[]>([]);
+  const [syncing, setSyncing] = useState(false);
 
   const form = useForm<ServerForm>({
     resolver: zodResolver(serverSchema),
@@ -137,6 +139,41 @@ export function EditMCPServerPage() {
     }
   }, [serverId]);
 
+  const handleSync = async () => {
+    if (!serverId) return;
+    setSyncing(true);
+    try {
+      const response = await api.post(`/api/mcp_servers/${serverId}/sync`);
+      const { success, data, message } = response.data;
+      if (!success) {
+        notify({
+          type: 'error',
+          title: t('mcp.edit.notifications.sync_failed', 'Sync failed: {{message}}', {
+            message: message || '',
+          }),
+          message: message || '',
+        });
+        return;
+      }
+      const count = data?.tool_count ?? 0;
+      notify({
+        type: 'success',
+        title: t('mcp.edit.notifications.sync_success', 'Synced {{count}} tools from upstream', { count }),
+        message: '',
+      });
+      await loadTools();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notify({
+        type: 'error',
+        title: t('mcp.edit.notifications.sync_failed', 'Sync failed: {{message}}', { message }),
+        message,
+      });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const parseJSON = (value?: string) => {
     if (!value || value.trim() === '') return undefined;
     return JSON.parse(value);
@@ -215,12 +252,16 @@ export function EditMCPServerPage() {
 
   return (
     <TooltipProvider>
-      <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>{isEdit ? t('mcp.edit.title_edit', 'Edit MCP Server') : t('mcp.edit.title_add', 'Add MCP Server')}</CardTitle>
-          </CardHeader>
-          <CardContent>
+      <ResponsivePageContainer
+        title={isEdit ? t('mcp.edit.title_edit', 'Edit MCP Server') : t('mcp.edit.title_add', 'Add MCP Server')}
+        description={
+          isEdit
+            ? t('mcp.edit.description_edit', 'Update MCP server connection, sync, and tool exposure settings.')
+            : t('mcp.edit.description_add', 'Add a new MCP server and configure how its tools are exposed.')
+        }
+      >
+        <Card className="border-0 shadow-none md:border md:shadow-sm">
+          <CardContent className="p-4 sm:p-6">
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
                 <FormField
@@ -432,7 +473,7 @@ export function EditMCPServerPage() {
                         />
                       </FormControl>
                       <FormMessage />
-                      {toolPricingWarning() && <p className="text-xs text-yellow-600">{toolPricingWarning()}</p>}
+                      {toolPricingWarning() && <p className="text-xs text-warning">{toolPricingWarning()}</p>}
                     </FormItem>
                   )}
                 />
@@ -478,19 +519,25 @@ export function EditMCPServerPage() {
                   />
                 </div>
 
-                <div className="flex gap-2">
-                  <Button type="submit">
-                    {isEdit ? t('mcp.edit.actions.update', 'Update Server') : t('mcp.edit.actions.create', 'Create Server')}
-                  </Button>
-                  <Button type="button" variant="outline" onClick={() => navigate('/mcps')}>
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                  {isEdit && (
+                    <Button type="button" variant="outline" onClick={handleSync} disabled={syncing} className="w-full sm:w-auto">
+                      <RefreshCw className={`mr-2 h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
+                      {syncing ? t('mcp.edit.actions.sync_in_progress', 'Syncing...') : t('mcp.edit.actions.sync', 'Sync now')}
+                    </Button>
+                  )}
+                  <Button type="button" variant="outline" onClick={() => navigate('/mcps')} className="w-full sm:w-auto">
                     {t('mcp.edit.actions.cancel', 'Cancel')}
+                  </Button>
+                  <Button type="submit" className="w-full sm:w-auto">
+                    {isEdit ? t('mcp.edit.actions.update', 'Update Server') : t('mcp.edit.actions.create', 'Create Server')}
                   </Button>
                 </div>
               </form>
             </Form>
           </CardContent>
         </Card>
-      </div>
+      </ResponsivePageContainer>
     </TooltipProvider>
   );
 }

@@ -1,4 +1,9 @@
 {
+  "a11y": {
+    "close": "閉じる",
+    "close_drawer": "ドロワーを閉じる",
+    "select_language": "言語を選択"
+  },
   "about": {
     "cta_models": "対応モデルを見る",
     "cta_repo": "GitHub リポジトリ",
@@ -64,12 +69,16 @@
     "version": "バージョン",
     "welcome": "One APIへようこそ"
   },
+  "footer": {
+    "copyright": "© {{year}} One API. All rights reserved."
+  },
   "header": {
     "confirm_logout": "ログアウトの確認",
     "log_out": "ログアウト",
     "logging_out": "ログアウト中...",
     "logout_description": "ログアウトしてもよろしいですか？ダッシュボードにアクセスするには再度ログインする必要があります。",
     "navigation": "ナビゲーション",
+    "profile": "プロフィール",
     "signed_in_as": "ログイン中:"
   },
   "home": {
@@ -78,7 +87,16 @@
   "notFound": {
     "go_home": "今すぐホームへ",
     "message": "ページが見つかりません",
-    "redirecting": "{{seconds}} 秒後にホームへリダイレクトします..."
+    "redirecting": "{{seconds}} 秒後にホームへリダイレクトします...",
+    "stay_here": "このページに留まる"
+  },
+  "notice": {
+    "dismiss": "通知を閉じる"
+  },
+  "passkey_prompt": {
+    "dismiss": "閉じる",
+    "message": "アカウントのセキュリティを強化 — パスキーを設定して、パスワードなしで素早くログインできます。",
+    "setup_button": "パスキーを設定"
   },
   "status": {
     "badges": {
@@ -136,5 +154,11 @@
     },
     "subtitle": "すべてのチャネルの状態とパフォーマンスを監視",
     "title": "チャネル状態"
+  },
+  "theme": {
+    "dark": "ダーク",
+    "light": "ライト",
+    "system": "システム",
+    "toggle": "テーマを切り替え"
   }
 }

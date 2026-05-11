@@ -51,7 +51,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/songquanpeng/one-api/common/env"
+	"github.com/Laisky/one-api/common/env"
 )
 
 // =============================================================================
@@ -169,6 +169,30 @@ var (
 )
 
 // =============================================================================
+// WEBAUTHN / PASSKEY CONFIGURATION
+// =============================================================================
+// Settings for WebAuthn (Passkey) authentication.  The Relying Party (RP)
+// values must match the domain that serves the login page.
+
+var (
+	// WebAuthnRPID is the Relying Party Identifier, typically the domain
+	// name without port (e.g. "example.com").  When empty the RP ID is
+	// derived from ServerAddress at runtime.
+	//
+	// Environment variable: WEBAUTHN_RP_ID
+	// Default: "" (derived from ServerAddress)
+	WebAuthnRPID = strings.TrimSpace(env.String("WEBAUTHN_RP_ID", ""))
+
+	// WebAuthnRPOrigins lists the allowed origins for WebAuthn ceremonies,
+	// comma-separated (e.g. "https://example.com,https://www.example.com").
+	// When empty the origin is derived from ServerAddress at runtime.
+	//
+	// Environment variable: WEBAUTHN_RP_ORIGINS
+	// Default: "" (derived from ServerAddress)
+	WebAuthnRPOrigins = strings.TrimSpace(env.String("WEBAUTHN_RP_ORIGINS", ""))
+)
+
+// =============================================================================
 // DATABASE CONFIGURATION
 // =============================================================================
 // Settings for the primary database and optional logging database connections.
@@ -198,9 +222,11 @@ var (
 	// during concurrent access. Higher values reduce lock errors but increase latency.
 	//
 	// Environment variable: SQLITE_BUSY_TIMEOUT
-	// Default: 3000 (3 seconds)
+	// Default: 10000 (10 seconds) — long enough to absorb write bursts without
+	// surfacing transient lock errors; pairs with WAL journaling and the
+	// sqlite_retry helper for production-grade resilience.
 	// Unit: milliseconds
-	SQLiteBusyTimeout = env.Int("SQLITE_BUSY_TIMEOUT", 3000)
+	SQLiteBusyTimeout = env.Int("SQLITE_BUSY_TIMEOUT", 10000)
 
 	// SQLMaxIdleConns controls the primary database pool's idle connection count.
 	// Set based on expected concurrent connections and database server capacity.
@@ -410,9 +436,9 @@ var (
 	// the database. Set to 0 to disable automatic syncing.
 	//
 	// Environment variable: SYNC_FREQUENCY
-	// Default: 600 (10 minutes)
+	// Default: 120 (2 minutes)
 	// Unit: seconds
-	SyncFrequency = env.Int("SYNC_FREQUENCY", 10*60)
+	SyncFrequency = env.Int("SYNC_FREQUENCY", 2*60)
 )
 
 // =============================================================================
@@ -663,10 +689,10 @@ var (
 	// to prevent oversized payloads from overwhelming upstream providers.
 	//
 	// Environment variable: MAX_INLINE_IMAGE_SIZE_MB
-	// Default: 30 MB
+	// Default: 16 MB
 	// Unit: megabytes
 	MaxInlineImageSizeMB = func() int {
-		v := env.Int("MAX_INLINE_IMAGE_SIZE_MB", 30)
+		v := env.Int("MAX_INLINE_IMAGE_SIZE_MB", 16)
 		if v < 0 {
 			panic("MAX_INLINE_IMAGE_SIZE_MB must not be negative")
 		}
@@ -726,6 +752,13 @@ var (
 	// Environment variable: ENABLE_PROMETHEUS_METRICS
 	// Default: true
 	EnablePrometheusMetrics = env.Bool("ENABLE_PROMETHEUS_METRICS", true)
+
+	// MetricsToken is the Bearer token required to access the /metrics endpoint.
+	// When empty (default), the endpoint returns 403 until configured.
+	//
+	// Environment variable: METRICS_TOKEN
+	// Default: "" (metrics endpoint blocked)
+	MetricsToken = strings.TrimSpace(env.String("METRICS_TOKEN", ""))
 
 	// MetricQueueSize configures the buffered queue that aggregates success/failure
 	// events before processing. Larger queues handle burst traffic better.
@@ -950,16 +983,17 @@ var (
 	//
 	// Environment variable: THEME
 	// Default: "modern"
-	// Allowed values: "default", "berry", "air", "modern"
+	// Allowed values: "berry", "air", "modern"
+	// Note: "default" is no longer supported and will be automatically
+	// redirected to "modern" for backward compatibility.
 	Theme = env.String("THEME", "modern")
 
 	// ValidThemes enumerates the built-in frontend themes.
 	// Used for validation when changing themes.
 	ValidThemes = map[string]bool{
-		"default": true,
-		"berry":   true,
-		"air":     true,
-		"modern":  true,
+		"berry":  true,
+		"air":    true,
+		"modern": true,
 	}
 )
 

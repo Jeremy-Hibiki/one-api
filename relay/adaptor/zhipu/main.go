@@ -1,7 +1,6 @@
 package zhipu
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,14 +12,15 @@ import (
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt"
+	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/constant"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/constant"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // https://open.bigmodel.cn/doc/api#chatglm_std
@@ -148,60 +148,61 @@ func streamMetaResponseZhipu2OpenAI(zhipuResponse *StreamMetaResponse) (*openai.
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	var usage *model.Usage
 	lg := gmw.GetLogger(c)
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-		if i := strings.Index(string(data), "\n\n"); i >= 0 && strings.Contains(string(data), ":") {
-			return i + 2, data[0:i], nil
-		}
-		if atEOF {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
 	common.SetEventStreamHeaders(c)
 
-	for scanner.Scan() {
-		data := scanner.Text()
-		lines := strings.Split(data, "\n")
-		for i, line := range lines {
-			if len(line) < 5 {
+	var streamErr error
+	for {
+		line, err := lineReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			payloadBytes, err := io.ReadAll(line.Large)
+			if err != nil {
+				streamErr = err
+				break
+			}
+			response := streamResponseZhipu2OpenAI(string(payloadBytes))
+			if err := render.ObjectData(c, response); err != nil {
+				lg.Error("error marshalling oversized stream response", zap.Error(err))
+			}
+			continue
+		}
+
+		lineText := line.Text()
+		if len(lineText) < 5 {
+			continue
+		}
+		if strings.HasPrefix(lineText, "data:") {
+			response := streamResponseZhipu2OpenAI(lineText[5:])
+			if err := render.ObjectData(c, response); err != nil {
+				lg.Error("error marshalling stream response", zap.Error(err))
+			}
+		} else if strings.HasPrefix(lineText, "meta:") {
+			metaSegment := lineText[5:]
+			var zhipuResponse StreamMetaResponse
+			if err := json.Unmarshal([]byte(metaSegment), &zhipuResponse); err != nil {
+				lg.Error("error unmarshalling stream response", zap.Error(err))
 				continue
 			}
-			if strings.HasPrefix(line, "data:") {
-				dataSegment := line[5:]
-				if i != len(lines)-1 {
-					dataSegment += "\n"
-				}
-				response := streamResponseZhipu2OpenAI(dataSegment)
-				err := render.ObjectData(c, response)
-				if err != nil {
-					lg.Error("error marshalling stream response", zap.Error(err))
-				}
-			} else if strings.HasPrefix(line, "meta:") {
-				metaSegment := line[5:]
-				var zhipuResponse StreamMetaResponse
-				err := json.Unmarshal([]byte(metaSegment), &zhipuResponse)
-				if err != nil {
-					lg.Error("error unmarshalling stream response", zap.Error(err))
-					continue
-				}
-				response, zhipuUsage := streamMetaResponseZhipu2OpenAI(&zhipuResponse)
-				err = render.ObjectData(c, response)
-				if err != nil {
-					lg.Error("error marshalling stream response", zap.Error(err))
-				}
-				usage = zhipuUsage
+			response, zhipuUsage := streamMetaResponseZhipu2OpenAI(&zhipuResponse)
+			if err := render.ObjectData(c, response); err != nil {
+				lg.Error("error marshalling stream response", zap.Error(err))
 			}
+			usage = zhipuUsage
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		lg.Error("error reading stream", zap.Error(err), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		lg.Error("error reading stream", zap.Error(streamErr))
 	}
 
 	render.Done(c)
@@ -275,6 +276,94 @@ func EmbeddingsHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithSta
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, err = c.Writer.Write(jsonResponse)
 	return nil, &fullTextResponse.Usage
+}
+
+func isOCRModel(modelName string) bool {
+	return modelName == "glm-ocr"
+}
+
+// ConvertOCRRequest extracts the file URL from OpenAI-style messages
+// and converts it to a Zhipu OCR request.
+// Optional parameters (request_id, user_id, return_crop_images, need_layout_visualization,
+// start_page_id, end_page_id) are forwarded from ExtraBody if present.
+func ConvertOCRRequest(request model.GeneralOpenAIRequest) (*OCRRequest, error) {
+	// Look for an image URL in the messages
+	var fileURL string
+	for _, msg := range request.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		for _, content := range msg.ParseContent() {
+			if content.ImageURL != nil && content.ImageURL.Url != "" {
+				fileURL = content.ImageURL.Url
+				break
+			}
+		}
+		if fileURL != "" {
+			break
+		}
+	}
+	if fileURL == "" {
+		return nil, errors.New("glm-ocr requires an image_url in the message content")
+	}
+
+	ocrReq := &OCRRequest{
+		Model: request.Model,
+		File:  fileURL,
+	}
+
+	// Forward optional parameters from ExtraBody
+	if request.User != "" {
+		ocrReq.UserID = request.User
+	}
+	if eb := request.ExtraBody; eb != nil {
+		if v, ok := eb["request_id"].(string); ok {
+			ocrReq.RequestID = v
+		}
+		if v, ok := eb["return_crop_images"].(bool); ok {
+			ocrReq.ReturnCropImages = &v
+		}
+		if v, ok := eb["need_layout_visualization"].(bool); ok {
+			ocrReq.NeedLayoutVisualization = &v
+		}
+		if v, ok := eb["start_page_id"].(float64); ok {
+			intV := int(v)
+			ocrReq.StartPageID = &intV
+		}
+		if v, ok := eb["end_page_id"].(float64); ok {
+			intV := int(v)
+			ocrReq.EndPageID = &intV
+		}
+	}
+
+	return ocrReq, nil
+}
+
+// OCRHandler passes through the native Zhipu layout_parsing response,
+// extracting usage for billing purposes.
+func OCRHandler(c *gin.Context, resp *http.Response, _ string) (*model.ErrorWithStatusCode, *model.Usage) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return openai.ErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError), nil
+	}
+	err = resp.Body.Close()
+	if err != nil {
+		return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
+	}
+
+	// Decode only to extract usage for billing; the full body is forwarded as-is.
+	var ocrResponse OCRResponse
+	if err = json.Unmarshal(responseBody, &ocrResponse); err != nil {
+		return openai.ErrorWrapper(err, "unmarshal_response_body_failed", http.StatusInternalServerError), nil
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(resp.StatusCode)
+	_, err = c.Writer.Write(responseBody)
+	if err != nil {
+		return openai.ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError), nil
+	}
+	return nil, &ocrResponse.Usage
 }
 
 func embeddingResponseZhipu2OpenAI(response *EmbeddingResponse) *openai.EmbeddingResponse {

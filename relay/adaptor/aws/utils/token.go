@@ -7,20 +7,17 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Laisky/errors/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/relay/model"
-)
-
-const (
-	// HTTP timeout for image downloads
-	imageDownloadTimeout = 30 * time.Second
+	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/image"
+	netutil "github.com/Laisky/one-api/common/network"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // DownloadImageFromURL downloads an image from a URL and returns the image data and format
@@ -79,6 +76,10 @@ func handleDataURI(dataURI string) ([]byte, types.ImageFormat, error) {
 		return nil, "", errors.Wrap(err, "failed to detect image format from data URI")
 	}
 
+	if err := image.ValidateInlineImageBase64Size(encodedData); err != nil {
+		return nil, "", errors.Wrap(err, "inline image exceeds size limit")
+	}
+
 	// Decode base64 data
 	imageData, err := base64.StdEncoding.DecodeString(encodedData)
 	if err != nil {
@@ -91,7 +92,7 @@ func handleDataURI(dataURI string) ([]byte, types.ImageFormat, error) {
 	}
 
 	// Check size limit using configurable MaxInlineImageSizeMB
-	maxSizeBytes := int64(config.MaxInlineImageSizeMB) * 1024 * 1024
+	maxSizeBytes := image.MaxInlineImageBytes()
 	if int64(len(imageData)) > maxSizeBytes {
 		return nil, "", errors.Errorf("decoded image data too large: %d bytes (max: %dMB)", len(imageData), config.MaxInlineImageSizeMB)
 	}
@@ -109,9 +110,9 @@ func handleDataURI(dataURI string) ([]byte, types.ImageFormat, error) {
 
 // downloadImageFromHTTPURL downloads an image from an HTTP/HTTPS URL (original logic)
 func downloadImageFromHTTPURL(ctx context.Context, imageURL string) ([]byte, types.ImageFormat, error) {
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: imageDownloadTimeout,
+	// Reject private or local addresses to prevent SSRF.
+	if _, err := netutil.ValidateExternalURL(ctx, imageURL); err != nil {
+		return nil, "", errors.Wrap(err, "image URL is not allowed")
 	}
 
 	// Create request with context
@@ -124,7 +125,7 @@ func downloadImageFromHTTPURL(ctx context.Context, imageURL string) ([]byte, typ
 	req.Header.Set("User-Agent", "OneAPI-AWS-Image-Downloader/1.0")
 
 	// Make the request
-	resp, err := client.Do(req)
+	resp, err := client.UserContentRequestHTTPClient.Do(req)
 	if err != nil {
 		return nil, "", errors.Wrap(err, "failed to download image")
 	}
@@ -139,14 +140,17 @@ func downloadImageFromHTTPURL(ctx context.Context, imageURL string) ([]byte, typ
 	contentType := resp.Header.Get("Content-Type")
 	format, err := detectImageFormat(contentType, imageURL)
 	if err != nil {
-		return nil, "", err
+		return nil, "", errors.Wrap(err, "detect image format")
 	}
 
 	// Read image data with size limit using configurable MaxInlineImageSizeMB
-	maxSizeBytes := int64(config.MaxInlineImageSizeMB) * 1024 * 1024
-	imageData, err := io.ReadAll(io.LimitReader(resp.Body, maxSizeBytes))
+	maxSizeBytes := image.MaxInlineImageBytes()
+	imageData, err := io.ReadAll(io.LimitReader(resp.Body, maxSizeBytes+1))
 	if err != nil {
 		return nil, "", errors.Wrap(err, "failed to read image data")
+	}
+	if int64(len(imageData)) > maxSizeBytes {
+		return nil, "", errors.Errorf("downloaded image data too large: %d bytes (max: %dMB)", len(imageData), config.MaxInlineImageSizeMB)
 	}
 
 	// Verify we have actual image data
@@ -264,7 +268,7 @@ func CountTokensWithBedrock(ctx context.Context, client *bedrockruntime.Client,
 	// Convert messages to ConverseTokensRequest format for token counting
 	converseTokensRequest, err := convertMessagesToConverseTokensRequest(ctx, messages)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "convert messages to converse tokens request")
 	}
 
 	// Create CountTokensInput using Converse format
@@ -404,13 +408,13 @@ func CountTokenMessages(ctx context.Context, client *bedrockruntime.Client,
 	// Get AWS model ID
 	awsModelID, err := getAWSModelID(actualModel)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrapf(err, "get AWS model ID for %q", actualModel)
 	}
 
 	// Use AWS CountTokens API
 	tokenCount, err := CountTokensWithBedrock(ctx, client, messages, awsModelID)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "count tokens with bedrock")
 	}
 
 	return tokenCount, nil
@@ -520,8 +524,7 @@ func GetAccurateTokenCount(ctx context.Context, client *bedrockruntime.Client,
 	// Use AWS native CountTokens API for accurate billing
 	tokenCount, err := CountTokenMessages(ctx, client, messages, modelName)
 	if err != nil {
-		// Return the error instead of falling back to estimation
-		return 0, err
+		return 0, errors.Wrapf(err, "count token messages for model %q", modelName)
 	}
 
 	return tokenCount, nil

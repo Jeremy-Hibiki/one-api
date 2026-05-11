@@ -10,18 +10,18 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	"github.com/songquanpeng/one-api/relay/mcp"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/tooling"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/billing"
+	"github.com/Laisky/one-api/relay/mcp"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/tooling"
 )
 
 const (
@@ -57,7 +57,7 @@ func hasMCPBuiltinsInResponseRequest(c *gin.Context, meta *metalib.Meta, channel
 	chatRequest := &relaymodel.GeneralOpenAIRequest{Model: request.Model, Tools: responseToolsForMCP(request)}
 	registry, _, err := expandMCPBuiltinsInChatRequest(c, meta, channelRecord, provider, chatRequest)
 	if err != nil {
-		return false, err
+		return false, errors.Wrap(err, "expand mcp builtins in response request")
 	}
 	return registry != nil, nil
 }
@@ -88,7 +88,7 @@ type mcpToolCatalog struct {
 func loadMCPToolCatalog() (*mcpToolCatalog, error) {
 	servers, err := model.ListEnabledMCPServers()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "list enabled mcp servers")
 	}
 	catalog := &mcpToolCatalog{
 		servers:       servers,
@@ -102,7 +102,7 @@ func loadMCPToolCatalog() (*mcpToolCatalog, error) {
 		catalog.serverByLabel[strings.ToLower(server.Name)] = server
 		tools, err := model.GetMCPToolsByServerID(server.Id)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrapf(err, "get mcp tools for server %d", server.Id)
 		}
 		catalog.toolsByServer[server.Id] = tools
 	}
@@ -116,7 +116,7 @@ func loadChannelMCPBlacklist(channelRecord *model.Channel) ([]string, error) {
 	}
 	cfg, err := channelRecord.LoadConfig()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "load channel config for mcp blacklist")
 	}
 	return cfg.MCPToolBlacklist, nil
 }
@@ -129,15 +129,15 @@ func expandMCPBuiltinsInChatRequest(c *gin.Context, meta *metalib.Meta, channelR
 	lg := gmw.GetLogger(c)
 	user, err := getRelayUserFromContext(c)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "get relay user from context")
 	}
 	channelBlacklist, err := loadChannelMCPBlacklist(channelRecord)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "load channel mcp blacklist")
 	}
 	catalog, err := loadMCPToolCatalog()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "load mcp tool catalog")
 	}
 
 	registry := &mcpToolRegistry{
@@ -162,7 +162,7 @@ func expandMCPBuiltinsInChatRequest(c *gin.Context, meta *metalib.Meta, channelR
 		default:
 			requested, functionTool, matched, err := expandAliasedMCPTool(catalog, channelBlacklist, user.MCPToolBlacklist, tool.Type)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, errors.Wrapf(err, "expand aliased mcp tool %q", tool.Type)
 			}
 			if matched {
 				name := strings.ToLower(requested.Name)
@@ -228,7 +228,7 @@ func expandExplicitMCPTool(catalog *mcpToolCatalog, channelBlacklist []string, u
 	if len(allowed) == 0 {
 		resolvedTools, err := mcp.ResolveTools(server, catalog.toolsByServer[server.Id], channelBlacklist, userBlacklist, nil)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, errors.Wrapf(err, "resolve MCP tools for server %s", tool.ServerLabel)
 		}
 		resolved := make([]mcpResolvedRequest, 0, len(resolvedTools))
 		functionTools := make([]relaymodel.Tool, 0, len(resolvedTools))
@@ -238,14 +238,14 @@ func expandExplicitMCPTool(catalog *mcpToolCatalog, channelBlacklist []string, u
 			}
 			candidates, err := mcp.BuildToolCandidates([]*model.MCPServer{server}, catalog.toolsByServer, channelBlacklist, userBlacklist, []string{entry.Tool.Name}, entry.Tool.Name, "")
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, errors.Wrapf(err, "build MCP tool candidates for %s", entry.Tool.Name)
 			}
 			if len(candidates) == 0 {
 				continue
 			}
 			functionTool, err := buildFunctionToolFromMCP(candidates[0])
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, errors.Wrapf(err, "build function tool from MCP candidate %s", entry.Tool.Name)
 			}
 			resolved = append(resolved, mcpResolvedRequest{Name: entry.Tool.Name, Candidates: candidates, Headers: tool.Headers})
 			functionTools = append(functionTools, functionTool)
@@ -262,14 +262,14 @@ func expandExplicitMCPTool(catalog *mcpToolCatalog, channelBlacklist []string, u
 	for _, name := range allowed {
 		candidates, err := mcp.BuildToolCandidates([]*model.MCPServer{server}, catalog.toolsByServer, channelBlacklist, userBlacklist, []string{name}, name, "")
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, errors.Wrapf(err, "build MCP tool candidates for %s", name)
 		}
 		if len(candidates) == 0 {
 			return nil, nil, errors.Errorf("no eligible MCP tool found for %s", name)
 		}
 		functionTool, err := buildFunctionToolFromMCP(candidates[0])
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, errors.Wrapf(err, "build function tool from MCP candidate %s", name)
 		}
 		resolved = append(resolved, mcpResolvedRequest{Name: name, Candidates: candidates, Headers: tool.Headers})
 		functionTools = append(functionTools, functionTool)
@@ -300,14 +300,14 @@ func expandAliasedMCPTool(catalog *mcpToolCatalog, channelBlacklist []string, us
 
 	candidates, err := mcp.BuildToolCandidates(servers, catalog.toolsByServer, channelBlacklist, userBlacklist, []string{name}, name, "")
 	if err != nil {
-		return mcpResolvedRequest{}, relaymodel.Tool{}, false, err
+		return mcpResolvedRequest{}, relaymodel.Tool{}, false, errors.Wrapf(err, "build MCP tool candidates for alias %s", name)
 	}
 	if len(candidates) == 0 {
 		return mcpResolvedRequest{}, relaymodel.Tool{}, false, nil
 	}
 	functionTool, err := buildFunctionToolFromMCP(candidates[0])
 	if err != nil {
-		return mcpResolvedRequest{}, relaymodel.Tool{}, false, err
+		return mcpResolvedRequest{}, relaymodel.Tool{}, false, errors.Wrapf(err, "build function tool from MCP alias %s", name)
 	}
 	return mcpResolvedRequest{Name: name, Candidates: candidates}, functionTool, true, nil
 }
@@ -358,7 +358,8 @@ func executeChatMCPToolLoop(c *gin.Context, meta *metalib.Meta, request *relaymo
 	}
 
 	channelModelRatio, channelCompletionRatio := getChannelRatios(c)
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	channelModelConfigs := getChannelModelConfigs(c)
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	modelRatio := pricing.GetModelRatioWithThreeLayers(request.Model, channelModelRatio, pricingAdaptor)
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
 	ratio := modelRatio * groupRatio
@@ -389,7 +390,7 @@ func executeChatMCPToolLoop(c *gin.Context, meta *metalib.Meta, request *relaymo
 			return nil, accumulated, summary, incrementalCharged, respErr
 		}
 		accumulated = mergeUsage(accumulated, usage)
-		updateMCPRequestCostEstimate(c, meta, accumulated, request.Model, modelRatio, groupRatio, channelCompletionRatio, pricingAdaptor)
+		updateMCPRequestCostEstimate(c, meta, accumulated, request.Model, modelRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, pricingAdaptor)
 
 		choice, ok := firstChoice(response)
 		if !ok || len(choice.Message.ToolCalls) == 0 {
@@ -440,7 +441,7 @@ func executeChatMCPToolLoop(c *gin.Context, meta *metalib.Meta, request *relaymo
 			return nil, accumulated, summary, incrementalCharged, openai.ErrorWrapper(execErr, "mcp_tool_call_failed", 500)
 		}
 		accumulated = applyMCPToolCostDelta(accumulated, previousCost, summary)
-		updateMCPRequestCostEstimate(c, meta, accumulated, request.Model, modelRatio, groupRatio, channelCompletionRatio, pricingAdaptor)
+		updateMCPRequestCostEstimate(c, meta, accumulated, request.Model, modelRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, pricingAdaptor)
 		if len(results) == 0 {
 			return response, accumulated, summary, incrementalCharged, nil
 		}
@@ -581,11 +582,11 @@ func executeMCPToolCalls(c *gin.Context, registry *mcpToolRegistry, calls []rela
 		startIndex := registry.selectedCandidateIndex(nameKey)
 		selected, result, err := callMCPToolWithFallback(c, registry, nameKey, args, candidates, startIndex, []string{callID})
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrapf(err, "call mcp tool %q with fallback", name)
 		}
 		msg, err := buildToolResultMessage(call.Id, result)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "build tool result message")
 		}
 		results = append(results, msg)
 		recordMCPToolUsage(summary, selected, name)

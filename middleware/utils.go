@@ -9,16 +9,16 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // AbortWithError aborts the request with an error message
 func AbortWithError(c *gin.Context, statusCode int, err error) {
 	logger := gmw.GetLogger(c)
-	if ignoreServerError(err) {
+	if shouldLogAsWarning(statusCode, err) {
 		logger.Warn("server abort",
 			zap.Int("status_code", statusCode),
 			zap.Error(err))
@@ -74,7 +74,7 @@ func AbortWithTokenError(c *gin.Context, statusCode int, err error, tokenInfo *T
 		}
 	}
 
-	if ignoreServerError(err) {
+	if shouldLogAsWarning(statusCode, err) {
 		logger.Warn("server abort", logFields...)
 	} else {
 		logger.Error("server abort", logFields...)
@@ -89,7 +89,24 @@ func AbortWithTokenError(c *gin.Context, statusCode int, err error, tokenInfo *T
 	c.Abort()
 }
 
-func ignoreServerError(err error) bool {
+// shouldLogAsWarning determines whether an abort should be logged as WARN.
+//
+// Parameters:
+//   - statusCode: HTTP status code returned to client.
+//   - err: the error that triggers abort.
+//
+// Returns:
+//   - true if this is a client-caused or intentionally ignored case.
+//   - false if this is a server-side failure that should be logged as ERROR.
+func shouldLogAsWarning(statusCode int, err error) bool {
+	if statusCode >= 400 && statusCode < 500 {
+		return true
+	}
+
+	if err == nil {
+		return false
+	}
+
 	switch {
 	case strings.Contains(err.Error(), "token not found for key:"):
 		return true
@@ -146,11 +163,31 @@ func isModelInList(modelName string, models string) bool {
 // GetTokenKeyParts extracts the token key parts from the Authorization header
 //
 // key like `sk-{token}[-{channelid}]`
+//
+// For WebSocket upgrade requests from browsers (which cannot set custom headers),
+// the API key may be passed via the Sec-WebSocket-Protocol header using the
+// subprotocol format: "openai-insecure-api-key.{KEY}"
 func GetTokenKeyParts(c *gin.Context) []string {
 	key := c.Request.Header.Get("Authorization")
 	if key == "" {
 		// compatible with Anthropic
 		key = c.Request.Header.Get("X-Api-Key")
+	}
+
+	// For WebSocket upgrade requests, also check subprotocol-based auth.
+	// Browsers cannot set custom headers on WebSocket connections, so the
+	// OpenAI Realtime API allows passing the key as a subprotocol:
+	//   Sec-WebSocket-Protocol: realtime, openai-insecure-api-key.{KEY}, openai-beta.realtime-v1
+	if key == "" {
+		if sp := c.Request.Header.Get("Sec-WebSocket-Protocol"); sp != "" {
+			for _, proto := range strings.Split(sp, ",") {
+				proto = strings.TrimSpace(proto)
+				if strings.HasPrefix(proto, "openai-insecure-api-key.") {
+					key = strings.TrimPrefix(proto, "openai-insecure-api-key.")
+					break
+				}
+			}
+		}
 	}
 
 	key = strings.TrimPrefix(key, "Bearer ")

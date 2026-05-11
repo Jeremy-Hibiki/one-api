@@ -13,19 +13,20 @@ import (
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/middleware"
-	dbmodel "github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/monitor"
-	rcontroller "github.com/songquanpeng/one-api/relay/controller"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/middleware"
+	dbmodel "github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/monitor"
+	rcontroller "github.com/Laisky/one-api/relay/controller"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 // https://platform.openai.com/docs/api-reference/chat
@@ -56,6 +57,8 @@ func relayHelper(c *gin.Context, relayMode int) *model.ErrorWithStatusCode {
 		err = rcontroller.RelayRerankHelper(c)
 	case relaymode.Videos:
 		err = rcontroller.RelayVideoHelper(c)
+	case relaymode.OCR:
+		err = rcontroller.RelayOCRHelper(c)
 	default:
 		err = rcontroller.RelayTextHelper(c)
 	}
@@ -90,6 +93,7 @@ func Relay(c *gin.Context) {
 
 	// Get metadata for monitoring
 	relayMeta := meta.GetByContext(c)
+	requestId := c.GetString(helper.RequestIdKey)
 
 	// Track channel request in flight
 	PrometheusMonitor.RecordChannelRequest(relayMeta, startTime)
@@ -115,6 +119,7 @@ func Relay(c *gin.Context) {
 	// Ensure channel error processing is completed during graceful drain
 	graceful.GoCritical(ctx, "processChannelRelayError", func(ctx context.Context) {
 		processChannelRelayError(ctx, processChannelRelayErrorParams{
+			RequestID:     requestId,
 			UserId:        userId,
 			TokenId:       tokenId,
 			ChannelId:     channelId,
@@ -130,16 +135,51 @@ func Relay(c *gin.Context) {
 	// Record failed relay request metrics
 	PrometheusMonitor.RecordRelayRequest(c, relayMeta, startTime, false, 0, 0, 0)
 
-	requestId := c.GetString(helper.RequestIdKey)
 	retryTimes := config.RetryTimes
+	retryableClientError, retryableClientReason := classifyRetryableUpstreamClientError(bizErr)
 	if err := shouldRetry(c, bizErr.StatusCode, bizErr.RawError); err != nil {
-		// Downgrade to WARN if the failure is caused by caller's context cancellation/deadline exceeded
-		if isClientContextCancel(bizErr.StatusCode, bizErr.RawError) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			lg.Warn("relay aborted by client (context canceled/deadline), won't retry", zap.Int("status_code", bizErr.StatusCode), zap.Error(err))
+		if retryableClientError {
+			lg.Debug("retryable upstream client error detected; keeping retry logic enabled",
+				zap.Int("status_code", bizErr.StatusCode),
+				zap.String("error_type", string(bizErr.Type)),
+				zap.String("error_code", strings.TrimSpace(fmt.Sprint(bizErr.Code))),
+				zap.String("retry_reason", retryableClientReason),
+			)
 		} else {
-			lg.Error("relay error happen, won't retry", zap.Int("status_code", bizErr.StatusCode), zap.Error(err))
+			errorMessagePreview := strings.TrimSpace(bizErr.Message)
+			if len(errorMessagePreview) > 240 {
+				errorMessagePreview = errorMessagePreview[:240] + "..."
+			}
+			relayLogParams := processChannelRelayErrorParams{
+				RequestID:     requestId,
+				RequestURL:    requestURL,
+				UserId:        userId,
+				TokenId:       tokenId,
+				ChannelId:     channelId,
+				ChannelName:   channelName,
+				Group:         group,
+				OriginalModel: originalModel,
+				ActualModel:   actualModel,
+				Err:           *bizErr,
+			}
+			isUserSideRetrySkip := isClientContextCancel(bizErr.StatusCode, bizErr.RawError) ||
+				errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+				isUserOriginatedRelayError(bizErr)
+			lg.Debug("non-retry relay decision details",
+				zap.Int("status_code", bizErr.StatusCode),
+				zap.String("error_type", string(bizErr.Type)),
+				zap.String("error_code", strings.TrimSpace(fmt.Sprint(bizErr.Code))),
+				zap.String("error_message_preview", errorMessagePreview),
+			)
+			lg.Warn("relay retry skipped after failure",
+				appendRelayFailureFields(relayLogParams,
+					zap.Error(err),
+					zap.Bool("user_originated", isUserSideRetrySkip),
+					zap.String("retry_skip_reason", err.Error()),
+				)...,
+			)
+			retryTimes = 0
 		}
-		retryTimes = 0
 	}
 
 	// For 429 errors, increase retry attempts to exhaust all available channels
@@ -245,11 +285,35 @@ func Relay(c *gin.Context) {
 		}
 
 		if err != nil {
-			lg.Error("CacheGetRandomSatisfiedChannelExcluding failed",
-				zap.Error(err),
+			relayLogParams := processChannelRelayErrorParams{
+				RequestID:     requestId,
+				RequestURL:    requestURL,
+				UserId:        userId,
+				TokenId:       tokenId,
+				ChannelId:     channelId,
+				ChannelName:   channelName,
+				Group:         group,
+				OriginalModel: originalModel,
+				ActualModel:   actualModel,
+				Err:           *bizErr,
+			}
+			selectionFields := appendRelayFailureFields(relayLogParams,
 				zap.Ints("excluded_channels", getChannelIds(failedChannels)),
-				zap.String("model", originalModel),
-				zap.String("group", group))
+				zap.Int("retry_attempt", retryTimes-i+1),
+				zap.Int("remaining_attempts", i-1),
+				zap.Bool("try_lower_priority_first", shouldTryLowerPriorityFirst),
+				zap.Bool("try_larger_max_tokens_first", shouldTryLargerMaxTokensFirst),
+				zap.Bool("server_transient", isServerTransient),
+			)
+			if isExpectedChannelSelectionExhaustedError(err) {
+				lg.Warn("relay retry exhausted: no alternative channel available",
+					append(selectionFields, zap.String("selection_error", err.Error()))...,
+				)
+			} else {
+				lg.Error("relay retry channel selection failed",
+					append(selectionFields, zap.Error(err))...,
+				)
+			}
 
 			// Log database suspension status to help distinguish between in-memory and database exclusions
 			// Only check the channels that were actually excluded in this request
@@ -279,7 +343,7 @@ func Relay(c *gin.Context) {
 		// Record failed retry
 		PrometheusMonitor.RecordRelayRequest(c, retryMeta, retryStartTime, false, 0, 0, 0)
 
-		channelId := c.GetInt(ctxkey.ChannelId)
+		channelId = c.GetInt(ctxkey.ChannelId)
 		failedChannels[channelId] = true // Track this failed channel
 		lastFailedChannelId = channelId
 
@@ -290,14 +354,16 @@ func Relay(c *gin.Context) {
 				zap.Ints("total_failed_channels", getChannelIds(failedChannels)),
 				zap.String("request_id", requestId))
 		}
-		channelName := c.GetString(ctxkey.ChannelName)
+		channelName = c.GetString(ctxkey.ChannelName)
 		// Update group and originalModel potentially if changed by middleware, though unlikely for these.
 		group = c.GetString(ctxkey.Group)
 		originalModel = c.GetString(ctxkey.RequestModel)
 		// Get updated actual model from retry meta
 		retryActualModel := retryMeta.ActualModelName
+		actualModel = retryActualModel
 		graceful.GoCritical(ctx, "processChannelRelayError", func(ctx context.Context) {
 			processChannelRelayError(ctx, processChannelRelayErrorParams{
+				RequestID:     requestId,
 				UserId:        userId,
 				TokenId:       tokenId,
 				ChannelId:     channelId,
@@ -361,6 +427,60 @@ func shouldRetry(c *gin.Context, statusCode int, rawErr error) error {
 	}
 
 	return nil
+}
+
+// isRetryableUpstreamClientError reports whether a nominal 4xx upstream error should
+// still be considered retryable by one-api.
+//
+// Parameters:
+//   - relayErr: normalized relay error from upstream/adaptor.
+//
+// Returns:
+//   - bool: true when this is a known transient upstream-client error shape.
+func isRetryableUpstreamClientError(relayErr *model.ErrorWithStatusCode) bool {
+	retryable, _ := classifyRetryableUpstreamClientError(relayErr)
+	return retryable
+}
+
+// classifyRetryableUpstreamClientError evaluates whether a nominal 4xx error is
+// actually retryable and returns a stable reason string for diagnostics.
+//
+// Parameters:
+//   - relayErr: normalized relay error from upstream/adaptor.
+//
+// Returns:
+//   - bool: true when this is a known transient upstream-client error shape.
+//   - string: retry reason identifier for debug logging.
+func classifyRetryableUpstreamClientError(relayErr *model.ErrorWithStatusCode) (bool, string) {
+	if relayErr == nil {
+		return false, ""
+	}
+
+	if relayErr.StatusCode < http.StatusBadRequest || relayErr.StatusCode >= http.StatusInternalServerError {
+		return false, ""
+	}
+
+	code := strings.ToLower(strings.TrimSpace(fmt.Sprint(relayErr.Code)))
+	message := strings.ToLower(strings.TrimSpace(relayErr.Message))
+
+	if code == "websocket_connection_limit_reached" {
+		return true, "websocket_connection_limit_reached"
+	}
+
+	if code == "output_parse_failed" {
+		return true, "output_parse_failed"
+	}
+
+	if strings.Contains(message, "websocket connection limit reached") ||
+		strings.Contains(message, "create a new websocket connection") {
+		return true, "websocket_reconnect_hint"
+	}
+
+	if strings.Contains(message, "generated output that could not be parsed") {
+		return true, "upstream_generated_unparseable_output"
+	}
+
+	return false, ""
 }
 
 // isClientContextCancel returns true if the error is caused by the caller's context
@@ -512,7 +632,12 @@ func logChannelSuspensionStatus(ctx context.Context, group, model string, failed
 
 	err := dbmodel.DB.Where(groupCol+" = ? AND model = ? AND channel_id IN (?)", group, model, channelIds).Find(&abilities).Error
 	if err != nil {
-		lg.Error("Failed to check suspension status", zap.Error(err))
+		lg.Warn("failed to inspect suspension status during relay diagnostics",
+			zap.Error(err),
+			zap.String("group", group),
+			zap.String("model", model),
+			zap.Ints("failed_channel_ids", channelIds),
+		)
 		return
 	}
 
@@ -540,6 +665,7 @@ func logChannelSuspensionStatus(ctx context.Context, group, model string, failed
 // processChannelRelayErrorParams contains all parameters needed for error processing.
 // This struct helps maintain readability when passing multiple context values.
 type processChannelRelayErrorParams struct {
+	RequestID     string
 	UserId        int
 	TokenId       int
 	ChannelId     int
@@ -551,46 +677,109 @@ type processChannelRelayErrorParams struct {
 	Err           model.ErrorWithStatusCode
 }
 
+// appendRelayFailureFields builds consistent relay failure context fields from params and appends extra fields.
+// Parameters: params carries request, user, token, channel, model, and upstream error context; extra adds log-specific details.
+// Returns: a zap field slice suitable for structured WARN/ERROR relay logs.
+func appendRelayFailureFields(params processChannelRelayErrorParams, extra ...zap.Field) []zap.Field {
+	fields := make([]zap.Field, 0, 12+len(extra))
+	if params.RequestID != "" {
+		fields = append(fields, zap.String("request_id", params.RequestID))
+	}
+	if params.RequestURL != "" {
+		fields = append(fields, zap.String("request_url", params.RequestURL))
+	}
+	fields = append(fields,
+		zap.Int("user_id", params.UserId),
+		zap.Int("token_id", params.TokenId),
+		zap.Int("channel_id", params.ChannelId),
+	)
+	if params.ChannelName != "" {
+		fields = append(fields, zap.String("channel_name", params.ChannelName))
+	}
+	if params.Group != "" {
+		fields = append(fields, zap.String("group", params.Group))
+	}
+	if params.OriginalModel != "" {
+		fields = append(fields, zap.String("origin_model", params.OriginalModel))
+	}
+	if params.ActualModel != "" {
+		fields = append(fields, zap.String("actual_model", params.ActualModel))
+	}
+	if params.Err.StatusCode > 0 {
+		fields = append(fields, zap.Int("status_code", params.Err.StatusCode))
+	}
+	if errorCode := strings.TrimSpace(fmt.Sprint(params.Err.Code)); errorCode != "" && errorCode != "<nil>" {
+		fields = append(fields, zap.String("error_code", errorCode))
+	}
+	if errorType := strings.TrimSpace(string(params.Err.Type)); errorType != "" {
+		fields = append(fields, zap.String("error_type", errorType))
+	}
+	if upstreamError := strings.TrimSpace(params.Err.Message); upstreamError != "" {
+		fields = append(fields, zap.String("upstream_error", upstreamError))
+	}
+
+	return append(fields, extra...)
+}
+
+// isExpectedChannelSelectionExhaustedError reports whether err means retry candidates were exhausted rather than an infrastructure failure.
+// Parameters: err is the channel-selection error returned by the retry path.
+// Returns: true when no alternative channel is available and false when the failure is unexpected and should stay at ERROR.
+func isExpectedChannelSelectionExhaustedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return true
+	}
+
+	errMsg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(errMsg, "no channels available for model") {
+		return true
+	}
+
+	return strings.Contains(errMsg, "channel not found in memory cache")
+}
+
 func processChannelRelayError(ctx context.Context, params processChannelRelayErrorParams) {
 	// Always use a local logger variable
 	lg := gmw.GetLogger(ctx)
+	isUserError := isUserOriginatedRelayError(&params.Err)
 
-	// Downgrade to WARN for client-side cancellations/timeouts to avoid noisy alerts
+	// Downgrade to WARN for client-side cancellations/timeouts and user-originated errors
 	if isClientContextCancel(params.Err.StatusCode, params.Err.RawError) {
 		lg.Warn("relay aborted by client (context canceled/deadline)",
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.Int("user_id", params.UserId),
-			zap.String("group", params.Group),
-			zap.String("model", params.OriginalModel),
-			zap.Error(params.Err.RawError))
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
+		)
+	} else if isUserError {
+		lg.Warn("user-originated request error",
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
+		)
 	} else {
 		lg.Error("relay error",
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.Int("user_id", params.UserId),
-			zap.String("group", params.Group),
-			zap.String("model", params.OriginalModel),
-			zap.Error(params.Err.RawError))
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
+		)
 	}
 
 	if isInternalInfraError(params.Err.RawError) {
 		lg.Debug("internal infrastructure failure detected, skipping channel suspension",
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.String("group", params.Group),
-			zap.String("model", params.OriginalModel))
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
+		)
 		monitor.Emit(params.ChannelId, false)
 		return
 	}
 
 	if isAdaptorInternalError(&params.Err) {
 		lg.Info("internal adaptor error, skipping channel suspension",
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.String("group", params.Group),
-			zap.String("model", params.OriginalModel),
-			zap.Int("status_code", params.Err.StatusCode),
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
+		)
+		monitor.Emit(params.ChannelId, false)
+		return
+	}
+
+	if isUserError {
+		lg.Warn("user-originated request error, skipping channel suspension",
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
 		)
 		monitor.Emit(params.ChannelId, false)
 		return
@@ -601,8 +790,7 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 		// For 400 errors, log but don't disable channel or suspend abilities
 		// These are typically schema validation errors or malformed requests
 		lg.Info("client request error (400) for channel - not disabling channel as this is not a channel issue",
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
+			appendRelayFailureFields(params, zap.Error(params.Err.RawError))...,
 		)
 		// Still emit failure for monitoring purposes, but don't disable the channel
 		monitor.Emit(params.ChannelId, false)
@@ -612,26 +800,20 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 	if params.Err.StatusCode == http.StatusTooManyRequests {
 		// For 429, we will suspend the specific model for a while
 		lg.Error("ability suspended due to rate limit (429)",
-			zap.String("request_url", params.RequestURL),
-			zap.String("origin_model", params.OriginalModel),
-			zap.String("actual_model", params.ActualModel),
-			zap.Int("user_id", params.UserId),
-			zap.Int("token_id", params.TokenId),
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.String("group", params.Group),
-			zap.String("upstream_error", params.Err.Message),
-			zap.String("suspension_rationale", "upstream rate limit exceeded; suspending ability to allow cooldown"),
-			zap.Duration("suspension_duration", config.ChannelSuspendSecondsFor429),
+			appendRelayFailureFields(params,
+				zap.Error(params.Err.RawError),
+				zap.String("suspension_rationale", "upstream rate limit exceeded; suspending ability to allow cooldown"),
+				zap.Duration("suspension_duration", config.ChannelSuspendSecondsFor429),
+			)...,
 		)
 		if suspendErr := dbmodel.SuspendAbility(ctx,
 			params.Group, params.OriginalModel, params.ChannelId,
 			config.ChannelSuspendSecondsFor429); suspendErr != nil {
 			lg.Error("failed to suspend ability for channel",
-				zap.Int("channel_id", params.ChannelId),
-				zap.String("model", params.OriginalModel),
-				zap.String("group", params.Group),
-				zap.Error(errors.Wrap(suspendErr, "suspend ability failed")))
+				appendRelayFailureFields(params,
+					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+				)...,
+			)
 		}
 		monitor.Emit(params.ChannelId, false)
 		return
@@ -655,36 +837,28 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 	if params.Err.StatusCode >= 500 && params.Err.StatusCode <= 599 {
 		if upstreamSuggestsRetry(&params.Err) {
 			lg.Debug("upstream suggests retry for 5xx error, skipping ability suspension",
-				zap.String("request_url", params.RequestURL),
-				zap.String("origin_model", params.OriginalModel),
-				zap.String("actual_model", params.ActualModel),
-				zap.Int("channel_id", params.ChannelId),
-				zap.String("channel_name", params.ChannelName),
-				zap.String("group", params.Group),
-				zap.Int("status_code", params.Err.StatusCode),
-				zap.String("upstream_error", params.Err.Message),
-				zap.String("skip_rationale", "upstream error message suggests retry; treating as transient one-off issue"),
+				appendRelayFailureFields(params,
+					zap.Error(params.Err.RawError),
+					zap.String("skip_rationale", "upstream error message suggests retry; treating as transient one-off issue"),
+				)...,
 			)
 			monitor.Emit(params.ChannelId, false)
 			return
 		}
 
 		lg.Error("ability suspended due to server error (5xx)",
-			zap.String("request_url", params.RequestURL),
-			zap.String("origin_model", params.OriginalModel),
-			zap.String("actual_model", params.ActualModel),
-			zap.Int("user_id", params.UserId),
-			zap.Int("token_id", params.TokenId),
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.String("group", params.Group),
-			zap.Int("status_code", params.Err.StatusCode),
-			zap.String("upstream_error", params.Err.Message),
-			zap.String("suspension_rationale", "upstream server error; suspending ability to allow recovery"),
-			zap.Duration("suspension_duration", config.ChannelSuspendSecondsFor5XX),
+			appendRelayFailureFields(params,
+				zap.Error(params.Err.RawError),
+				zap.String("suspension_rationale", "upstream server error; suspending ability to allow recovery"),
+				zap.Duration("suspension_duration", config.ChannelSuspendSecondsFor5XX),
+			)...,
 		)
 		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, config.ChannelSuspendSecondsFor5XX); suspendErr != nil {
-			lg.Error("failed to suspend ability for 5xx", zap.Error(errors.Wrap(suspendErr, "suspend ability failed")))
+			lg.Error("failed to suspend ability for 5xx",
+				appendRelayFailureFields(params,
+					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+				)...,
+			)
 		}
 		// Do not immediately auto-disable; transient
 		monitor.Emit(params.ChannelId, false)
@@ -694,34 +868,26 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 	// Auth/permission/quota errors (401/403 or vendor-indicated) -> suspend ability; escalate to auto-disable only if fatal
 	if params.Err.StatusCode == http.StatusUnauthorized || params.Err.StatusCode == http.StatusForbidden || classifyAuthLike(&params.Err) {
 		lg.Error("ability suspended due to auth/permission error",
-			zap.String("request_url", params.RequestURL),
-			zap.String("origin_model", params.OriginalModel),
-			zap.String("actual_model", params.ActualModel),
-			zap.Int("user_id", params.UserId),
-			zap.Int("token_id", params.TokenId),
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.String("group", params.Group),
-			zap.Int("status_code", params.Err.StatusCode),
-			zap.String("upstream_error", params.Err.Message),
-			zap.String("suspension_rationale", "authentication or permission failure; suspending ability pending credential verification"),
-			zap.Duration("suspension_duration", config.ChannelSuspendSecondsForAuth),
+			appendRelayFailureFields(params,
+				zap.Error(params.Err.RawError),
+				zap.String("suspension_rationale", "authentication or permission failure; suspending ability pending credential verification"),
+				zap.Duration("suspension_duration", config.ChannelSuspendSecondsForAuth),
+			)...,
 		)
 		if suspendErr := dbmodel.SuspendAbility(ctx, params.Group, params.OriginalModel, params.ChannelId, config.ChannelSuspendSecondsForAuth); suspendErr != nil {
-			lg.Error("failed to suspend ability for auth/permission", zap.Error(errors.Wrap(suspendErr, "suspend ability failed")))
+			lg.Error("failed to suspend ability for auth/permission",
+				appendRelayFailureFields(params,
+					zap.Error(errors.Wrap(suspendErr, "suspend ability failed")),
+				)...,
+			)
 		}
 
 		if monitor.ShouldDisableChannel(&params.Err.Error, params.Err.StatusCode) {
 			lg.Error("channel disabled due to fatal auth/permission error",
-				zap.String("request_url", params.RequestURL),
-				zap.String("origin_model", params.OriginalModel),
-				zap.String("actual_model", params.ActualModel),
-				zap.Int("user_id", params.UserId),
-				zap.Int("token_id", params.TokenId),
-				zap.Int("channel_id", params.ChannelId),
-				zap.String("channel_name", params.ChannelName),
-				zap.String("upstream_error", params.Err.Message),
-				zap.String("disable_rationale", "fatal auth error detected; channel automatically disabled"),
+				appendRelayFailureFields(params,
+					zap.Error(params.Err.RawError),
+					zap.String("disable_rationale", "fatal auth error detected; channel automatically disabled"),
+				)...,
 			)
 			monitor.DisableChannel(params.ChannelId, params.ChannelName, params.Err.Message)
 		} else {
@@ -733,21 +899,104 @@ func processChannelRelayError(ctx context.Context, params processChannelRelayErr
 	// Default: not fatal -> record failure only. If fatal per policy, auto-disable.
 	if monitor.ShouldDisableChannel(&params.Err.Error, params.Err.StatusCode) {
 		lg.Error("channel disabled due to fatal error",
-			zap.String("request_url", params.RequestURL),
-			zap.String("origin_model", params.OriginalModel),
-			zap.String("actual_model", params.ActualModel),
-			zap.Int("user_id", params.UserId),
-			zap.Int("token_id", params.TokenId),
-			zap.Int("channel_id", params.ChannelId),
-			zap.String("channel_name", params.ChannelName),
-			zap.Int("status_code", params.Err.StatusCode),
-			zap.String("upstream_error", params.Err.Message),
-			zap.String("disable_rationale", "fatal error per auto-disable policy; channel automatically disabled"),
+			appendRelayFailureFields(params,
+				zap.Error(params.Err.RawError),
+				zap.String("disable_rationale", "fatal error per auto-disable policy; channel automatically disabled"),
+			)...,
 		)
 		monitor.DisableChannel(params.ChannelId, params.ChannelName, params.Err.Message)
 	} else {
 		monitor.Emit(params.ChannelId, false)
 	}
+}
+
+// isUserOriginatedRelayError reports whether a relay failure was caused by caller-side
+// request or quota conditions rather than upstream/channel health.
+//
+// Return values:
+//   - true: user-originated and should not trigger channel suspension/disable.
+//   - false: may be upstream/channel/system failure and can follow normal error policy.
+func isUserOriginatedRelayError(e *model.ErrorWithStatusCode) bool {
+	if e == nil {
+		return false
+	}
+
+	if isClientContextCancel(e.StatusCode, e.RawError) {
+		return true
+	}
+
+	if e.StatusCode == http.StatusBadRequest && e.Type == model.ErrorTypeOneAPI {
+		return true
+	}
+
+	if isUpstreamMalformedToolCallError(e) {
+		return true
+	}
+
+	if e.StatusCode != http.StatusForbidden && e.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+
+	if e.Type != model.ErrorTypeOneAPI {
+		return false
+	}
+
+	code := ""
+	switch v := e.Code.(type) {
+	case string:
+		code = strings.ToLower(v)
+	}
+
+	if code == "insufficient_user_quota" || code == "insufficient_token_quota" ||
+		code == "invalid_api_key" || code == "token_expired" || code == "token_disabled" || code == "token_not_found" ||
+		code == "model_not_allowed" || code == "model_not_available" || code == "tool_not_allowed" {
+		return true
+	}
+
+	msg := strings.ToLower(e.Message)
+	if code == "pre_consume_token_quota_failed" &&
+		(strings.Contains(msg, "insufficient user quota") || strings.Contains(msg, "insufficient token quota") || strings.Contains(msg, "user quota is not enough") || strings.Contains(msg, "token quota is not enough")) {
+		return true
+	}
+
+	if strings.Contains(msg, "token has expired") || strings.Contains(msg, "token is not enabled") ||
+		strings.Contains(msg, "api key is invalid") || strings.Contains(msg, "api key has been disabled") ||
+		strings.Contains(msg, "model not allowed") || strings.Contains(msg, "model is not available") || strings.Contains(msg, "not allowed for this token") ||
+		strings.Contains(msg, "token model") || strings.Contains(msg, "quota has been exhausted") || strings.Contains(msg, "token quota exhausted") ||
+		strings.Contains(msg, "whitelist") || strings.Contains(msg, "blacklist") {
+		return true
+	}
+
+	return false
+}
+
+// isUpstreamMalformedToolCallError reports whether a 400 upstream error indicates
+// the model produced malformed tool-call arguments JSON.
+//
+// These errors are user/request-side outcomes (prompt/model generation mismatch),
+// not channel health failures, so they should use user-originated handling.
+func isUpstreamMalformedToolCallError(e *model.ErrorWithStatusCode) bool {
+	if e == nil || e.StatusCode != http.StatusBadRequest {
+		return false
+	}
+
+	code := strings.ToLower(strings.TrimSpace(fmt.Sprint(e.Code)))
+	message := strings.ToLower(strings.TrimSpace(e.Message))
+
+	if code == "tool_use_failed" {
+		return true
+	}
+
+	if code == "invalid_request_error" || code == "" {
+		if strings.Contains(message, "failed to parse tool call arguments as json") {
+			return true
+		}
+		if strings.Contains(message, "tool call arguments") && strings.Contains(message, "json") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func RelayNotImplemented(c *gin.Context) {

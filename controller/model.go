@@ -15,16 +15,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/middleware"
-	"github.com/songquanpeng/one-api/model"
-	relay "github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/dto"
+	"github.com/Laisky/one-api/middleware"
+	"github.com/Laisky/one-api/model"
+	relay "github.com/Laisky/one-api/relay"
+	adaptorpkg "github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/apitype"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // https://platform.openai.com/docs/api-reference/models/list
@@ -204,6 +206,74 @@ func getSupportedModelsSnapshot() ([]OpenAIModels, error) {
 	return models, nil
 }
 
+// getRequestUserGroup returns the request context and resolved user group for authenticated model endpoints.
+func getRequestUserGroup(c *gin.Context) (context.Context, string, error) {
+	ctx := gmw.Ctx(c)
+	if userObj, exists := c.Get(ctxkey.UserObj); exists {
+		if user, ok := userObj.(*model.User); ok {
+			group := strings.TrimSpace(user.Group)
+			if group != "" {
+				return ctx, group, nil
+			}
+		}
+	}
+	group, err := model.CacheGetUserGroup(ctx, c.GetInt(ctxkey.Id))
+	if err != nil {
+		return ctx, "", errors.Wrap(err, "cache get user group")
+	}
+	return ctx, group, nil
+}
+
+// loadChannelCached loads a channel once and reuses it from the provided cache.
+func loadChannelCached(channelID int, cache map[int]*model.Channel) (*model.Channel, error) {
+	if channelID == 0 {
+		return nil, errors.New("channel id is required")
+	}
+	if channel, ok := cache[channelID]; ok {
+		return channel, nil
+	}
+	channel, err := model.GetChannelById(channelID, false)
+	if err != nil {
+		return nil, errors.Wrapf(err, "load channel %d", channelID)
+	}
+	cache[channelID] = channel
+	return channel, nil
+}
+
+// isVisibleAbilityModel reports whether the ability's model remains publicly visible after hidden-model filtering.
+func isVisibleAbilityModel(ability dto.EnabledAbility, cache map[int]*model.Channel) bool {
+	modelName := strings.TrimSpace(ability.Model)
+	if modelName == "" {
+		return false
+	}
+	channel, err := loadChannelCached(ability.ChannelId, cache)
+	if err != nil {
+		return false
+	}
+	return !channel.IsModelHidden(modelName)
+}
+
+// filterVisibleAbilities removes stale or hidden ability rows from public model responses.
+func filterVisibleAbilities(abilities []dto.EnabledAbility, cache map[int]*model.Channel) []dto.EnabledAbility {
+	visible := make([]dto.EnabledAbility, 0, len(abilities))
+	for _, ability := range abilities {
+		if !isVisibleAbilityModel(ability, cache) {
+			continue
+		}
+		visible = append(visible, ability)
+	}
+	return visible
+}
+
+// respondModelNotFound returns the OpenAI-compatible model-not-found error payload.
+func respondModelNotFound(c *gin.Context, modelID string) {
+	msg := fmt.Sprintf("The model '%s' does not exist", modelID)
+	respErr := relaymodel.Error{Message: msg, Type: relaymodel.ErrorTypeInvalidRequest, Param: "model", Code: "model_not_found", RawError: errors.New(msg)}
+	c.JSON(http.StatusOK, gin.H{
+		"error": respErr,
+	})
+}
+
 // ModelsDisplayResponse represents the response structure for the models display page
 type ModelsDisplayResponse struct {
 	Success bool                                `json:"success"`
@@ -220,11 +290,78 @@ type ChannelModelsDisplayInfo struct {
 
 // ModelDisplayInfo represents display information for a single model
 type ModelDisplayInfo struct {
-	InputPrice       float64 `json:"input_price"`           // Price per 1M input tokens in USD
-	CachedInputPrice float64 `json:"cached_input_price"`    // Price per 1M cached input tokens in USD (falls back to input price when unspecified)
-	OutputPrice      float64 `json:"output_price"`          // Price per 1M output tokens in USD
-	MaxTokens        int32   `json:"max_tokens"`            // Maximum tokens limit, 0 means unlimited
-	ImagePrice       float64 `json:"image_price,omitempty"` // USD per image (image models only)
+	InputPrice        float64                  `json:"input_price"`                             // Price per 1M input tokens in USD
+	CachedInputPrice  float64                  `json:"cached_input_price"`                      // Price per 1M cached input tokens in USD (falls back to input price when unspecified)
+	CacheWrite5mPrice float64                  `json:"cache_write_5m_price,omitempty"`          // Price per 1M tokens for 5-minute cache write
+	CacheWrite1hPrice float64                  `json:"cache_write_1h_price,omitempty"`          // Price per 1M tokens for 1-hour cache write
+	OutputPrice       float64                  `json:"output_price"`                            // Price per 1M output tokens in USD
+	MaxTokens         int32                    `json:"max_tokens"`                              // Maximum tokens limit, 0 means unlimited
+	ContextLength     int32                    `json:"context_length,omitempty"`                // Maximum total context window (input + output)
+	MaxOutputTokens   int32                    `json:"max_output_tokens,omitempty"`             // Maximum output tokens per response
+	InputModalities   []string                 `json:"input_modalities,omitempty"`              // Supported request input modalities
+	OutputModalities  []string                 `json:"output_modalities,omitempty"`             // Supported response output modalities
+	SupportedFeatures []string                 `json:"supported_features,omitempty"`            // Capability flags such as tools/json_mode/reasoning
+	SupportedSampling []string                 `json:"supported_sampling_parameters,omitempty"` // Supported OpenAI-compatible sampling parameters
+	Quantization      string                   `json:"quantization,omitempty"`                  // Numeric precision label (for OpenRouter-compatible metadata)
+	HuggingFaceID     string                   `json:"hugging_face_id,omitempty"`               // HuggingFace model identifier when applicable
+	Description       string                   `json:"description,omitempty"`                   // Human-readable short model description
+	ImagePrice        float64                  `json:"image_price,omitempty"`                   // USD per image (image models only)
+	Tiers             []ModelDisplayTier       `json:"tiers,omitempty"`                         // Tiered pricing (volume-based)
+	VideoPricing      *VideoDisplayPricing     `json:"video_pricing,omitempty"`                 // Video generation pricing
+	AudioPricing      *AudioDisplayPricing     `json:"audio_pricing,omitempty"`                 // Audio prompt/completion pricing
+	ImagePricing      *ImageDisplayPricing     `json:"image_pricing,omitempty"`                 // Detailed image pricing with size/quality multipliers
+	EmbeddingPricing  *EmbeddingDisplayPricing `json:"embedding_pricing,omitempty"`             // Embedding pricing by modality
+}
+
+// ModelDisplayTier represents a single tier in volume-based pricing
+type ModelDisplayTier struct {
+	InputPrice          float64 `json:"input_price"`                    // Price per 1M input tokens for this tier
+	OutputPrice         float64 `json:"output_price"`                   // Price per 1M output tokens for this tier
+	CachedInputPrice    float64 `json:"cached_input_price,omitempty"`   // Cached input price for this tier
+	CacheWrite5mPrice   float64 `json:"cache_write_5m_price,omitempty"` // 5-min cache write price for this tier
+	CacheWrite1hPrice   float64 `json:"cache_write_1h_price,omitempty"` // 1-hour cache write price for this tier
+	InputTokenThreshold int     `json:"input_token_threshold"`          // Minimum input tokens to reach this tier
+}
+
+// VideoDisplayPricing represents video generation pricing for display
+type VideoDisplayPricing struct {
+	PerSecondUsd          float64            `json:"per_second_usd"`                   // USD per rendered second at base resolution
+	BaseResolution        string             `json:"base_resolution,omitempty"`        // Base resolution (e.g. "1280x720")
+	ResolutionMultipliers map[string]float64 `json:"resolution_multipliers,omitempty"` // Resolution -> multiplier map
+}
+
+// AudioDisplayPricing represents audio pricing for display
+type AudioDisplayPricing struct {
+	PromptTokenRatio          float64 `json:"prompt_token_ratio,omitempty"`           // Audio-to-text token conversion ratio for prompt
+	CompletionTokenRatio      float64 `json:"completion_token_ratio,omitempty"`       // Audio-to-text token conversion ratio for completion
+	PromptTokensPerSecond     float64 `json:"prompt_tokens_per_second,omitempty"`     // Tokens generated per second of prompt audio
+	CompletionTokensPerSecond float64 `json:"completion_tokens_per_second,omitempty"` // Tokens generated per second of completion audio
+	UsdPerSecond              float64 `json:"usd_per_second,omitempty"`               // Direct USD per second pricing
+}
+
+// ImageDisplayPricing represents detailed image pricing for display
+type ImageDisplayPricing struct {
+	PricePerImageUsd       float64                       `json:"price_per_image_usd,omitempty"`      // Base USD per image
+	DefaultSize            string                        `json:"default_size,omitempty"`             // Default resolution
+	DefaultQuality         string                        `json:"default_quality,omitempty"`          // Default quality level
+	MinImages              int                           `json:"min_images,omitempty"`               // Minimum images per request
+	MaxImages              int                           `json:"max_images,omitempty"`               // Maximum images per request
+	SizeMultipliers        map[string]float64            `json:"size_multipliers,omitempty"`         // Resolution -> multiplier
+	QualityMultipliers     map[string]float64            `json:"quality_multipliers,omitempty"`      // Quality -> multiplier
+	QualitySizeMultipliers map[string]map[string]float64 `json:"quality_size_multipliers,omitempty"` // Quality -> Size -> multiplier
+}
+
+// EmbeddingDisplayPricing represents embedding pricing for display
+type EmbeddingDisplayPricing struct {
+	TextTokenPrice     float64 `json:"text_token_price,omitempty"`      // Price per 1M text tokens
+	ImageTokenPrice    float64 `json:"image_token_price,omitempty"`     // Price per 1M image tokens
+	AudioTokenPrice    float64 `json:"audio_token_price,omitempty"`     // Price per 1M audio tokens
+	VideoTokenPrice    float64 `json:"video_token_price,omitempty"`     // Price per 1M video tokens
+	DocumentTokenPrice float64 `json:"document_token_price,omitempty"`  // Price per 1M document tokens
+	UsdPerImage        float64 `json:"usd_per_image,omitempty"`         // Direct USD per image
+	UsdPerAudioSecond  float64 `json:"usd_per_audio_second,omitempty"`  // Direct USD per audio second
+	UsdPerVideoFrame   float64 `json:"usd_per_video_frame,omitempty"`   // Direct USD per video frame
+	UsdPerDocumentPage float64 `json:"usd_per_document_page,omitempty"` // Direct USD per document page
 }
 
 // mergeModelNamesWithOverrides merges explicit channel models with pricing override entries, removing duplicates.
@@ -270,7 +407,7 @@ func listAllSupportedModels() ([]OpenAIModels, error) {
 	}
 	channels, err := model.GetAllEnabledChannels()
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "get all enabled channels")
 	}
 	created := int(time.Now().Unix())
 	for _, ch := range channels {
@@ -362,6 +499,9 @@ func GetModelsDisplay(c *gin.Context) {
 			if modelName == "" {
 				continue
 			}
+			if channel.IsModelHidden(modelName) {
+				continue
+			}
 			if !channel.SupportsModel(modelName) {
 				continue
 			}
@@ -376,20 +516,96 @@ func GetModelsDisplay(c *gin.Context) {
 				}
 			}
 
-			var inputPrice, cachedInputPrice, outputPrice float64
+			var inputPrice, cachedInputPrice, cacheWrite5mPrice, cacheWrite1hPrice, outputPrice float64
 			var maxTokens int32
 			var imagePrice float64
+			var tiers []ModelDisplayTier
+			var contextLength int32
+			var maxOutputTokens int32
+			var inputModalities []string
+			var outputModalities []string
+			var supportedFeatures []string
+			var supportedSampling []string
+			var quantization string
+			var huggingFaceID string
+			var description string
+			var videoPricing *VideoDisplayPricing
+			var audioPricing *AudioDisplayPricing
+			var imagePricing *ImageDisplayPricing
+			var embeddingPricing *EmbeddingDisplayPricing
 			baseCompletionRatio := 0.0
 			overrideApplied := false
 
+			// buildImageDisplayPricing converts an adaptor ImagePricingConfig to display format
+			buildImageDisplayPricing := func(img interface{ HasData() bool }, raw interface{}) *ImageDisplayPricing {
+				// Use type switch to handle both adaptor and local types
+				switch v := raw.(type) {
+				case *adaptorpkg.ImagePricingConfig:
+					if v == nil || !v.HasData() {
+						return nil
+					}
+					dp := &ImageDisplayPricing{
+						PricePerImageUsd: v.PricePerImageUsd,
+						DefaultSize:      v.DefaultSize,
+						DefaultQuality:   v.DefaultQuality,
+						MinImages:        v.MinImages,
+						MaxImages:        v.MaxImages,
+					}
+					if len(v.SizeMultipliers) > 0 {
+						dp.SizeMultipliers = v.SizeMultipliers
+					}
+					if len(v.QualityMultipliers) > 0 {
+						dp.QualityMultipliers = v.QualityMultipliers
+					}
+					if len(v.QualitySizeMultipliers) > 0 {
+						dp.QualitySizeMultipliers = v.QualitySizeMultipliers
+					}
+					return dp
+				case *model.ImagePricingLocal:
+					if v == nil {
+						return nil
+					}
+					dp := &ImageDisplayPricing{
+						PricePerImageUsd: v.PricePerImageUsd,
+						DefaultSize:      v.DefaultSize,
+						DefaultQuality:   v.DefaultQuality,
+						MinImages:        v.MinImages,
+						MaxImages:        v.MaxImages,
+					}
+					if len(v.SizeMultipliers) > 0 {
+						dp.SizeMultipliers = v.SizeMultipliers
+					}
+					if len(v.QualityMultipliers) > 0 {
+						dp.QualityMultipliers = v.QualityMultipliers
+					}
+					if len(v.QualitySizeMultipliers) > 0 {
+						dp.QualitySizeMultipliers = v.QualitySizeMultipliers
+					}
+					return dp
+				}
+				return nil
+			}
+			_ = buildImageDisplayPricing // used below
+
 			if cfg, ok := pricing[actual]; ok {
 				if cfg.Image != nil && cfg.Image.PricePerImageUsd > 0 && cfg.Ratio == 0 && cfg.CachedInputRatio <= 0 {
-					result[modelName] = ModelDisplayInfo{
-						MaxTokens:        cfg.MaxTokens,
-						ImagePrice:       cfg.Image.PricePerImageUsd,
-						InputPrice:       0,
-						CachedInputPrice: 0,
+					info := ModelDisplayInfo{
+						MaxTokens:         cfg.MaxTokens,
+						ContextLength:     cfg.ContextLength,
+						MaxOutputTokens:   cfg.MaxOutputTokens,
+						InputModalities:   append([]string(nil), cfg.InputModalities...),
+						OutputModalities:  append([]string(nil), cfg.OutputModalities...),
+						SupportedFeatures: append([]string(nil), cfg.SupportedFeatures...),
+						SupportedSampling: append([]string(nil), cfg.SupportedSamplingParameters...),
+						Quantization:      cfg.Quantization,
+						HuggingFaceID:     cfg.HuggingFaceID,
+						Description:       cfg.Description,
+						ImagePrice:        cfg.Image.PricePerImageUsd,
+						InputPrice:        0,
+						CachedInputPrice:  0,
+						ImagePricing:      buildImageDisplayPricing(cfg.Image, cfg.Image),
 					}
+					result[modelName] = info
 					continue
 				}
 				inputPrice = convertRatioToPrice(cfg.Ratio)
@@ -406,11 +622,81 @@ func GetModelsDisplay(c *gin.Context) {
 						inputPrice = cachedInputPrice
 					}
 				}
+				cacheWrite5mPrice = convertRatioToPrice(cfg.CacheWrite5mRatio)
+				cacheWrite1hPrice = convertRatioToPrice(cfg.CacheWrite1hRatio)
 				baseCompletionRatio = cfg.CompletionRatio
 				outputPrice = inputPrice * cfg.CompletionRatio
 				maxTokens = cfg.MaxTokens
+				contextLength = cfg.ContextLength
+				maxOutputTokens = cfg.MaxOutputTokens
+				inputModalities = append([]string(nil), cfg.InputModalities...)
+				outputModalities = append([]string(nil), cfg.OutputModalities...)
+				supportedFeatures = append([]string(nil), cfg.SupportedFeatures...)
+				supportedSampling = append([]string(nil), cfg.SupportedSamplingParameters...)
+				quantization = cfg.Quantization
+				huggingFaceID = cfg.HuggingFaceID
+				description = cfg.Description
 				if cfg.Image != nil {
 					imagePrice = cfg.Image.PricePerImageUsd
+					imagePricing = buildImageDisplayPricing(cfg.Image, cfg.Image)
+				}
+				// Tiered pricing
+				if len(cfg.Tiers) > 0 {
+					tiers = make([]ModelDisplayTier, 0, len(cfg.Tiers))
+					for _, tier := range cfg.Tiers {
+						tierInput := convertRatioToPrice(tier.Ratio)
+						tierOutput := tierInput * tier.CompletionRatio
+						if tier.CompletionRatio == 0 {
+							tierOutput = tierInput * baseCompletionRatio
+						}
+						dt := ModelDisplayTier{
+							InputPrice:          tierInput,
+							OutputPrice:         tierOutput,
+							InputTokenThreshold: tier.InputTokenThreshold,
+						}
+						if tier.CachedInputRatio != 0 {
+							dt.CachedInputPrice = convertRatioToPrice(tier.CachedInputRatio)
+						}
+						if tier.CacheWrite5mRatio != 0 {
+							dt.CacheWrite5mPrice = convertRatioToPrice(tier.CacheWrite5mRatio)
+						}
+						if tier.CacheWrite1hRatio != 0 {
+							dt.CacheWrite1hPrice = convertRatioToPrice(tier.CacheWrite1hRatio)
+						}
+						tiers = append(tiers, dt)
+					}
+				}
+				// Video pricing
+				if cfg.Video != nil && cfg.Video.HasData() {
+					videoPricing = &VideoDisplayPricing{
+						PerSecondUsd:          cfg.Video.PerSecondUsd,
+						BaseResolution:        cfg.Video.BaseResolution,
+						ResolutionMultipliers: cfg.Video.ResolutionMultipliers,
+					}
+				}
+				// Audio pricing
+				if cfg.Audio != nil && cfg.Audio.HasData() {
+					audioPricing = &AudioDisplayPricing{
+						PromptTokenRatio:          cfg.Audio.PromptRatio,
+						CompletionTokenRatio:      cfg.Audio.CompletionRatio,
+						PromptTokensPerSecond:     cfg.Audio.PromptTokensPerSecond,
+						CompletionTokensPerSecond: cfg.Audio.CompletionTokensPerSecond,
+						UsdPerSecond:              cfg.Audio.UsdPerSecond,
+					}
+				}
+				// Embedding pricing
+				if cfg.Embedding != nil && cfg.Embedding.HasData() {
+					embeddingPricing = &EmbeddingDisplayPricing{
+						TextTokenPrice:     convertRatioToPrice(cfg.Embedding.TextTokenRatio),
+						ImageTokenPrice:    convertRatioToPrice(cfg.Embedding.ImageTokenRatio),
+						AudioTokenPrice:    convertRatioToPrice(cfg.Embedding.AudioTokenRatio),
+						VideoTokenPrice:    convertRatioToPrice(cfg.Embedding.VideoTokenRatio),
+						DocumentTokenPrice: convertRatioToPrice(cfg.Embedding.DocumentTokenRatio),
+						UsdPerImage:        cfg.Embedding.UsdPerImage,
+						UsdPerAudioSecond:  cfg.Embedding.UsdPerAudioSecond,
+						UsdPerVideoFrame:   cfg.Embedding.UsdPerVideoFrame,
+						UsdPerDocumentPage: cfg.Embedding.UsdPerDocumentPage,
+					}
 				}
 			} else {
 				inRatio := adaptor.GetModelRatio(actual)
@@ -423,14 +709,20 @@ func GetModelsDisplay(c *gin.Context) {
 				imagePrice = 0
 			}
 
-			if cfg, ok := getOverride(modelName); ok {
-				overrideApplied = true
+			applyOverride := func(cfg *model.ModelConfigLocal) {
 				if cfg.MaxTokens != 0 {
 					maxTokens = cfg.MaxTokens
 				}
 				if cfg.Ratio != 0 {
+					prevInputPrice := inputPrice
 					inputPrice = convertRatioToPrice(cfg.Ratio)
-					cachedInputPrice = inputPrice
+					if cfg.CachedInputRatio != 0 {
+						cachedInputPrice = convertRatioToPrice(cfg.CachedInputRatio)
+					} else if cachedInputPrice == prevInputPrice {
+						// No adaptor-level cache pricing existed, follow the new input price
+						cachedInputPrice = inputPrice
+					}
+					// else: preserve the adaptor-level cachedInputPrice
 					if cfg.CompletionRatio != 0 {
 						outputPrice = inputPrice * cfg.CompletionRatio
 					} else if baseCompletionRatio != 0 {
@@ -441,41 +733,51 @@ func GetModelsDisplay(c *gin.Context) {
 				} else if cfg.CompletionRatio != 0 && inputPrice > 0 {
 					outputPrice = inputPrice * cfg.CompletionRatio
 				}
+				if cfg.CacheWrite5mRatio != 0 {
+					cacheWrite5mPrice = convertRatioToPrice(cfg.CacheWrite5mRatio)
+				}
+				if cfg.CacheWrite1hRatio != 0 {
+					cacheWrite1hPrice = convertRatioToPrice(cfg.CacheWrite1hRatio)
+				}
 				if cfg.Image != nil && cfg.Image.PricePerImageUsd > 0 {
 					imagePrice = cfg.Image.PricePerImageUsd
+					imagePricing = buildImageDisplayPricing(nil, cfg.Image)
 				}
+			}
+
+			if cfg, ok := getOverride(modelName); ok {
+				overrideApplied = true
+				applyOverride(cfg)
 			}
 			if !overrideApplied && actual != modelName {
 				if cfg, ok := getOverride(actual); ok {
 					overrideApplied = true
-					if cfg.MaxTokens != 0 {
-						maxTokens = cfg.MaxTokens
-					}
-					if cfg.Ratio != 0 {
-						inputPrice = convertRatioToPrice(cfg.Ratio)
-						cachedInputPrice = inputPrice
-						if cfg.CompletionRatio != 0 {
-							outputPrice = inputPrice * cfg.CompletionRatio
-						} else if baseCompletionRatio != 0 {
-							outputPrice = inputPrice * baseCompletionRatio
-						} else if outputPrice == 0 {
-							outputPrice = inputPrice
-						}
-					} else if cfg.CompletionRatio != 0 && inputPrice > 0 {
-						outputPrice = inputPrice * cfg.CompletionRatio
-					}
-					if cfg.Image != nil && cfg.Image.PricePerImageUsd > 0 {
-						imagePrice = cfg.Image.PricePerImageUsd
-					}
+					applyOverride(cfg)
 				}
 			}
 
 			result[modelName] = ModelDisplayInfo{
-				InputPrice:       inputPrice,
-				CachedInputPrice: cachedInputPrice,
-				OutputPrice:      outputPrice,
-				MaxTokens:        maxTokens,
-				ImagePrice:       imagePrice,
+				InputPrice:        inputPrice,
+				CachedInputPrice:  cachedInputPrice,
+				CacheWrite5mPrice: cacheWrite5mPrice,
+				CacheWrite1hPrice: cacheWrite1hPrice,
+				OutputPrice:       outputPrice,
+				MaxTokens:         maxTokens,
+				ContextLength:     contextLength,
+				MaxOutputTokens:   maxOutputTokens,
+				InputModalities:   inputModalities,
+				OutputModalities:  outputModalities,
+				SupportedFeatures: supportedFeatures,
+				SupportedSampling: supportedSampling,
+				Quantization:      quantization,
+				HuggingFaceID:     huggingFaceID,
+				Description:       description,
+				ImagePrice:        imagePrice,
+				Tiers:             tiers,
+				VideoPricing:      videoPricing,
+				AudioPricing:      audioPricing,
+				ImagePricing:      imagePricing,
+				EmbeddingPricing:  embeddingPricing,
 			}
 			if inputPrice == 0 && cachedInputPrice == 0 && outputPrice == 0 && imagePrice == 0 && lg != nil {
 				lg.Debug("model display missing pricing metadata",
@@ -492,6 +794,9 @@ func GetModelsDisplay(c *gin.Context) {
 	if userId == 0 {
 		// Anonymous path with cache + singleflight to mitigate DB load and thundering herd
 		cacheKey := "kw:" + keyword
+		if version, err := model.GetEnabledChannelsVersionSignature(); err == nil {
+			cacheKey += ":" + version
+		}
 		if data, ok := anonymousModelsDisplayCache.Load(cacheKey); ok {
 			c.JSON(http.StatusOK, ModelsDisplayResponse{Success: true, Message: "", Data: data})
 			return
@@ -529,8 +834,7 @@ func GetModelsDisplay(c *gin.Context) {
 	}
 
 	// Logged-in path: show only models allowed for the user group
-	ctx := gmw.Ctx(c)
-	userGroup, err := model.CacheGetUserGroup(ctx, userId)
+	ctx, userGroup, err := getRequestUserGroup(c)
 	if err != nil {
 		c.JSON(http.StatusOK, ModelsDisplayResponse{Success: false, Message: "Failed to get user group: " + err.Error()})
 		return
@@ -583,10 +887,19 @@ func ListModels(c *gin.Context) {
 	ctx := gmw.Ctx(c)
 	lg := gmw.GetLogger(c)
 
-	userGroup, err := model.CacheGetUserGroup(ctx, userId)
-	if err != nil {
-		middleware.AbortWithError(c, http.StatusBadRequest, err)
-		return
+	var userGroup string
+	if userObj, exists := c.Get(ctxkey.UserObj); exists {
+		if u, ok := userObj.(*model.User); ok {
+			userGroup = u.Group
+		}
+	}
+	if userGroup == "" {
+		var err error
+		userGroup, err = model.CacheGetUserGroup(ctx, userId)
+		if err != nil {
+			middleware.AbortWithError(c, http.StatusBadRequest, err)
+			return
+		}
 	}
 
 	availableAbilities, err := model.CacheGetGroupModelsV2(ctx, userGroup)
@@ -594,6 +907,8 @@ func ListModels(c *gin.Context) {
 		middleware.AbortWithError(c, http.StatusBadRequest, err)
 		return
 	}
+	channelCache := make(map[int]*model.Channel)
+	availableAbilities = filterVisibleAbilities(availableAbilities, channelCache)
 
 	snapshot, err := getSupportedModelsSnapshot()
 	if err != nil {
@@ -608,7 +923,6 @@ func ListModels(c *gin.Context) {
 	}
 
 	allowed := make(map[string]OpenAIModels, len(availableAbilities))
-	channelCache := make(map[int]*model.Channel)
 	created := int(time.Now().Unix())
 
 	for _, ability := range availableAbilities {
@@ -693,13 +1007,44 @@ func buildModelEntryFromAbility(modelName string, channelID int, channelType int
 
 // RetrieveModel returns details about a specific model or an error when it does not exist.
 func RetrieveModel(c *gin.Context) {
-	modelId := c.Param("model")
+	modelId := strings.TrimSpace(c.Param("model"))
+	ctx, userGroup, err := getRequestUserGroup(c)
+	if err != nil {
+		middleware.AbortWithError(c, http.StatusBadRequest, err)
+		return
+	}
+	abilities, err := model.CacheGetGroupModelsV2(ctx, userGroup)
+	if err != nil {
+		middleware.AbortWithError(c, http.StatusBadRequest, err)
+		return
+	}
+	channelCache := make(map[int]*model.Channel)
+	visibleAbilities := filterVisibleAbilities(abilities, channelCache)
+	var matched *dto.EnabledAbility
+	for i := range visibleAbilities {
+		if strings.EqualFold(visibleAbilities[i].Model, modelId) {
+			matched = &visibleAbilities[i]
+			modelId = strings.TrimSpace(visibleAbilities[i].Model)
+			break
+		}
+	}
+	if matched == nil {
+		respondModelNotFound(c, modelId)
+		return
+	}
+
 	if model, ok := modelsMap[modelId]; ok {
 		c.JSON(http.StatusOK, model)
 		return
 	}
+	for key, modelEntry := range modelsMap {
+		if strings.EqualFold(key, modelId) {
+			c.JSON(http.StatusOK, modelEntry)
+			return
+		}
+	}
 	lg := gmw.GetLogger(c)
-	if snapshot, err := listAllSupportedModels(); err == nil {
+	if snapshot, err := getSupportedModelsSnapshot(); err == nil {
 		for _, m := range snapshot {
 			if strings.EqualFold(m.Id, modelId) {
 				c.JSON(http.StatusOK, m)
@@ -709,18 +1054,16 @@ func RetrieveModel(c *gin.Context) {
 	} else if lg != nil {
 		lg.Debug("failed to build supported models snapshot for lookup", zap.Error(err))
 	}
-	msg := fmt.Sprintf("The model '%s' does not exist", modelId)
-	Error := relaymodel.Error{Message: msg, Type: relaymodel.ErrorTypeInvalidRequest, Param: "model", Code: "model_not_found", RawError: errors.New(msg)}
-	c.JSON(http.StatusOK, gin.H{
-		"error": Error,
-	})
+	if entry, ok := buildModelEntryFromAbility(modelId, matched.ChannelId, matched.ChannelType, int(time.Now().Unix()), channelCache); ok {
+		c.JSON(http.StatusOK, entry)
+		return
+	}
+	respondModelNotFound(c, modelId)
 }
 
 // GetUserAvailableModels lists the model identifiers the authenticated user can access.
 func GetUserAvailableModels(c *gin.Context) {
-	ctx := gmw.Ctx(c)
-	id := c.GetInt(ctxkey.Id)
-	userGroup, err := model.CacheGetUserGroup(ctx, id)
+	ctx, userGroup, err := getRequestUserGroup(c)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -737,8 +1080,10 @@ func GetUserAvailableModels(c *gin.Context) {
 		})
 		return
 	}
+	channelCache := make(map[int]*model.Channel)
+	models = filterVisibleAbilities(models, channelCache)
 
-	var modelNames []string
+	modelNames := make([]string, 0)
 	modelsMap := map[string]bool{}
 	for _, model := range models {
 		modelsMap[model.Model] = true
@@ -746,6 +1091,7 @@ func GetUserAvailableModels(c *gin.Context) {
 	for modelName := range modelsMap {
 		modelNames = append(modelNames, modelName)
 	}
+	sort.Strings(modelNames)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -780,10 +1126,53 @@ func GetAvailableModelsByToken(c *gin.Context) {
 		// Token has model restrictions, use those models
 		modelsString := availableModels.(string)
 		if modelsString != "" {
-			modelNames := strings.Split(modelsString, ",")
-			// Trim whitespace from each model name
-			for i := range modelNames {
-				modelNames[i] = strings.TrimSpace(modelNames[i])
+			ctx, userGroup, err := getRequestUserGroup(c)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"message": err.Error(),
+					"data": gin.H{
+						"available": nil,
+						"enabled":   false,
+					},
+				})
+				return
+			}
+			abilities, err := model.CacheGetGroupModelsV2(ctx, userGroup)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"success": false,
+					"message": err.Error(),
+					"data": gin.H{
+						"available": nil,
+						"enabled":   false,
+					},
+				})
+				return
+			}
+			channelCache := make(map[int]*model.Channel)
+			visibleModels := make(map[string]struct{}, len(abilities))
+			for _, ability := range filterVisibleAbilities(abilities, channelCache) {
+				visibleModels[strings.ToLower(strings.TrimSpace(ability.Model))] = struct{}{}
+			}
+
+			tokenModels := strings.Split(modelsString, ",")
+			modelNames := make([]string, 0, len(tokenModels))
+			seen := make(map[string]struct{}, len(tokenModels))
+			for _, rawModel := range tokenModels {
+				modelName := strings.TrimSpace(rawModel)
+				if modelName == "" {
+					continue
+				}
+				key := strings.ToLower(modelName)
+				if _, ok := visibleModels[key]; !ok {
+					continue
+				}
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				modelNames = append(modelNames, modelName)
 			}
 			c.JSON(http.StatusOK, gin.H{
 				"success": true,

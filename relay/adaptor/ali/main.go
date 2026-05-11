@@ -1,7 +1,6 @@
 package ali
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,13 +12,14 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // https://help.aliyun.com/document_detail/613695.html?spm=a2c4g.2399480.0.0.1adb778fAdzP9w#341800c0f8w0r
@@ -190,32 +190,51 @@ func streamResponseAli2OpenAI(aliResponse *ChatResponse) *openai.ChatCompletions
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	var usage model.Usage
 	lg := gmw.GetLogger(c)
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-		if i := strings.Index(string(data), "\n"); i >= 0 {
-			return i + 1, data[0:i], nil
-		}
-		if atEOF {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
 	common.SetEventStreamHeaders(c)
 
-	for scanner.Scan() {
-		data := scanner.Text()
+	var streamErr error
+	for {
+		line, err := lineReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			var aliResponse ChatResponse
+			if err := json.NewDecoder(line.Large).Decode(&aliResponse); err != nil {
+				lg.Error("error unmarshalling oversized stream response", zap.Error(err))
+				continue
+			}
+			if aliResponse.Usage.OutputTokens != 0 {
+				usage.PromptTokens = aliResponse.Usage.InputTokens
+				usage.CompletionTokens = aliResponse.Usage.OutputTokens
+				usage.TotalTokens = aliResponse.Usage.InputTokens + aliResponse.Usage.OutputTokens
+			}
+			response := streamResponseAli2OpenAI(&aliResponse)
+			if response == nil {
+				continue
+			}
+			if err := render.ObjectData(c, response); err != nil {
+				lg.Error("error rendering response: ", zap.Error(err))
+			}
+			continue
+		}
+
+		data := line.Text()
 		if len(data) < 5 || data[:5] != "data:" {
 			continue
 		}
 		data = data[5:]
 
 		var aliResponse ChatResponse
-		err := json.Unmarshal([]byte(data), &aliResponse)
+		err = json.Unmarshal([]byte(data), &aliResponse)
 		if err != nil {
 			lg.Error("error unmarshalling stream response: ", zap.Error(err))
 			continue
@@ -235,8 +254,8 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		lg.Error("error reading stream: ", zap.Error(err), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		lg.Error("error reading stream: ", zap.Error(streamErr))
 	}
 
 	render.Done(c)

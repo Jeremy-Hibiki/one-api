@@ -1,4 +1,9 @@
 {
+  "a11y": {
+    "close": "Cerrar",
+    "close_drawer": "Cerrar cajón",
+    "select_language": "Seleccionar idioma"
+  },
   "about": {
     "cta_models": "Ver modelos compatibles",
     "cta_repo": "Repositorio de GitHub",
@@ -64,12 +69,16 @@
     "version": "Versión",
     "welcome": "Bienvenido a One API"
   },
+  "footer": {
+    "copyright": "© {{year}} One API. Todos los derechos reservados."
+  },
   "header": {
     "confirm_logout": "Confirmar cierre de sesión",
     "log_out": "Cerrar sesión",
     "logging_out": "Cerrando sesión...",
     "logout_description": "¿Estás seguro de que quieres cerrar sesión? Tendrás que volver a iniciar sesión para acceder a tu panel de control.",
     "navigation": "Navegación",
+    "profile": "Perfil",
     "signed_in_as": "Iniciado sesión como"
   },
   "home": {
@@ -78,7 +87,16 @@
   "notFound": {
     "go_home": "Ir al inicio ahora",
     "message": "Página no encontrada",
-    "redirecting": "Redirigiendo al inicio en {{seconds}} s..."
+    "redirecting": "Redirigiendo al inicio en {{seconds}} s...",
+    "stay_here": "Quedarse en esta página"
+  },
+  "notice": {
+    "dismiss": "Descartar aviso"
+  },
+  "passkey_prompt": {
+    "dismiss": "Cerrar",
+    "message": "Mejora la seguridad de tu cuenta — configura una passkey para iniciar sesión rápidamente sin contraseña.",
+    "setup_button": "Configurar Passkey"
   },
   "status": {
     "badges": {
@@ -136,5 +154,11 @@
     },
     "subtitle": "Supervisa el estado y el rendimiento de todos los canales",
     "title": "Estado de los canales"
+  },
+  "theme": {
+    "dark": "Oscuro",
+    "light": "Claro",
+    "system": "Sistema",
+    "toggle": "Cambiar tema"
   }
 }

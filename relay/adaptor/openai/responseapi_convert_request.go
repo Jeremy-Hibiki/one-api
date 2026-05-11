@@ -1,11 +1,12 @@
 package openai
 
 import (
+	"maps"
 	"strings"
 
 	"github.com/Laisky/errors/v2"
 
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // ConvertResponseAPIToChatCompletionRequest converts a Response API request into a
@@ -29,6 +30,7 @@ func ConvertResponseAPIToChatCompletionRequest(request *ResponseAPIRequest) (*mo
 
 	chatReq := &model.GeneralOpenAIRequest{
 		Model:       request.Model,
+		ExtraBody:   maps.Clone(request.ExtraBody),
 		Store:       request.Store,
 		Metadata:    request.Metadata,
 		Stream:      request.Stream != nil && *request.Stream,

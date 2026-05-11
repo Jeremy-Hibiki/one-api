@@ -15,13 +15,13 @@ import (
 	"github.com/jinzhu/copier"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/network"
-	"github.com/songquanpeng/one-api/common/random"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/network"
+	"github.com/Laisky/one-api/common/random"
+	"github.com/Laisky/one-api/model"
 )
 
 func GetRequestCost(c *gin.Context) {
@@ -374,12 +374,12 @@ func processPreConsume(ctx context.Context, _ *gin.Context, token *model.Token, 
 
 	preQuota, err := quotaToInt64(req.AddUsedQuota, "add_used_quota")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "convert add_used_quota to int64")
 	}
 
 	transactionID, err := generateTransactionID(ctx, token.Id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "generate transaction id")
 	}
 	req.TransactionID = &transactionID
 
@@ -387,7 +387,7 @@ func processPreConsume(ctx context.Context, _ *gin.Context, token *model.Token, 
 	expiresAt := helper.GetTimestamp() + timeoutSeconds
 
 	if err = model.PreConsumeTokenQuota(ctx, token.Id, preQuota); err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "pre-consume token quota")
 	}
 
 	logEntry := &model.Log{
@@ -400,7 +400,9 @@ func processPreConsume(ctx context.Context, _ *gin.Context, token *model.Token, 
 		TraceId:   traceID,
 	}
 
-	model.RecordConsumeLog(ctx, logEntry)
+	// External /api/token/consume rows are tool-typed so they appear in the
+	// dashboard's tool charts instead of model usage charts.
+	model.RecordToolLog(ctx, logEntry)
 
 	transaction := &model.TokenTransaction{
 		TransactionID: transactionID,
@@ -428,12 +430,12 @@ func processPreConsume(ctx context.Context, _ *gin.Context, token *model.Token, 
 				"content": fmt.Sprintf("External (%s) pre-consume aborted (transaction %s)", req.AddReason, transactionID),
 			})
 		}
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "create token transaction")
 	}
 
 	updatedToken, err := model.GetTokenByIds(token.Id, userID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "get token by ids after pre-consume")
 	}
 
 	return transaction, updatedToken, nil
@@ -453,7 +455,7 @@ func processPostConsume(ctx context.Context, c *gin.Context, token *model.Token,
 	if existingTxn == nil {
 		existingTxn, err = model.GetTokenTransactionByTokenAndID(ctx, token.Id, transactionID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, errors.Wrap(err, "get token transaction for post-consume")
 		}
 	}
 
@@ -471,14 +473,14 @@ func processPostConsume(ctx context.Context, c *gin.Context, token *model.Token,
 
 	finalQuota, err := quotaToInt64(*finalQuotaValue, "final_used_quota")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "convert final_used_quota to int64")
 	}
 
 	delta := finalQuota - existingTxn.PreQuota
 	quotaAdjusted := false
 	if delta != 0 {
 		if err = model.PostConsumeTokenQuota(ctx, token.Id, delta); err != nil {
-			return nil, nil, err
+			return nil, nil, errors.Wrap(err, "post-consume token quota delta")
 		}
 		quotaAdjusted = true
 	}
@@ -501,7 +503,7 @@ func processPostConsume(ctx context.Context, c *gin.Context, token *model.Token,
 		if quotaAdjusted {
 			_ = model.PostConsumeTokenQuota(ctx, token.Id, -delta)
 		}
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "update token transaction for post-consume")
 	}
 
 	updatedFinal := finalQuota
@@ -534,7 +536,7 @@ func processPostConsume(ctx context.Context, c *gin.Context, token *model.Token,
 
 	updatedToken, err := model.GetTokenByIds(token.Id, userID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "get token by ids after post-consume")
 	}
 
 	return existingTxn, updatedToken, nil
@@ -552,7 +554,7 @@ func processCancelConsume(ctx context.Context, c *gin.Context, token *model.Toke
 
 	txn, err := model.GetTokenTransactionByTokenAndID(ctx, token.Id, transactionID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "get token transaction for cancel")
 	}
 
 	if txn.Status != model.TokenTransactionStatusPending {
@@ -560,7 +562,7 @@ func processCancelConsume(ctx context.Context, c *gin.Context, token *model.Toke
 	}
 
 	if err = model.PostConsumeTokenQuota(ctx, token.Id, -txn.PreQuota); err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "refund reserved token quota on cancel")
 	}
 
 	canceledAt := helper.GetTimestamp()
@@ -573,7 +575,7 @@ func processCancelConsume(ctx context.Context, c *gin.Context, token *model.Toke
 
 	if err = model.UpdateTokenTransaction(ctx, txn.Id, updates); err != nil {
 		_ = model.PostConsumeTokenQuota(ctx, token.Id, txn.PreQuota)
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "update token transaction for cancel")
 	}
 
 	zero := int64(0)
@@ -600,7 +602,7 @@ func processCancelConsume(ctx context.Context, c *gin.Context, token *model.Toke
 
 	updatedToken, err := model.GetTokenByIds(token.Id, userID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "get token by ids after cancel")
 	}
 
 	return txn, updatedToken, nil
@@ -609,7 +611,7 @@ func processCancelConsume(ctx context.Context, c *gin.Context, token *model.Toke
 // processImmediateConsume performs a pre and post flow back-to-back for legacy single-phase clients.
 func processImmediateConsume(ctx context.Context, c *gin.Context, token *model.Token, userID int, req *consumeTokenRequest, requestID string, traceID string) (*model.TokenTransaction, *model.Token, error) {
 	if req.AddUsedQuota == 0 {
-		return nil, nil, errors.New("add_used_quota must be greater than 0 for immediate consumption")
+		return processZeroQuotaImmediateConsume(ctx, token, userID, req, requestID, traceID)
 	}
 
 	var transactionID string
@@ -623,7 +625,7 @@ func processImmediateConsume(ctx context.Context, c *gin.Context, token *model.T
 
 	transaction, updatedToken, err := processPreConsume(ctx, c, token, userID, req, requestID, traceID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "pre-consume phase of immediate consume")
 	}
 
 	finalQuota := req.AddUsedQuota
@@ -634,7 +636,75 @@ func processImmediateConsume(ctx context.Context, c *gin.Context, token *model.T
 
 	transaction, updatedToken, err = processPostConsume(ctx, c, token, userID, &postReq, transaction)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "post-consume phase of immediate consume")
+	}
+
+	return transaction, updatedToken, nil
+}
+
+// processZeroQuotaImmediateConsume records a billing log and confirmed transaction
+// for a free tool invocation. Free MCP tool calls still need a unified audit trail,
+// so we persist a zero-quota log row and a finalized transaction without touching
+// token or user balances.
+func processZeroQuotaImmediateConsume(ctx context.Context, token *model.Token, userID int, req *consumeTokenRequest, requestID string, traceID string) (*model.TokenTransaction, *model.Token, error) {
+	var transactionID string
+	if req.TransactionID != nil {
+		transactionID = strings.TrimSpace(*req.TransactionID)
+	}
+	if transactionID == "" {
+		generated, err := generateTransactionID(ctx, token.Id)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "generate transaction id for zero-quota consume")
+		}
+		transactionID = generated
+		req.TransactionID = &transactionID
+	}
+
+	logEntry := &model.Log{
+		UserId:    userID,
+		ModelName: req.AddReason,
+		TokenName: token.Name,
+		Quota:     0,
+		Content:   buildPostConsumeLogContent(req.AddReason, 0, 0, transactionID),
+		RequestId: requestID,
+		TraceId:   traceID,
+	}
+	if req.ElapsedTimeMs != nil && *req.ElapsedTimeMs > 0 {
+		logEntry.ElapsedTime = *req.ElapsedTimeMs
+	}
+	model.RecordToolLog(ctx, logEntry)
+
+	confirmedAt := helper.GetTimestamp()
+	zeroQuota := int64(0)
+	transaction := &model.TokenTransaction{
+		TransactionID: transactionID,
+		TokenId:       token.Id,
+		UserId:        userID,
+		Status:        model.TokenTransactionStatusConfirmed,
+		PreQuota:      0,
+		FinalQuota:    &zeroQuota,
+		Reason:        req.AddReason,
+		RequestId:     requestID,
+		TraceId:       traceID,
+		ConfirmedAt:   &confirmedAt,
+		AutoConfirmed: false,
+	}
+	if logEntry.Id > 0 {
+		logID := logEntry.Id
+		transaction.LogId = &logID
+	}
+	if req.ElapsedTimeMs != nil && *req.ElapsedTimeMs > 0 {
+		elapsed := *req.ElapsedTimeMs
+		transaction.ElapsedTimeMs = &elapsed
+	}
+
+	if err := model.CreateTokenTransaction(ctx, transaction); err != nil {
+		return nil, nil, errors.Wrap(err, "create zero-quota token transaction")
+	}
+
+	updatedToken, err := model.GetTokenByIds(token.Id, userID)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "get token after zero-quota consume")
 	}
 
 	return transaction, updatedToken, nil
@@ -645,7 +715,7 @@ func autoConfirmExpiredTokenTransactions(ctx context.Context, c *gin.Context, to
 	now := helper.GetTimestamp()
 	transactions, err := model.AutoConfirmExpiredTokenTransactions(ctx, tokenID, now)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "auto confirm expired token transactions")
 	}
 
 	if len(transactions) == 0 {
@@ -747,7 +817,7 @@ func generateTransactionID(ctx context.Context, tokenID int) (string, error) {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return candidate, nil
 			}
-			return "", err
+			return "", errors.Wrap(err, "lookup token transaction candidate")
 		}
 	}
 
@@ -982,5 +1052,93 @@ func GetTokenTransactions(c *gin.Context) {
 		"message": "",
 		"data":    txns,
 		"total":   totalCount,
+	})
+}
+
+// AdminGetAllTokens lists tokens across users. Admin-only, read-only.
+// Query params: p, size, user_id (optional filter, 0/absent = all users), sort, order.
+func AdminGetAllTokens(c *gin.Context) {
+	p, _ := strconv.Atoi(c.Query("p"))
+	if p < 0 {
+		p = 0
+	}
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+	userId, _ := strconv.Atoi(c.Query("user_id"))
+	sortBy := c.Query("sort")
+	sortOrder := c.Query("order")
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+
+	tokens, total, err := model.GetAllTokensForAdmin(userId, p*size, size, sortBy, sortOrder)
+	if err != nil {
+		helper.RespondError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    tokens,
+		"total":   total,
+	})
+}
+
+// AdminSearchTokens searches tokens across users by name keyword. Admin-only, read-only.
+func AdminSearchTokens(c *gin.Context) {
+	keyword := c.Query("keyword")
+	p, _ := strconv.Atoi(c.Query("p"))
+	if p < 0 {
+		p = 0
+	}
+	size, _ := strconv.Atoi(c.Query("size"))
+	if size <= 0 {
+		size = config.DefaultItemsPerPage
+	}
+	if size > config.MaxItemsPerPage {
+		size = config.MaxItemsPerPage
+	}
+	sortBy := c.Query("sort")
+	sortOrder := c.Query("order")
+	if sortOrder == "" {
+		sortOrder = "desc"
+	}
+
+	tokens, total, err := model.SearchAllTokensForAdmin(keyword, p*size, size, sortBy, sortOrder)
+	if err != nil {
+		helper.RespondError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    tokens,
+		"total":   total,
+	})
+}
+
+// AdminGetToken returns a token by id regardless of owner. Admin-only, read-only.
+func AdminGetToken(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		helper.RespondError(c, errors.Wrap(err, "invalid token id"))
+		return
+	}
+	token, err := model.GetTokenById(id)
+	if err != nil {
+		helper.RespondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    token,
 	})
 }

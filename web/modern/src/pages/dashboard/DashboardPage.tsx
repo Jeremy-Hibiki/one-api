@@ -1,32 +1,33 @@
-import { ResponsivePageContainer } from "@/components/ui/responsive-container";
-import { TimestampDisplay } from "@/components/ui/timestamp";
-import { useAuthStore } from "@/lib/stores/auth";
-import { useLayoutEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { DashboardFilter } from "./components/DashboardFilter";
-import { Insights } from "./components/Insights";
-import { OverviewCards } from "./components/OverviewCards";
-import { TimeSeriesCharts } from "./components/TimeSeriesCharts";
-import { TopModels } from "./components/TopModels";
-import { UsageCharts } from "./components/UsageCharts";
-import { useDashboardCharts } from "./hooks/useDashboardCharts";
-import { useDashboardData } from "./hooks/useDashboardData";
+import { ResponsivePageContainer } from '@/components/ui/responsive-container';
+import { TimestampDisplay } from '@/components/ui/timestamp';
+import { useAuthStore } from '@/lib/stores/auth';
+import { useLayoutEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { CacheHeatmaps } from './components/CacheHeatmaps';
+import { DashboardFilter } from './components/DashboardFilter';
+import { Insights } from './components/Insights';
+import { OverviewCards } from './components/OverviewCards';
+import { TimeSeriesCharts } from './components/TimeSeriesCharts';
+import { ToolUsageCharts } from './components/ToolUsageCharts';
+import { TopModels } from './components/TopModels';
+import { UsageCharts } from './components/UsageCharts';
+import { useDashboardCharts } from './hooks/useDashboardCharts';
+import { useDashboardData } from './hooks/useDashboardData';
 
 export function DashboardPage() {
   const { t } = useTranslation();
   const { user } = useAuthStore();
   const [filtersReady, setFiltersReady] = useState(false);
-  const [statisticsMetric, setStatisticsMetric] = useState<
-    "tokens" | "requests" | "expenses"
-  >("tokens");
+  const [statisticsMetric, setStatisticsMetric] = useState<'tokens' | 'requests' | 'expenses'>('tokens');
+  const [toolStatisticsMetric, setToolStatisticsMetric] = useState<'requests' | 'expenses'>('requests');
 
   useLayoutEffect(() => {
-    if (typeof document === "undefined") {
+    if (typeof document === 'undefined') {
       return;
     }
 
     const active = document.activeElement as HTMLElement | null;
-    if (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName)) {
+    if (active && ['INPUT', 'SELECT', 'TEXTAREA'].includes(active.tagName)) {
       active.blur();
     }
 
@@ -50,6 +51,9 @@ export function DashboardPage() {
     rows,
     userRows,
     tokenRows,
+    toolRows,
+    toolUserRows,
+    toolTokenRows,
     loadStats,
     applyPreset,
     getMinDate,
@@ -64,32 +68,30 @@ export function DashboardPage() {
     userStackedData,
     tokenKeys,
     tokenStackedData,
+    toolKeys,
+    toolStackedData,
+    toolUserKeys,
+    toolUserStackedData,
+    toolTokenKeys,
+    toolTokenStackedData,
+    modelHeatmap,
+    userHeatmap,
+    tokenHeatmap,
     rangeTotals,
     modelLeaders,
     rangeInsights,
-  } = useDashboardCharts(rows, userRows, tokenRows, statisticsMetric);
+  } = useDashboardCharts(rows, userRows, tokenRows, toolRows, toolUserRows, toolTokenRows, statisticsMetric, toolStatisticsMetric);
 
   if (!user) {
-    return <div>{t("dashboard.login_required")}</div>;
+    return <div>{t('dashboard.login_required')}</div>;
   }
 
   return (
-    <ResponsivePageContainer
-      title={t("dashboard.title")}
-      description={t("dashboard.description")}
-    >
+    <ResponsivePageContainer title={t('dashboard.title')} description={t('dashboard.description')}>
       {loading && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div
-            className="flex flex-col items-center gap-3"
-            role="status"
-            aria-live="polite"
-          >
-            <span className="h-10 w-10 animate-spin rounded-full border-4 border-primary/20 border-t-primary" />
-            <p className="text-sm text-muted-foreground">
-              {t("dashboard.loading")}
-            </p>
-          </div>
+        <div className="flex items-center gap-3 mb-4 p-3 rounded-md border bg-muted/30" role="status" aria-live="polite">
+          <span className="h-5 w-5 animate-spin rounded-full border-2 border-primary/20 border-t-primary flex-shrink-0" />
+          <p className="text-sm text-muted-foreground">{t('dashboard.loading')}</p>
         </div>
       )}
 
@@ -113,50 +115,26 @@ export function DashboardPage() {
 
       {/* Error Message */}
       {dateError && (
-        <div
-          id="date-error"
-          className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md dark:bg-red-950/20 dark:border-red-800"
-          role="alert"
-          aria-live="polite"
-        >
+        <div id="date-error" className="mb-4 p-3 bg-destructive/5 border border-destructive/20 rounded-md" role="alert" aria-live="polite">
           <div className="flex items-center gap-2">
-            <svg
-              className="w-4 h-4 text-red-500"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
+            <svg className="w-4 h-4 text-destructive" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            <span className="text-sm font-medium text-red-800 dark:text-red-200">
-              {t("dashboard.errors.label")}
-            </span>
+            <span className="text-sm font-medium text-destructive">{t('dashboard.errors.label')}</span>
           </div>
-          <p className="text-sm text-red-700 dark:text-red-300 mt-1">
-            {dateError}
-          </p>
+          <p className="text-sm text-destructive/80 mt-1">{dateError}</p>
         </div>
       )}
 
       <div className="mb-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-6">
           <div>
-            <h2 className="text-xl font-semibold">
-              {t("dashboard.overview.title")}
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              {t("dashboard.overview.subtitle")}
-            </p>
+            <h2 className="text-xl font-semibold">{t('dashboard.overview.title')}</h2>
+            <p className="text-sm text-muted-foreground">{t('dashboard.overview.subtitle')}</p>
           </div>
           {lastUpdated && (
             <span className="text-xs text-muted-foreground flex items-center gap-1">
-              {t("dashboard.overview.updated")}
+              {t('dashboard.overview.updated')}
               <TimestampDisplay timestamp={lastUpdated} className="font-mono" />
             </span>
           )}
@@ -175,11 +153,7 @@ export function DashboardPage() {
 
         <TopModels modelLeaders={modelLeaders} />
 
-        <Insights
-          rangeInsights={rangeInsights}
-          totalModels={rangeTotals.uniqueModels}
-          totalRequests={rangeTotals.requests}
-        />
+        <Insights rangeInsights={rangeInsights} totalModels={rangeTotals.uniqueModels} totalRequests={rangeTotals.requests} />
 
         <TimeSeriesCharts timeSeries={timeSeries} />
 
@@ -192,6 +166,24 @@ export function DashboardPage() {
           tokenKeys={tokenKeys}
           statisticsMetric={statisticsMetric}
           setStatisticsMetric={setStatisticsMetric}
+        />
+
+        <ToolUsageCharts
+          toolStackedData={toolStackedData}
+          toolKeys={toolKeys}
+          toolUserStackedData={toolUserStackedData}
+          toolUserKeys={toolUserKeys}
+          toolTokenStackedData={toolTokenStackedData}
+          toolTokenKeys={toolTokenKeys}
+          toolStatisticsMetric={toolStatisticsMetric}
+          setToolStatisticsMetric={setToolStatisticsMetric}
+        />
+
+        <CacheHeatmaps
+          modelHeatmap={modelHeatmap}
+          userHeatmap={userHeatmap}
+          tokenHeatmap={tokenHeatmap}
+          statisticsMetric={statisticsMetric}
         />
       </div>
     </ResponsivePageContainer>

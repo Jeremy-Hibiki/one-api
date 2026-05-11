@@ -2,8 +2,10 @@ package anthropic
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,8 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func float64Ptr(v float64) *float64 {
@@ -48,8 +50,140 @@ func TestConvertRequest_ThinkingEnabledViaQuery(t *testing.T) {
 
 	if assert.NotNil(t, converted.Thinking) {
 		assert.Equal(t, "enabled", converted.Thinking.Type)
-		assert.Equal(t, 1024, converted.Thinking.BudgetTokens)
+		assert.Equal(t, 1024, *converted.Thinking.BudgetTokens)
 	}
+}
+
+// TestConvertRequest_AdaptiveThinkingStripsBudgetTokens verifies that when thinking type
+// is "adaptive", budget_tokens is stripped from the request to avoid Anthropic API rejection.
+// This is the exact scenario from the bug: user sends {"thinking":{"type":"adaptive"}}
+// and the converted request must NOT include budget_tokens.
+func TestConvertRequest_AdaptiveThinkingStripsBudgetTokens(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 8192,
+		Thinking: &model.Thinking{
+			Type: "adaptive",
+		},
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	if assert.NotNil(t, converted.Thinking) {
+		assert.Equal(t, "adaptive", converted.Thinking.Type)
+		assert.Nil(t, converted.Thinking.BudgetTokens, "budget_tokens must be nil for adaptive thinking")
+	}
+
+	// Verify JSON serialization does not include budget_tokens
+	jsonBytes, err := json.Marshal(converted.Thinking)
+	require.NoError(t, err)
+	assert.NotContains(t, string(jsonBytes), "budget_tokens",
+		"JSON output must not contain budget_tokens for adaptive thinking")
+}
+
+// TestConvertRequest_AdaptiveThinkingWithExplicitBudgetTokensStripped verifies that even
+// if a client mistakenly sends budget_tokens with adaptive type, it gets stripped.
+func TestConvertRequest_AdaptiveThinkingWithExplicitBudgetTokensStripped(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 8192,
+		Thinking: &model.Thinking{
+			Type:         "adaptive",
+			BudgetTokens: model.IntPtr(4096),
+		},
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	if assert.NotNil(t, converted.Thinking) {
+		assert.Equal(t, "adaptive", converted.Thinking.Type)
+		assert.Nil(t, converted.Thinking.BudgetTokens, "budget_tokens must be stripped for adaptive thinking")
+	}
+}
+
+// TestConvertRequest_AdaptiveThinkingDoesNotRequireMaxTokensOver1024 verifies that
+// adaptive thinking mode does not enforce the max_tokens > 1024 constraint
+// (which only applies to enabled thinking with explicit budget).
+func TestConvertRequest_AdaptiveThinkingDoesNotRequireMaxTokensOver1024(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 512,
+		Thinking: &model.Thinking{
+			Type: "adaptive",
+		},
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+	assert.NotNil(t, converted.Thinking)
+	assert.Equal(t, "adaptive", converted.Thinking.Type)
+}
+
+// TestConvertRequest_EnabledThinkingPreservesBudgetTokens verifies that enabled thinking
+// type continues to work with budget_tokens as before (backward compatibility).
+func TestConvertRequest_EnabledThinkingPreservesBudgetTokens(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 8192,
+		Thinking: &model.Thinking{
+			Type:         "enabled",
+			BudgetTokens: model.IntPtr(4096),
+		},
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	if assert.NotNil(t, converted.Thinking) {
+		assert.Equal(t, "enabled", converted.Thinking.Type)
+		require.NotNil(t, converted.Thinking.BudgetTokens)
+		assert.Equal(t, 4096, *converted.Thinking.BudgetTokens)
+	}
+
+	// Verify JSON serialization includes budget_tokens for enabled type
+	jsonBytes, err := json.Marshal(converted.Thinking)
+	require.NoError(t, err)
+	assert.Contains(t, string(jsonBytes), "budget_tokens",
+		"JSON output must contain budget_tokens for enabled thinking")
+}
+
+// TestConvertRequest_AdaptiveThinkingClearsMutuallyExclusiveParameters verifies that
+// adaptive thinking also clears temperature, top_k, and top_p like enabled thinking.
+func TestConvertRequest_AdaptiveThinkingClearsMutuallyExclusiveParameters(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 8192,
+		Thinking: &model.Thinking{
+			Type: "adaptive",
+		},
+		Temperature: float64Ptr(0.7),
+		TopP:        float64Ptr(0.5),
+		TopK:        intPtr(32),
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	assert.Nil(t, converted.Temperature, "temperature must be nil with adaptive thinking")
+	assert.Nil(t, converted.TopP, "top_p must be nil with adaptive thinking")
+	assert.Nil(t, converted.TopK, "top_k must be nil with adaptive thinking")
 }
 
 func TestConvertRequest_RejectsThinkingWhenMaxTokensTooSmall(t *testing.T) {
@@ -60,7 +194,7 @@ func TestConvertRequest_RejectsThinkingWhenMaxTokensTooSmall(t *testing.T) {
 		MaxTokens: 1024,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 1024,
+			BudgetTokens: model.IntPtr(1024),
 		},
 	}
 
@@ -77,7 +211,7 @@ func TestConvertRequest_ClearsMutuallyExclusiveParametersWhenThinkingEnabled(t *
 		MaxTokens: 4096,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 2048,
+			BudgetTokens: model.IntPtr(2048),
 		},
 		Temperature: float64Ptr(0.7),
 		TopP:        float64Ptr(0.5),
@@ -113,6 +247,53 @@ func TestConvertRequest_ClearsTopPWhenTemperatureSpecified(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_ClaudeOpus47StripsUnsupportedSampling(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:       "claude-opus-4-7",
+		MaxTokens:   4096,
+		Temperature: float64Ptr(0.8),
+		TopP:        float64Ptr(0.6),
+		TopK:        intPtr(32),
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	assert.Nil(t, converted.Temperature, "temperature should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.TopP, "top_p should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.TopK, "top_k should be stripped for Claude Opus 4.7")
+}
+
+func TestConvertRequest_ClaudeOpus47RewritesLegacyThinking(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-opus-4-7",
+		MaxTokens: 8192,
+		Thinking: &model.Thinking{
+			Type:         "enabled",
+			BudgetTokens: model.IntPtr(4096),
+		},
+		Temperature: float64Ptr(0.8),
+		TopP:        float64Ptr(0.6),
+		TopK:        intPtr(32),
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+	require.NotNil(t, converted.Thinking)
+
+	assert.Equal(t, "adaptive", converted.Thinking.Type)
+	assert.Nil(t, converted.Thinking.BudgetTokens, "budget_tokens should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.Temperature, "temperature should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.TopP, "top_p should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.TopK, "top_k should be stripped for Claude Opus 4.7")
+}
+
 func TestConvertRequest_DefaultsMissingFunctionSchema(t *testing.T) {
 	c := newThinkingContext(t, "/v1/chat/completions")
 
@@ -136,6 +317,79 @@ func TestConvertRequest_DefaultsMissingFunctionSchema(t *testing.T) {
 	require.NotNil(t, converted)
 	require.Len(t, converted.Tools, 1)
 	assert.Equal(t, "object", converted.Tools[0].InputSchema.Type)
+}
+
+// TestConvertRequest_MergesAllSystemMessagesToTopLevel verifies all OpenAI system messages are consolidated into Anthropic top-level system.
+func TestConvertRequest_MergesAllSystemMessagesToTopLevel(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	request := model.GeneralOpenAIRequest{
+		Model:     "claude-sonnet-4-5",
+		MaxTokens: 300,
+		Messages: []model.Message{
+			{Role: "system", Content: "You are a roleplay assistant."},
+			{Role: "user", Content: "hi"},
+			{Role: "system", Content: "Keep the tone warm and short."},
+			{Role: "assistant", Content: "Hello!"},
+		},
+	}
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	require.Equal(t, "You are a roleplay assistant.\n\nKeep the tone warm and short.", converted.System)
+	require.Len(t, converted.Messages, 2)
+	require.Equal(t, "user", converted.Messages[0].Role)
+	require.Equal(t, "assistant", converted.Messages[1].Role)
+
+	for _, message := range converted.Messages {
+		require.NotEqual(t, "system", message.Role)
+	}
+}
+
+// TestConvertRequest_UserProvidedPayload_SystemMovedOutOfMessages verifies the user-provided request shape does not leak system role into Anthropic messages.
+func TestConvertRequest_UserProvidedPayload_SystemMovedOutOfMessages(t *testing.T) {
+	c := newThinkingContext(t, "/v1/chat/completions")
+
+	const rawRequest = `{
+		"frequency_penalty": 0,
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 300,
+		"messages": [
+			{
+				"content": "Write Seraphina's next reply in a fictional chat between Seraphina and 林舒白.",
+				"role": "system"
+			},
+			{
+				"content": "林舒白: \"What is the glade?\"\\nSeraphina: *Seraphina smiles softly.*",
+				"role": "user"
+			}
+		]
+	}`
+
+	var request model.GeneralOpenAIRequest
+	err := json.Unmarshal([]byte(rawRequest), &request)
+	require.NoError(t, err)
+
+	converted, err := ConvertRequest(c, request)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	require.Equal(t, "Write Seraphina's next reply in a fictional chat between Seraphina and 林舒白.", converted.System)
+	require.Len(t, converted.Messages, 1)
+	require.Equal(t, "user", converted.Messages[0].Role)
+	require.NotContains(t, strings.ToLower(mustMarshalString(t, converted.Messages)), `"role":"system"`)
+}
+
+// mustMarshalString marshals value to JSON text and fails the test on error.
+func mustMarshalString(t *testing.T, value any) string {
+	t.Helper()
+
+	raw, err := json.Marshal(value)
+	require.NoError(t, err)
+
+	return string(raw)
 }
 
 func TestConvertRequest_EmptyAssistantMessageWithToolCalls(t *testing.T) {
@@ -256,6 +510,163 @@ func TestConvertRequest_EmptyAssistantMessageWithToolCalls(t *testing.T) {
 	assert.Equal(t, "tool_result", toolMessage.Content[0].Type)
 	assert.Equal(t, "It's sunny and 72F", toolMessage.Content[0].Content)
 	assert.Equal(t, "call_123", toolMessage.Content[0].ToolUseId)
+}
+
+func TestClaudeNativeHandler_MapsCacheCreationSplit(t *testing.T) {
+	t.Parallel()
+	c := newThinkingContext(t, "/v1/messages")
+
+	body := `{
+		"id":"msg_1",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-4.6-sonnet",
+		"content":[{"type":"text","text":"ok"}],
+		"stop_reason":"end_turn",
+		"usage":{
+			"input_tokens":1,
+			"output_tokens":8,
+			"cache_read_input_tokens":1024,
+			"cache_creation":{
+				"ephemeral_5m_input_tokens":63277,
+				"ephemeral_1h_input_tokens":17
+			}
+		}
+	}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	errResp, usage := ClaudeNativeHandler(c, resp, 1, "claude-4.6-sonnet")
+	require.Nil(t, errResp)
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.PromptTokensDetails)
+	assert.Equal(t, 1024, usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, 63277, usage.CacheWrite5mTokens)
+	assert.Equal(t, 17, usage.CacheWrite1hTokens)
+}
+
+func TestHandler_MapsCacheCreationLegacyFallback(t *testing.T) {
+	t.Parallel()
+	c := newThinkingContext(t, "/v1/messages")
+
+	body := `{
+		"id":"msg_2",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-4.6-sonnet",
+		"content":[{"type":"text","text":"ok"}],
+		"stop_reason":"end_turn",
+		"usage":{
+			"input_tokens":3,
+			"output_tokens":5,
+			"cache_read_input_tokens":21,
+			"cache_creation_input_tokens":88
+		}
+	}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	errResp, usage := Handler(c, resp, 3, "claude-4.6-sonnet")
+	require.Nil(t, errResp)
+	require.NotNil(t, usage)
+	require.NotNil(t, usage.PromptTokensDetails)
+	assert.Equal(t, 21, usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, 88, usage.CacheWrite5mTokens)
+	assert.Equal(t, 0, usage.CacheWrite1hTokens)
+}
+
+func TestConvertRequest_ToolRoleWithStructuredContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	openaiRequest := model.GeneralOpenAIRequest{
+		Model:     "claude-3.5-sonnet",
+		MaxTokens: 4096,
+		Messages: []model.Message{
+			{
+				Role:    "user",
+				Content: "Create a markdown file with an introduction.",
+			},
+			{
+				Role:    "assistant",
+				Content: "I'll create the file for you.",
+				ToolCalls: []model.Tool{
+					{
+						Id:   "call_001",
+						Type: "function",
+						Function: &model.Function{
+							Name:      "write_file",
+							Arguments: `{"file_path":"/tmp/a.md","content":"hello"}`,
+						},
+					},
+				},
+			},
+			{
+				Role: "tool",
+				Content: []any{
+					map[string]any{
+						"type": "text",
+						"text": "Successfully created and wrote to new file: /tmp/a.md.",
+					},
+				},
+				ToolCallId: "call_001",
+			},
+		},
+		Tools: []model.Tool{
+			{
+				Type: "function",
+				Function: &model.Function{
+					Name:        "write_file",
+					Description: "Write content to a file",
+					Parameters: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"file_path": map[string]any{"type": "string"},
+							"content":   map[string]any{"type": "string"},
+						},
+						"required": []string{"file_path", "content"},
+					},
+				},
+			},
+		},
+	}
+
+	claudeRequest, err := ConvertRequest(c, openaiRequest)
+	require.NoError(t, err)
+
+	for _, message := range claudeRequest.Messages {
+		assert.NotEqual(t, "tool", message.Role)
+	}
+
+	var toolResultMessage *Message
+	for i := range claudeRequest.Messages {
+		if claudeRequest.Messages[i].Role != "user" {
+			continue
+		}
+		if len(claudeRequest.Messages[i].Content) == 0 {
+			continue
+		}
+		if claudeRequest.Messages[i].Content[0].Type == "tool_result" {
+			toolResultMessage = &claudeRequest.Messages[i]
+			break
+		}
+	}
+
+	require.NotNil(t, toolResultMessage)
+	require.Len(t, toolResultMessage.Content, 1)
+	assert.Equal(t, "tool_result", toolResultMessage.Content[0].Type)
+	assert.Equal(t, "call_001", toolResultMessage.Content[0].ToolUseId)
+	assert.Equal(t, "Successfully created and wrote to new file: /tmp/a.md.", toolResultMessage.Content[0].Content)
 }
 
 func TestConvertRequest_AssistantMessageWithTextAndToolCalls(t *testing.T) {
@@ -516,7 +927,7 @@ func TestConvertRequest_ThinkingBlocksConversion(t *testing.T) {
 		MaxTokens: 2048,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 1024,
+			BudgetTokens: model.IntPtr(1024),
 		},
 		Messages: []model.Message{
 			{
@@ -586,7 +997,7 @@ func TestConvertRequest_ThinkingBlocksConversion(t *testing.T) {
 	// Verify thinking is enabled in the request
 	require.NotNil(t, claudeRequest.Thinking)
 	assert.Equal(t, "enabled", claudeRequest.Thinking.Type)
-	assert.Equal(t, 1024, claudeRequest.Thinking.BudgetTokens)
+	assert.Equal(t, 1024, *claudeRequest.Thinking.BudgetTokens)
 
 	// Find the assistant message
 	var assistantMessage *Message
@@ -654,7 +1065,7 @@ func TestConvertRequest_ThinkingBlocksWithComplexContent(t *testing.T) {
 		MaxTokens: 2048,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 1024,
+			BudgetTokens: model.IntPtr(1024),
 		},
 		Messages: []model.Message{
 			{
@@ -856,7 +1267,7 @@ func TestConvertRequest_BugScenario_FullWorkflow(t *testing.T) {
 		MaxTokens: 2048,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 1024,
+			BudgetTokens: model.IntPtr(1024),
 		},
 		Messages: []model.Message{
 			{
@@ -915,7 +1326,7 @@ func TestConvertRequest_BugScenario_FullWorkflow(t *testing.T) {
 		MaxTokens: 2048,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 1024,
+			BudgetTokens: model.IntPtr(1024),
 		},
 		Messages: []model.Message{
 			{
@@ -1112,4 +1523,181 @@ func TestConvertClaudeRequest_ClearsTopPWhenTemperatureProvided(t *testing.T) {
 
 	assert.NotNil(t, converted.Temperature, "temperature should be preserved")
 	assert.Nil(t, converted.TopP, "top_p should be cleared when temperature is provided")
+}
+
+func TestConvertClaudeRequest_ClaudeOpus47StripsSamplingAndRewritesThinking(t *testing.T) {
+	c := newThinkingContext(t, "/v1/messages")
+
+	claudeRequest := model.ClaudeRequest{
+		Model:     "claude-opus-4-7",
+		MaxTokens: 8192,
+		Messages:  []model.ClaudeMessage{{Role: "user", Content: "hello"}},
+		Thinking: &model.Thinking{
+			Type:         "enabled",
+			BudgetTokens: model.IntPtr(4096),
+		},
+		Temperature: float64Ptr(0.6),
+		TopP:        float64Ptr(0.5),
+		TopK:        intPtr(16),
+	}
+
+	converted, err := ConvertClaudeRequest(c, claudeRequest)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+	require.NotNil(t, converted.Thinking)
+
+	assert.Nil(t, converted.Temperature, "temperature should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.TopP, "top_p should be stripped for Claude Opus 4.7")
+	assert.Nil(t, converted.TopK, "top_k should be stripped for Claude Opus 4.7")
+	assert.Equal(t, "adaptive", converted.Thinking.Type)
+	assert.Nil(t, converted.Thinking.BudgetTokens, "budget_tokens should be stripped for Claude Opus 4.7")
+}
+
+func TestConvertClaudeRequest_PreservesThinkingAndSignature(t *testing.T) {
+	t.Parallel()
+	c := newThinkingContext(t, "/v1/messages")
+
+	signature := "ErQCCkYICxgCKkAshzhbP3C4+/base64=="
+	thinkingText := "I need to think about <html> & special chars"
+
+	claudeRequest := model.ClaudeRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 8192,
+		Messages: []model.ClaudeMessage{
+			{Role: "user", Content: "Hello"},
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{
+						"type":      "thinking",
+						"thinking":  thinkingText,
+						"signature": signature,
+					},
+					map[string]any{
+						"type": "text",
+						"text": "Hi there!",
+					},
+				},
+			},
+			{Role: "user", Content: "Follow up"},
+		},
+	}
+
+	converted, err := ConvertClaudeRequest(c, claudeRequest)
+	require.NoError(t, err)
+	require.NotNil(t, converted)
+
+	// Message 1 (index 1) is the assistant message with thinking block
+	assistantMsg := converted.Messages[1]
+	require.Len(t, assistantMsg.Content, 2)
+
+	// First content block should be thinking with signature preserved
+	thinkingBlock := assistantMsg.Content[0]
+	assert.Equal(t, "thinking", thinkingBlock.Type)
+	require.NotNil(t, thinkingBlock.Thinking)
+	assert.Equal(t, thinkingText, *thinkingBlock.Thinking)
+	require.NotNil(t, thinkingBlock.Signature)
+	assert.Equal(t, signature, *thinkingBlock.Signature)
+
+	// Second content block should be text
+	textBlock := assistantMsg.Content[1]
+	assert.Equal(t, "text", textBlock.Type)
+	assert.Equal(t, "Hi there!", textBlock.Text)
+}
+
+func TestConvertClaudeRequest_PreservesToolUseFields(t *testing.T) {
+	t.Parallel()
+	c := newThinkingContext(t, "/v1/messages")
+
+	claudeRequest := model.ClaudeRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 1024,
+		Messages: []model.ClaudeMessage{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{
+						"type":  "tool_use",
+						"id":    "toolu_123",
+						"name":  "get_weather",
+						"input": map[string]any{"location": "NYC"},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{
+						"type":        "tool_result",
+						"tool_use_id": "toolu_123",
+						"content":     "Sunny, 72°F",
+					},
+				},
+			},
+		},
+	}
+
+	converted, err := ConvertClaudeRequest(c, claudeRequest)
+	require.NoError(t, err)
+
+	// Assistant message with tool_use
+	toolUseBlock := converted.Messages[0].Content[0]
+	assert.Equal(t, "tool_use", toolUseBlock.Type)
+	assert.Equal(t, "toolu_123", toolUseBlock.Id)
+	assert.Equal(t, "get_weather", toolUseBlock.Name)
+	assert.NotNil(t, toolUseBlock.Input)
+
+	// User message with tool_result
+	toolResultBlock := converted.Messages[1].Content[0]
+	assert.Equal(t, "tool_result", toolResultBlock.Type)
+	assert.Equal(t, "toolu_123", toolResultBlock.ToolUseId)
+	assert.Equal(t, "Sunny, 72°F", toolResultBlock.Content)
+}
+
+func TestConvertClaudeRequest_PreservesMultipleThinkingSignatures(t *testing.T) {
+	t.Parallel()
+	c := newThinkingContext(t, "/v1/messages")
+
+	claudeRequest := model.ClaudeRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 8192,
+		Messages: []model.ClaudeMessage{
+			{Role: "user", Content: "Q1"},
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "thinking", "thinking": "thought1", "signature": "sig1=="},
+					map[string]any{"type": "text", "text": "A1"},
+				},
+			},
+			{Role: "user", Content: "Q2"},
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "thinking", "thinking": "thought2", "signature": "sig2=="},
+					map[string]any{"type": "text", "text": "A2"},
+					map[string]any{"type": "tool_use", "id": "t1", "name": "fn", "input": map[string]any{}},
+				},
+			},
+		},
+	}
+
+	converted, err := ConvertClaudeRequest(c, claudeRequest)
+	require.NoError(t, err)
+
+	// First assistant (index 1): thinking + text
+	msg1 := converted.Messages[1]
+	require.Len(t, msg1.Content, 2)
+	assert.Equal(t, "thinking", msg1.Content[0].Type)
+	require.NotNil(t, msg1.Content[0].Signature)
+	assert.Equal(t, "sig1==", *msg1.Content[0].Signature)
+
+	// Second assistant (index 3): thinking + text + tool_use
+	msg3 := converted.Messages[3]
+	require.Len(t, msg3.Content, 3)
+	assert.Equal(t, "thinking", msg3.Content[0].Type)
+	require.NotNil(t, msg3.Content[0].Signature)
+	assert.Equal(t, "sig2==", *msg3.Content[0].Signature)
+	assert.Equal(t, "tool_use", msg3.Content[2].Type)
+	assert.Equal(t, "t1", msg3.Content[2].Id)
 }

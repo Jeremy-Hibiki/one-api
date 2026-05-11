@@ -1,12 +1,13 @@
 package pricing
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor"
 )
 
 // TestResolveImagePricing_ChannelConfigMissingImageFallback verifies image pricing falls back
@@ -92,4 +93,75 @@ func TestGetVideoPricingWithThreeLayers_ChannelConfigMissingVideoFallback(t *tes
 	require.NotNil(t, cfg, "expected provider video pricing fallback")
 	require.InDelta(t, 0.10, cfg.PerSecondUsd, 0.0000001, "expected provider per-second pricing fallback")
 	require.Equal(t, "1280x720", cfg.BaseResolution, "expected provider base resolution fallback")
+}
+
+func TestResolveModelConfig_ChannelOverridePreservesCacheAndTiers(t *testing.T) {
+	const modelName = "claude-4.6-sonnet"
+	var channelConfigs map[string]model.ModelConfigLocal
+	err := json.Unmarshal([]byte(`{
+		"claude-4.6-sonnet": {
+			"ratio": 1.543,
+			"completion_ratio": 7.715,
+			"cached_input_ratio": 1.543,
+			"cache_write_5m_ratio": 1.543,
+			"cache_write_1h_ratio": 1.543,
+			"tiers": [
+				{
+					"input_token_threshold": 200000,
+					"ratio": 3.086,
+					"completion_ratio": 11.571,
+					"cached_input_ratio": 3.086,
+					"cache_write_5m_ratio": 3.086,
+					"cache_write_1h_ratio": 3.086
+				}
+			]
+		}
+	}`), &channelConfigs)
+	require.NoError(t, err)
+
+	cfg, ok := ResolveModelConfig(modelName, channelConfigs, nil)
+	require.True(t, ok)
+	require.InDelta(t, 1.543, cfg.CachedInputRatio, 0.0000001)
+	require.InDelta(t, 1.543, cfg.CacheWrite5mRatio, 0.0000001)
+	require.InDelta(t, 1.543, cfg.CacheWrite1hRatio, 0.0000001)
+	require.Len(t, cfg.Tiers, 1)
+	require.Equal(t, 200000, cfg.Tiers[0].InputTokenThreshold)
+	require.InDelta(t, 3.086, cfg.Tiers[0].Ratio, 0.0000001)
+	require.InDelta(t, 3.086, cfg.Tiers[0].CachedInputRatio, 0.0000001)
+	require.InDelta(t, 3.086, cfg.Tiers[0].CacheWrite5mRatio, 0.0000001)
+	require.InDelta(t, 3.086, cfg.Tiers[0].CacheWrite1hRatio, 0.0000001)
+}
+
+func TestResolveModelConfig_ChannelOverrideSortsUnorderedTiers(t *testing.T) {
+	const modelName = "tier-ordering-test"
+	var channelConfigs map[string]model.ModelConfigLocal
+	err := json.Unmarshal([]byte(`{
+		"tier-ordering-test": {
+			"ratio": 1.0,
+			"completion_ratio": 2.0,
+			"tiers": [
+				{
+					"input_token_threshold": 5000,
+					"ratio": 0.5
+				},
+				{
+					"input_token_threshold": 1000,
+					"ratio": 0.8,
+					"completion_ratio": 3.0
+				}
+			]
+		}
+	}`), &channelConfigs)
+	require.NoError(t, err)
+
+	cfg, ok := ResolveModelConfig(modelName, channelConfigs, nil)
+	require.True(t, ok)
+	require.Len(t, cfg.Tiers, 2)
+	require.Equal(t, 1000, cfg.Tiers[0].InputTokenThreshold)
+	require.Equal(t, 5000, cfg.Tiers[1].InputTokenThreshold)
+
+	eff := ResolveEffectivePricingFromConfig(6000, cfg)
+	require.InDelta(t, 0.5, eff.InputRatio, 0.0000001)
+	require.InDelta(t, 1.5, eff.OutputRatio, 0.0000001)
+	require.Equal(t, 5000, eff.AppliedTierThreshold)
 }

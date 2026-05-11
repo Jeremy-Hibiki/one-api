@@ -1,4 +1,9 @@
 {
+  "a11y": {
+    "close": "Fermer",
+    "close_drawer": "Fermer le tiroir",
+    "select_language": "Choisir la langue"
+  },
   "about": {
     "cta_models": "Voir les modèles pris en charge",
     "cta_repo": "Dépôt GitHub",
@@ -64,12 +69,16 @@
     "version": "Version",
     "welcome": "Bienvenue sur One API"
   },
+  "footer": {
+    "copyright": "© {{year}} One API. Tous droits réservés."
+  },
   "header": {
     "confirm_logout": "Confirmer la déconnexion",
     "log_out": "Se déconnecter",
     "logging_out": "Déconnexion...",
     "logout_description": "Êtes-vous sûr de vouloir vous déconnecter ? Vous devrez vous reconnecter pour accéder à votre tableau de bord.",
     "navigation": "Navigation",
+    "profile": "Profil",
     "signed_in_as": "Connecté en tant que"
   },
   "home": {
@@ -78,7 +87,16 @@
   "notFound": {
     "go_home": "Retourner à l’accueil",
     "message": "Page introuvable",
-    "redirecting": "Redirection vers l’accueil dans {{seconds}} s..."
+    "redirecting": "Redirection vers l’accueil dans {{seconds}} s...",
+    "stay_here": "Rester sur cette page"
+  },
+  "notice": {
+    "dismiss": "Fermer la notification"
+  },
+  "passkey_prompt": {
+    "dismiss": "Fermer",
+    "message": "Renforcez la sécurité de votre compte — configurez un passkey pour une connexion rapide sans mot de passe.",
+    "setup_button": "Configurer un Passkey"
   },
   "status": {
     "badges": {
@@ -136,5 +154,11 @@
     },
     "subtitle": "Surveillez l’état et les performances de tous les canaux",
     "title": "Statut des canaux"
+  },
+  "theme": {
+    "dark": "Sombre",
+    "light": "Clair",
+    "system": "Système",
+    "toggle": "Changer le thème"
   }
 }

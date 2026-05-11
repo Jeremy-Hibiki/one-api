@@ -1,96 +1,106 @@
 package zhipu
 
 import (
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
+	"maps"
+
+	"github.com/Laisky/one-api/relay/adaptor"
 )
 
-// ModelRatios contains all supported models and their pricing ratios
-// Model list is derived from the keys of this map, eliminating redundancy
-// Based on Zhipu pricing: https://open.bigmodel.cn/pricing
-var ModelRatios = map[string]adaptor.ModelConfig{
-	// GLM-4.6 (tiered)
-	"glm-4.6": {
-		Ratio:            2 * ratio.MilliTokensRmb,   // CNY 2/1M input tokens (input length [0,32], output [0,0.2])
-		CompletionRatio:  4,                          // CNY 8/1M output tokens
-		CachedInputRatio: 0.4 * ratio.MilliTokensRmb, // CNY 0.4/1M cached input
-		Tiers: []adaptor.ModelRatioTier{
-			{Ratio: 3 * ratio.MilliTokensRmb, CompletionRatio: 14.0 / 3.0, CachedInputRatio: 0.6 * ratio.MilliTokensRmb, InputTokenThreshold: 0},  // input [0,32], output [0.2+]
-			{Ratio: 4 * ratio.MilliTokensRmb, CompletionRatio: 16.0 / 4.0, CachedInputRatio: 0.8 * ratio.MilliTokensRmb, InputTokenThreshold: 32}, // input [32,200]
-		},
-	},
-	// GLM-4.5 (tiered)
-	"glm-4.5": {
-		Ratio:            2 * ratio.MilliTokensRmb,
-		CompletionRatio:  4,
-		CachedInputRatio: 0.4 * ratio.MilliTokensRmb,
-		Tiers: []adaptor.ModelRatioTier{
-			{Ratio: 3 * ratio.MilliTokensRmb, CompletionRatio: 14.0 / 3.0, CachedInputRatio: 0.6 * ratio.MilliTokensRmb, InputTokenThreshold: 0},
-			{Ratio: 4 * ratio.MilliTokensRmb, CompletionRatio: 16.0 / 4.0, CachedInputRatio: 0.8 * ratio.MilliTokensRmb, InputTokenThreshold: 32},
-		},
-	},
-	// GLM-4.5-X (tiered)
-	"glm-4.5-x": {
-		Ratio:            8 * ratio.MilliTokensRmb,
-		CompletionRatio:  2,
-		CachedInputRatio: 1.6 * ratio.MilliTokensRmb,
-		Tiers: []adaptor.ModelRatioTier{
-			{Ratio: 12 * ratio.MilliTokensRmb, CompletionRatio: 32.0 / 12.0, CachedInputRatio: 2.4 * ratio.MilliTokensRmb, InputTokenThreshold: 0},
-			{Ratio: 16 * ratio.MilliTokensRmb, CompletionRatio: 64.0 / 16.0, CachedInputRatio: 3.2 * ratio.MilliTokensRmb, InputTokenThreshold: 32},
-		},
-	},
-	// GLM-4.5-Air (tiered)
-	"glm-4.5-air": {
-		Ratio:            0.8 * ratio.MilliTokensRmb,
-		CompletionRatio:  2.5, // CNY 2/0.8 = 2.5
-		CachedInputRatio: 0.16 * ratio.MilliTokensRmb,
-		Tiers: []adaptor.ModelRatioTier{
-			{Ratio: 0.8 * ratio.MilliTokensRmb, CompletionRatio: 6.0 / 0.8, CachedInputRatio: 0.16 * ratio.MilliTokensRmb, InputTokenThreshold: 0},
-			{Ratio: 1.2 * ratio.MilliTokensRmb, CompletionRatio: 8.0 / 1.2, CachedInputRatio: 0.24 * ratio.MilliTokensRmb, InputTokenThreshold: 32},
-		},
-	},
-	// GLM-4.5-AirX (tiered)
-	"glm-4.5-airx": {
-		Ratio:            4 * ratio.MilliTokensRmb,
-		CompletionRatio:  3,
-		CachedInputRatio: 0.8 * ratio.MilliTokensRmb,
-		Tiers: []adaptor.ModelRatioTier{
-			{Ratio: 4 * ratio.MilliTokensRmb, CompletionRatio: 16.0 / 4.0, CachedInputRatio: 0.8 * ratio.MilliTokensRmb, InputTokenThreshold: 0},
-			{Ratio: 8 * ratio.MilliTokensRmb, CompletionRatio: 32.0 / 8.0, CachedInputRatio: 1.6 * ratio.MilliTokensRmb, InputTokenThreshold: 32},
-		},
-	},
-	// GLM-4.5-Flash (free)
-	"glm-4.5-flash": {
-		Ratio:            0,
-		CompletionRatio:  1,
-		CachedInputRatio: 0,
-	},
-	// GLM Zero Models
-	"glm-zero-preview": {Ratio: 0.7 * ratio.MilliTokensRmb, CompletionRatio: 1},
+// chatSamplingParameters returns the OpenAI-compatible sampling parameters supported
+// by Zhipu's chat-completions models. Zhipu accepts the standard OpenAI set plus
+// `top_k` and `repetition_penalty`. A new slice is returned on every call so callers
+// cannot mutate shared state.
+//
+// Source: https://docs.bigmodel.cn/cn/guide/start/concept-param
+func chatSamplingParameters() []string {
+	return []string{
+		"temperature",
+		"top_p",
+		"top_k",
+		"frequency_penalty",
+		"presence_penalty",
+		"repetition_penalty",
+		"stop",
+		"seed",
+		"max_tokens",
+		"logit_bias",
+	}
+}
 
-	// GLM-3 Models
-	"glm-3-turbo": {Ratio: 0.005 * ratio.MilliTokensRmb, CompletionRatio: 1},
+// reasoningSamplingParameters returns the constrained sampling-parameter set used
+// by Zhipu's GLM-Z1 (and other reasoning) models, which do not accept temperature
+// or penalty knobs.
+func reasoningSamplingParameters() []string {
+	return []string{"max_tokens", "stop", "seed"}
+}
 
-	// GLM Vision Models
-	"glm-4v-plus":  {Ratio: 0.1 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"glm-4v":       {Ratio: 0.05 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"glm-4v-flash": {Ratio: 0.001 * ratio.MilliTokensRmb, CompletionRatio: 1},
+// commonChatFeatures advertises the feature set that virtually every Zhipu chat
+// model supports (function-calling, JSON mode, structured outputs, web search).
+func commonChatFeatures() []string {
+	return []string{"tools", "json_mode", "structured_outputs", "web_search"}
+}
 
-	// CogView Image Models
-	"cogview-3-plus":  {Ratio: 0.08 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"cogview-3":       {Ratio: 0.04 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"cogview-3-flash": {Ratio: 0.008 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"cogviewx":        {Ratio: 0.04 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"cogviewx-flash":  {Ratio: 0.008 * ratio.MilliTokensRmb, CompletionRatio: 1},
+// reasoningChatFeatures appends `reasoning` to commonChatFeatures for thinking-capable models.
+func reasoningChatFeatures() []string {
+	return []string{"tools", "json_mode", "structured_outputs", "web_search", "reasoning"}
+}
 
-	// Character and Code Models
-	"charglm-4":  {Ratio: 0.1 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"emohaa":     {Ratio: 0.1 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"codegeex-4": {Ratio: 0.001 * ratio.MilliTokensRmb, CompletionRatio: 1},
+// textOutput returns a fresh `["text"]` slice for the OutputModalities field.
+func textOutput() []string { return []string{"text"} }
 
-	// Embedding Models
-	"embedding-3": {Ratio: 0.0005 * ratio.MilliTokensRmb, CompletionRatio: 1},
-	"embedding-2": {Ratio: 0.0005 * ratio.MilliTokensRmb, CompletionRatio: 1},
+// textInput returns a fresh `["text"]` slice for the InputModalities field.
+func textInput() []string { return []string{"text"} }
+
+// textImageInput returns a fresh `["text","image"]` slice for vision models.
+func textImageInput() []string { return []string{"text", "image"} }
+
+// textImageVideoFileInput returns the full multimodal input set used by GLM-4.6V.
+func textImageVideoFileInput() []string { return []string{"text", "image", "file"} }
+
+// ModelRatios contains all supported models and their pricing ratios.
+// The model list is derived from the keys of this map, eliminating redundancy.
+// Pricing source: https://open.bigmodel.cn/pricing.
+//
+// The map is composed from family-specific sub-maps defined in sibling files
+// (constants_text.go, constants_vision.go, constants_misc.go) so that each
+// file stays small and easy to navigate. Pricing entries are immutable.
+//
+// Metadata sources:
+//   - https://docs.bigmodel.cn/cn/guide/start/model-overview
+//   - https://docs.bigmodel.cn/cn/guide/models/text/* and /vlm/*
+//   - https://huggingface.co/zai-org for open-weight HuggingFace IDs.
+var ModelRatios = mergeModelRatios(
+	flagshipTextModels,
+	flagshipVisionModels,
+	languageModels,
+	reasoningModels,
+	multimodalModels,
+	imageGenerationModels,
+	utilityModels,
+	embeddingModels,
+	ocrModels,
+	legacyModels,
+)
+
+// mergeModelRatios consolidates the per-family pricing tables into the unified
+// ModelRatios map. It panics if any model key is duplicated across families,
+// which surfaces accidental overlaps at startup rather than silently masking
+// pricing entries.
+func mergeModelRatios(tables ...map[string]adaptor.ModelConfig) map[string]adaptor.ModelConfig {
+	total := 0
+	for _, t := range tables {
+		total += len(t)
+	}
+	merged := make(map[string]adaptor.ModelConfig, total)
+	for _, t := range tables {
+		for k := range t {
+			if _, exists := merged[k]; exists {
+				panic("zhipu: duplicate model key in ModelRatios: " + k)
+			}
+		}
+		maps.Copy(merged, t)
+	}
+	return merged
 }
 
 // ZhipuToolingDefaults captures Open BigModel's published search-tool pricing tiers (retrieved 2025-11-12).

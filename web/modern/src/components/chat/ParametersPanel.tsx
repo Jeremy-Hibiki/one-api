@@ -1,122 +1,128 @@
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
-import { Slider } from '@/components/ui/slider'
-import { Textarea } from '@/components/ui/textarea'
-import { Settings, X } from 'lucide-react'
-import React from 'react'
-import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router-dom'
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Separator } from '@/components/ui/separator';
+import { Slider } from '@/components/ui/slider';
+import { Textarea } from '@/components/ui/textarea';
+import type { ConnectionStatus } from '@/types/realtime';
+import { Loader2, Settings, Wifi, WifiOff, X } from 'lucide-react';
+import React from 'react';
+import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 
 interface Token {
-  id: number
-  name: string
-  key: string
-  status: number
-  remain_quota: number
-  unlimited_quota: boolean
-  used_quota: number
-  created_time: number
-  accessed_time: number
-  expired_time: number
-  models?: string | null
-  subnet?: string
+  id: number;
+  name: string;
+  key: string;
+  status: number;
+  remain_quota: number;
+  unlimited_quota: boolean;
+  used_quota: number;
+  created_time: number;
+  accessed_time: number;
+  expired_time: number;
+  models?: string | null;
+  subnet?: string;
 }
 
 interface PlaygroundModel {
-  id: string
-  object: string
-  owned_by: string
-  label?: string
-  channels?: string[]
+  id: string;
+  object: string;
+  owned_by: string;
+  label?: string;
+  channels?: string[];
 }
 
 interface SuggestionOption {
-  key: string
-  label: string
-  description?: string
+  key: string;
+  label: string;
+  description?: string;
 }
 
 interface AutosuggestInputProps {
-  value: string
-  disabled: boolean
-  isLoading: boolean
-  placeholder: string
-  suggestions: SuggestionOption[]
-  activeKey?: string
-  emptyText: string
-  onQueryChange: (value: string) => void
-  onSelect: (optionKey: string) => void
-  onClear: () => void
+  value: string;
+  disabled: boolean;
+  isLoading: boolean;
+  placeholder: string;
+  suggestions: SuggestionOption[];
+  activeKey?: string;
+  emptyText: string;
+  onQueryChange: (value: string) => void;
+  onSelect: (optionKey: string) => void;
+  onClear: () => void;
 }
 
 interface ParametersPanelProps {
   // Mobile state
-  isMobileSidebarOpen: boolean
-  onMobileSidebarClose: () => void
+  isMobileSidebarOpen: boolean;
+  onMobileSidebarClose: () => void;
 
   // Loading states
-  isLoadingTokens: boolean
-  isLoadingModels: boolean
-  isLoadingChannels: boolean
+  isLoadingTokens: boolean;
+  isLoadingModels: boolean;
+  isLoadingChannels: boolean;
 
   // Data
-  tokens: Token[]
-  models: PlaygroundModel[]
+  tokens: Token[];
+  models: PlaygroundModel[];
 
   // Selected values
-  selectedToken: string
-  selectedModel: string
-  selectedChannel: string
-  channelInputValue: string
-  channelSuggestions: SuggestionOption[]
-  modelInputValue: string
-  modelSuggestions: SuggestionOption[]
-  onTokenChange: (value: string) => void
-  onChannelQueryChange: (value: string) => void
-  onChannelSelect: (value: string) => void
-  onChannelClear: () => void
-  onModelQueryChange: (value: string) => void
-  onModelSelect: (value: string) => void
-  onModelClear: () => void
+  selectedToken: string;
+  selectedModel: string;
+  selectedChannel: string;
+  channelInputValue: string;
+  channelSuggestions: SuggestionOption[];
+  modelInputValue: string;
+  modelSuggestions: SuggestionOption[];
+  onTokenChange: (value: string) => void;
+  onChannelQueryChange: (value: string) => void;
+  onChannelSelect: (value: string) => void;
+  onChannelClear: () => void;
+  onModelQueryChange: (value: string) => void;
+  onModelSelect: (value: string) => void;
+  onModelClear: () => void;
 
   // Parameters
-  temperature: number[]
-  maxTokens: number[]
-  topP: number[]
-  topK: number[]
-  frequencyPenalty: number[]
-  presencePenalty: number[]
-  maxCompletionTokens: number[]
-  stopSequences: string
-  reasoningEffort: string
-  showReasoningContent: boolean
-  thinkingEnabled: boolean
-  thinkingBudgetTokens: number[]
-  systemMessage: string
+  temperature: number[];
+  maxTokens: number[];
+  topP: number[];
+  topK: number[];
+  frequencyPenalty: number[];
+  presencePenalty: number[];
+  maxCompletionTokens: number[];
+  stopSequences: string;
+  reasoningEffort: string;
+  showReasoningContent: boolean;
+  thinkingEnabled: boolean;
+  thinkingBudgetTokens: number[];
+  systemMessage: string;
 
   // Parameter setters
-  onTemperatureChange: (value: number[]) => void
-  onMaxTokensChange: (value: number[]) => void
-  onTopPChange: (value: number[]) => void
-  onTopKChange: (value: number[]) => void
-  onFrequencyPenaltyChange: (value: number[]) => void
-  onPresencePenaltyChange: (value: number[]) => void
-  onMaxCompletionTokensChange: (value: number[]) => void
-  onStopSequencesChange: (value: string) => void
-  onReasoningEffortChange: (value: string) => void
-  onShowReasoningContentChange: (checked: boolean) => void
-  onThinkingEnabledChange: (checked: boolean) => void
-  onThinkingBudgetTokensChange: (value: number[]) => void
-  onSystemMessageChange: (value: string) => void
+  onTemperatureChange: (value: number[]) => void;
+  onMaxTokensChange: (value: number[]) => void;
+  onTopPChange: (value: number[]) => void;
+  onTopKChange: (value: number[]) => void;
+  onFrequencyPenaltyChange: (value: number[]) => void;
+  onPresencePenaltyChange: (value: number[]) => void;
+  onMaxCompletionTokensChange: (value: number[]) => void;
+  onStopSequencesChange: (value: string) => void;
+  onReasoningEffortChange: (value: string) => void;
+  onShowReasoningContentChange: (checked: boolean) => void;
+  onThinkingEnabledChange: (checked: boolean) => void;
+  onThinkingBudgetTokensChange: (value: number[]) => void;
+  onSystemMessageChange: (value: string) => void;
 
   // Model capabilities
-  modelCapabilities: Record<string, any>
+  modelCapabilities: Record<string, any>;
+
+  // Realtime mode
+  connectionStatus?: ConnectionStatus;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
 }
 
 const AutosuggestInput: React.FC<AutosuggestInputProps> = ({
@@ -129,65 +135,66 @@ const AutosuggestInput: React.FC<AutosuggestInputProps> = ({
   emptyText,
   onQueryChange,
   onSelect,
-  onClear
+  onClear,
 }) => {
-  const [open, setOpen] = React.useState(false)
-  const containerRef = React.useRef<HTMLDivElement | null>(null)
+  const [open, setOpen] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     if (!open) {
-      return
+      return;
     }
 
     const handleClickOutside = (event: MouseEvent) => {
       if (!containerRef.current) {
-        return
+        return;
       }
       if (!containerRef.current.contains(event.target as Node)) {
-        setOpen(false)
+        setOpen(false);
       }
-    }
+    };
 
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [open])
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
 
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    onQueryChange(event.target.value)
+    onQueryChange(event.target.value);
     if (!isLoading && !disabled) {
-      setOpen(true)
+      setOpen(true);
     }
-  }
+  };
 
   const handleFocus = () => {
     if (!isLoading && !disabled) {
-      setOpen(true)
+      setOpen(true);
     }
-  }
+  };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === 'Enter' && suggestions.length > 0) {
-      event.preventDefault()
-      onSelect(suggestions[0].key)
-      setOpen(false)
+      event.preventDefault();
+      onSelect(suggestions[0].key);
+      setOpen(false);
     }
     if (event.key === 'Escape') {
-      setOpen(false)
-        ; (event.target as HTMLInputElement).blur()
+      setOpen(false);
+      (event.target as HTMLInputElement).blur();
     }
-  }
+  };
 
   const handleOptionSelect = (optionKey: string) => {
-    onSelect(optionKey)
-    setOpen(false)
-  }
+    onSelect(optionKey);
+    setOpen(false);
+  };
 
   const handleClear = () => {
-    onClear()
-    setOpen(false)
-  }
+    onClear();
+    setOpen(false);
+  };
 
-  const showDropdown = open && !disabled && !isLoading && (suggestions.length > 0 || value.trim().length > 0)
+  const showDropdown = open && !disabled && !isLoading && (suggestions.length > 0 || value.trim().length > 0);
 
   return (
     <div className="relative" ref={containerRef}>
@@ -215,13 +222,11 @@ const AutosuggestInput: React.FC<AutosuggestInputProps> = ({
       {showDropdown && (
         <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover text-popover-foreground shadow-md">
           {suggestions.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-muted-foreground">
-              {emptyText}
-            </div>
+            <div className="px-3 py-2 text-sm text-muted-foreground">{emptyText}</div>
           ) : (
             <ul className="max-h-60 overflow-y-auto py-1">
               {suggestions.map((option) => {
-                const isActive = option.key === activeKey
+                const isActive = option.key === activeKey;
                 return (
                   <li key={option.key}>
                     <button
@@ -231,20 +236,18 @@ const AutosuggestInput: React.FC<AutosuggestInputProps> = ({
                       onClick={() => handleOptionSelect(option.key)}
                     >
                       <span>{option.label}</span>
-                      {option.description && (
-                        <span className="text-xs text-muted-foreground">{option.description}</span>
-                      )}
+                      {option.description && <span className="text-xs text-muted-foreground">{option.description}</span>}
                     </button>
                   </li>
-                )
+                );
               })}
             </ul>
           )}
         </div>
       )}
     </div>
-  )
-}
+  );
+};
 
 export function ParametersPanel({
   isMobileSidebarOpen,
@@ -294,39 +297,46 @@ export function ParametersPanel({
   onThinkingEnabledChange,
   onThinkingBudgetTokensChange,
   onSystemMessageChange,
-  modelCapabilities
+  modelCapabilities,
+  connectionStatus,
+  onConnect,
+  onDisconnect,
 }: ParametersPanelProps) {
-  const { t } = useTranslation()
+  const { t } = useTranslation();
+
+  const isRealtime = modelCapabilities.isRealtime === true;
+  const realtimeStatus: ConnectionStatus = connectionStatus ?? 'disconnected';
+  const lockSelectors = isRealtime && realtimeStatus === 'connected';
+  const temperatureMin = isRealtime ? 0.6 : 0;
+  const temperatureMax = isRealtime ? 1.2 : 2;
+  const temperatureStep = isRealtime ? 0.05 : 0.1;
+  const displayedTemperature = isRealtime ? [Math.min(Math.max(temperature[0] ?? 0.8, 0.6), 1.2)] : temperature;
 
   const modelPlaceholder = isLoadingModels
     ? t('playground.parameters.model.loading')
     : models.length === 0
       ? t('playground.parameters.model.no_models')
-      : t('playground.parameters.model.search_placeholder')
+      : t('playground.parameters.model.search_placeholder');
 
-  const isModelInputDisabled = isLoadingModels || models.length === 0
+  const isModelInputDisabled = isLoadingModels || models.length === 0 || lockSelectors;
 
-  const modelEmptyText = models.length === 0
-    ? t('playground.parameters.model.no_models_for_selection')
-    : t('playground.parameters.model.no_match')
+  const modelEmptyText =
+    models.length === 0 ? t('playground.parameters.model.no_models_for_selection') : t('playground.parameters.model.no_match');
 
   return (
-    <div className={`
+    <div
+      className={`
       ${isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
       lg:translate-x-0 lg:relative fixed inset-y-0 left-0 z-40
       w-80 lg:w-80 xl:w-96 border-r bg-card/95 lg:bg-card/50 backdrop-blur-sm
       p-4 space-y-4 overflow-y-auto h-screen pt-20 lg:pt-4
       transition-transform duration-300 ease-in-out
       lg:transition-none
-    `}>
+    `}
+    >
       {/* Close button for mobile */}
       <div className="flex justify-end lg:hidden mb-4">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onMobileSidebarClose}
-          className="p-2"
-        >
+        <Button variant="ghost" size="sm" onClick={onMobileSidebarClose} className="p-2">
           <X className="h-4 w-4" />
         </Button>
       </div>
@@ -350,15 +360,17 @@ export function ParametersPanel({
                 </div>
               )}
             </div>
-            <Select
-              value={selectedToken}
-              onValueChange={onTokenChange}
-              disabled={isLoadingTokens}
-            >
-              <SelectTrigger className={isLoadingTokens ? "opacity-50" : ""}>
-                <SelectValue placeholder={
-                  isLoadingTokens ? t('playground.parameters.token.loading') : tokens.length === 0 ? t('playground.parameters.token.no_tokens') : t('playground.parameters.token.select_placeholder')
-                } />
+            <Select value={selectedToken} onValueChange={onTokenChange} disabled={isLoadingTokens || lockSelectors}>
+              <SelectTrigger className={isLoadingTokens ? 'opacity-50' : ''}>
+                <SelectValue
+                  placeholder={
+                    isLoadingTokens
+                      ? t('playground.parameters.token.loading')
+                      : tokens.length === 0
+                        ? t('playground.parameters.token.no_tokens')
+                        : t('playground.parameters.token.select_placeholder')
+                  }
+                />
               </SelectTrigger>
               <SelectContent>
                 {tokens.map((token) => (
@@ -375,7 +387,10 @@ export function ParametersPanel({
             </Select>
             {tokens.length === 0 && !isLoadingTokens && (
               <div className="text-xs text-muted-foreground">
-                {t('playground.parameters.token.no_enabled')} <Link to="/tokens" className="text-primary hover:underline">{t('playground.parameters.token.create_link')}</Link>
+                {t('playground.parameters.token.no_enabled')}{' '}
+                <Link to="/tokens" className="text-primary hover:underline">
+                  {t('playground.parameters.token.create_link')}
+                </Link>
               </div>
             )}
           </div>
@@ -395,7 +410,7 @@ export function ParametersPanel({
             </div>
             <AutosuggestInput
               value={channelInputValue}
-              disabled={isLoadingChannels}
+              disabled={isLoadingChannels || lockSelectors}
               isLoading={isLoadingChannels}
               placeholder={isLoadingChannels ? t('playground.parameters.channel.loading') : t('playground.parameters.channel.placeholder')}
               suggestions={channelSuggestions}
@@ -448,9 +463,56 @@ export function ParametersPanel({
 
           <Separator />
 
+          {/* Realtime */}
+          {isRealtime && (
+            <>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-medium">{t('playground.realtime.title')}</Label>
+                  {realtimeStatus === 'connected' ? (
+                    <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30 gap-1.5">
+                      <Wifi className="h-3 w-3" />
+                      {t('playground.realtime.connected')}
+                    </Badge>
+                  ) : realtimeStatus === 'connecting' ? (
+                    <Badge className="bg-amber-500/15 text-amber-600 border-amber-500/30 gap-1.5">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      {t('playground.realtime.connecting')}
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary" className="gap-1.5">
+                      <WifiOff className="h-3 w-3" />
+                      {t('playground.realtime.disconnected')}
+                    </Badge>
+                  )}
+                </div>
+                {realtimeStatus === 'disconnected' ? (
+                  <Button className="w-full gap-2" onClick={() => onConnect?.()} disabled={!selectedToken || !selectedModel}>
+                    <Wifi className="h-4 w-4" />
+                    {t('playground.realtime.connect')}
+                  </Button>
+                ) : realtimeStatus === 'connecting' ? (
+                  <Button className="w-full gap-2" disabled>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {t('playground.realtime.connecting')}
+                  </Button>
+                ) : (
+                  <Button className="w-full gap-2" variant="destructive" onClick={() => onDisconnect?.()}>
+                    <WifiOff className="h-4 w-4" />
+                    {t('playground.realtime.disconnect')}
+                  </Button>
+                )}
+              </div>
+
+              <Separator />
+            </>
+          )}
+
           {/* System Message */}
           <div className="space-y-2">
-            <Label className="text-sm font-medium">{t('playground.parameters.system_message.label')}</Label>
+            <Label className="text-sm font-medium">
+              {isRealtime ? t('playground.realtime.instructions') : t('playground.parameters.system_message.label')}
+            </Label>
             <Textarea
               value={systemMessage}
               onChange={(e) => onSystemMessageChange(e.target.value)}
@@ -458,9 +520,7 @@ export function ParametersPanel({
               className="min-h-[100px] max-h-[200px] resize-y text-sm"
               rows={4}
             />
-            <div className="text-xs text-muted-foreground">
-              {t('playground.parameters.system_message.description')}
-            </div>
+            <div className="text-xs text-muted-foreground">{t('playground.parameters.system_message.description')}</div>
           </div>
 
           {/* Temperature */}
@@ -468,20 +528,18 @@ export function ParametersPanel({
             <div className="flex justify-between items-center">
               <Label className="text-sm font-medium">{t('playground.parameters.temperature.label')}</Label>
               <Badge variant="outline" className="text-xs px-1.5 py-0.5">
-                {temperature[0]}
+                {displayedTemperature[0]}
               </Badge>
             </div>
             <Slider
-              value={temperature}
+              value={displayedTemperature}
               onValueChange={onTemperatureChange}
-              max={2}
-              min={0}
-              step={0.1}
+              max={temperatureMax}
+              min={temperatureMin}
+              step={temperatureStep}
               className="w-full"
             />
-            <div className="text-xs text-muted-foreground">
-              {t('playground.parameters.temperature.description')}
-            </div>
+            <div className="text-xs text-muted-foreground">{t('playground.parameters.temperature.description')}</div>
           </div>
 
           <Separator />
@@ -494,23 +552,14 @@ export function ParametersPanel({
                 {maxTokens[0]}
               </Badge>
             </div>
-            <Slider
-              value={maxTokens}
-              onValueChange={onMaxTokensChange}
-              max={128000}
-              min={1}
-              step={1}
-              className="w-full"
-            />
-            <div className="text-xs text-muted-foreground">
-              {t('playground.parameters.max_tokens.description')}
-            </div>
+            <Slider value={maxTokens} onValueChange={onMaxTokensChange} max={128000} min={1} step={1} className="w-full" />
+            <div className="text-xs text-muted-foreground">{t('playground.parameters.max_tokens.description')}</div>
           </div>
 
           <Separator />
 
           {/* Top P - Only show for supported models */}
-          {modelCapabilities.supportsTopP == true && (
+          {modelCapabilities.supportsTopP == true && !isRealtime && (
             <div className="space-y-2">
               <div className="flex justify-between items-center">
                 <Label className="text-sm font-medium">{t('playground.parameters.top_p.label')}</Label>
@@ -518,24 +567,15 @@ export function ParametersPanel({
                   {topP[0]}
                 </Badge>
               </div>
-              <Slider
-                value={topP}
-                onValueChange={onTopPChange}
-                max={1}
-                min={0}
-                step={0.1}
-                className="w-full"
-              />
-              <div className="text-xs text-muted-foreground">
-                {t('playground.parameters.top_p.description')}
-              </div>
+              <Slider value={topP} onValueChange={onTopPChange} max={1} min={0} step={0.1} className="w-full" />
+              <div className="text-xs text-muted-foreground">{t('playground.parameters.top_p.description')}</div>
             </div>
           )}
 
           <Separator />
 
           {/* Top K - Only show for supported models */}
-          {modelCapabilities.supportsTopK == true && (
+          {modelCapabilities.supportsTopK == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
@@ -544,24 +584,15 @@ export function ParametersPanel({
                     {topK[0]}
                   </Badge>
                 </div>
-                <Slider
-                  value={topK}
-                  onValueChange={onTopKChange}
-                  max={100}
-                  min={1}
-                  step={1}
-                  className="w-full"
-                />
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.top_k.description')}
-                </div>
+                <Slider value={topK} onValueChange={onTopKChange} max={100} min={1} step={1} className="w-full" />
+                <div className="text-xs text-muted-foreground">{t('playground.parameters.top_k.description')}</div>
               </div>
               <Separator />
             </>
           )}
 
           {/* Frequency Penalty - Only show for supported models */}
-          {modelCapabilities.supportsFrequencyPenalty == true && (
+          {modelCapabilities.supportsFrequencyPenalty == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
@@ -570,24 +601,15 @@ export function ParametersPanel({
                     {frequencyPenalty[0]}
                   </Badge>
                 </div>
-                <Slider
-                  value={frequencyPenalty}
-                  onValueChange={onFrequencyPenaltyChange}
-                  max={2}
-                  min={-2}
-                  step={0.1}
-                  className="w-full"
-                />
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.frequency_penalty.description')}
-                </div>
+                <Slider value={frequencyPenalty} onValueChange={onFrequencyPenaltyChange} max={2} min={-2} step={0.1} className="w-full" />
+                <div className="text-xs text-muted-foreground">{t('playground.parameters.frequency_penalty.description')}</div>
               </div>
               <Separator />
             </>
           )}
 
           {/* Presence Penalty - Only show for supported models */}
-          {modelCapabilities.supportsPresencePenalty == true && (
+          {modelCapabilities.supportsPresencePenalty == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
@@ -596,24 +618,15 @@ export function ParametersPanel({
                     {presencePenalty[0]}
                   </Badge>
                 </div>
-                <Slider
-                  value={presencePenalty}
-                  onValueChange={onPresencePenaltyChange}
-                  max={2}
-                  min={-2}
-                  step={0.1}
-                  className="w-full"
-                />
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.presence_penalty.description')}
-                </div>
+                <Slider value={presencePenalty} onValueChange={onPresencePenaltyChange} max={2} min={-2} step={0.1} className="w-full" />
+                <div className="text-xs text-muted-foreground">{t('playground.parameters.presence_penalty.description')}</div>
               </div>
               <Separator />
             </>
           )}
 
           {/* Max Completion Tokens - Only show for supported models */}
-          {modelCapabilities.supportsMaxCompletionTokens == true && (
+          {modelCapabilities.supportsMaxCompletionTokens == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
@@ -630,16 +643,14 @@ export function ParametersPanel({
                   step={1}
                   className="w-full"
                 />
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.max_completion_tokens.description')}
-                </div>
+                <div className="text-xs text-muted-foreground">{t('playground.parameters.max_completion_tokens.description')}</div>
               </div>
               <Separator />
             </>
           )}
 
           {/* Stop Sequences - Only show for supported models */}
-          {modelCapabilities.supportsStop == true && (
+          {modelCapabilities.supportsStop == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <Label className="text-sm font-medium">{t('playground.parameters.stop_sequences.label')}</Label>
@@ -649,16 +660,14 @@ export function ParametersPanel({
                   placeholder={t('playground.parameters.stop_sequences.placeholder')}
                   className="w-full"
                 />
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.stop_sequences.description')}
-                </div>
+                <div className="text-xs text-muted-foreground">{t('playground.parameters.stop_sequences.description')}</div>
               </div>
               <Separator />
             </>
           )}
 
           {/* Reasoning Effort - Only show for supported models */}
-          {modelCapabilities.supportsReasoningEffort == true && (
+          {modelCapabilities.supportsReasoningEffort == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <Label className="text-sm font-medium">{t('playground.parameters.reasoning_effort.label')}</Label>
@@ -673,16 +682,14 @@ export function ParametersPanel({
                     <SelectItem value="high">{t('playground.parameters.reasoning_effort.options.high')}</SelectItem>
                   </SelectContent>
                 </Select>
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.reasoning_effort.description')}
-                </div>
+                <div className="text-xs text-muted-foreground">{t('playground.parameters.reasoning_effort.description')}</div>
               </div>
               <Separator />
             </>
           )}
 
           {/* Extended Thinking - Only show for supported Claude models */}
-          {modelCapabilities.supportsThinking == true && (
+          {modelCapabilities.supportsThinking == true && !isRealtime && (
             <>
               <div className="space-y-2">
                 <div className="flex items-center space-x-2">
@@ -692,15 +699,10 @@ export function ParametersPanel({
                     onCheckedChange={(checked) => onThinkingEnabledChange(!!checked)}
                   />
                   <div className="space-y-1 leading-none">
-                    <Label
-                      htmlFor="thinking-enabled"
-                      className="text-sm font-medium cursor-pointer"
-                    >
+                    <Label htmlFor="thinking-enabled" className="text-sm font-medium cursor-pointer">
                       {t('playground.parameters.extended_thinking.label')}
                     </Label>
-                    <div className="text-xs text-muted-foreground">
-                      {t('playground.parameters.extended_thinking.description')}
-                    </div>
+                    <div className="text-xs text-muted-foreground">{t('playground.parameters.extended_thinking.description')}</div>
                   </div>
                 </div>
               </div>
@@ -722,9 +724,7 @@ export function ParametersPanel({
                     step={256}
                     className="w-full"
                   />
-                  <div className="text-xs text-muted-foreground">
-                    {t('playground.parameters.thinking_budget.description')}
-                  </div>
+                  <div className="text-xs text-muted-foreground">{t('playground.parameters.thinking_budget.description')}</div>
                 </div>
               )}
 
@@ -735,29 +735,25 @@ export function ParametersPanel({
           <Separator />
 
           {/* Show Reasoning Content */}
-          <div className="space-y-2">
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="show-reasoning"
-                checked={showReasoningContent}
-                onCheckedChange={(checked) => onShowReasoningContentChange(!!checked)}
-              />
-              <div className="space-y-1 leading-none">
-                <Label
-                  htmlFor="show-reasoning"
-                  className="text-sm font-medium cursor-pointer"
-                >
-                  {t('playground.parameters.show_reasoning.label')}
-                </Label>
-                <div className="text-xs text-muted-foreground">
-                  {t('playground.parameters.show_reasoning.description')}
+          {!isRealtime && (
+            <div className="space-y-2">
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="show-reasoning"
+                  checked={showReasoningContent}
+                  onCheckedChange={(checked) => onShowReasoningContentChange(!!checked)}
+                />
+                <div className="space-y-1 leading-none">
+                  <Label htmlFor="show-reasoning" className="text-sm font-medium cursor-pointer">
+                    {t('playground.parameters.show_reasoning.label')}
+                  </Label>
+                  <div className="text-xs text-muted-foreground">{t('playground.parameters.show_reasoning.description')}</div>
                 </div>
               </div>
             </div>
-          </div>
-
+          )}
         </CardContent>
       </Card>
     </div>
-  )
+  );
 }

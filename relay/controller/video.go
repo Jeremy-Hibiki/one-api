@@ -17,21 +17,21 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/billing"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 // RelayVideoHelper handles OpenAI /v1/videos requests, performing quota accounting
@@ -137,9 +137,6 @@ func RelayVideoHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		if userQuota-usedQuota < 0 {
 			return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 		}
-		if err := model.CacheDecreaseUserQuota(ctx, userId, usedQuota); err != nil {
-			return openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
-		}
 
 		tokenQuota := c.GetInt64(ctxkey.TokenQuota)
 		tokenQuotaUnlimited := c.GetBool(ctxkey.TokenQuotaUnlimited)
@@ -151,15 +148,25 @@ func RelayVideoHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			if err := model.PreConsumeTokenQuota(ctx, tokenId, preConsumedQuota); err != nil {
 				return openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
 			}
+			syncUserQuotaCacheAfterPreConsume(ctx, userId, preConsumedQuota, "video_preconsume")
+
+			// Billing audit safety net
+			markPreConsumed(c, preConsumedQuota)
+			defer billingAuditSafetyNet(c)
+
+			provisionalLogId := recordProvisionalLog(c, meta, userVisibleModelName(meta, videoRequest.Model), preConsumedQuota)
+			c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
 		}
 	}
 
 	succeed := false
 	requestId := c.GetString(ctxkey.RequestId)
 	traceId := tracing.GetTraceID(c)
+	provLogID := c.GetInt(ctxkey.ProvisionalLogId)
 
 	defer func() {
 		if !succeed {
+			markBillingReconciled(c)
 			if preConsumedQuota > 0 {
 				quotaToReturn := preConsumedQuota
 				graceful.GoCritical(ctx, "videoRollbackPreConsumed", func(bgctx context.Context) {
@@ -167,6 +174,13 @@ func RelayVideoHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 						gmw.GetLogger(bgctx).Error("error rolling back pre-consumed quota", zap.Error(err))
 					}
 				})
+			}
+			if provLogID > 0 {
+				if err := model.ReconcileConsumeLog(ctx, provLogID, 0,
+					"upstream error, refunded", 0, 0, 0, nil); err != nil {
+					lg.Warn("failed to reconcile provisional log on error",
+						zap.Error(err), zap.Int("provisional_log_id", provLogID))
+				}
 			}
 			if usedQuota > 0 {
 				if err := model.UpdateUserRequestCostQuotaByRequestID(userId, requestId, 0); err != nil {
@@ -181,7 +195,7 @@ func RelayVideoHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		entry := &model.Log{
 			UserId:      userId,
 			ChannelId:   channelId,
-			ModelName:   meta.ActualModelName,
+			ModelName:   userVisibleModelName(meta, meta.ActualModelName),
 			TokenName:   tokenName,
 			Quota:       int(usedQuota),
 			Content:     logContent,
@@ -193,7 +207,7 @@ func RelayVideoHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		bgctx, cancel := context.WithTimeout(gmw.BackgroundCtx(c), time.Minute)
 		defer cancel()
 		graceful.GoCritical(bgctx, "videoPostConsume", func(cctx context.Context) {
-			billing.PostConsumeQuotaWithLog(cctx, tokenId, quotaDelta, usedQuota, entry)
+			billing.PostConsumeQuotaWithLog(cctx, tokenId, quotaDelta, usedQuota, entry, provLogID)
 		})
 
 		if err := model.UpdateUserRequestCostQuotaByRequestID(userId, requestId, usedQuota); err != nil {
@@ -245,6 +259,7 @@ func RelayVideoHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 
 	succeed = true
+	markBillingReconciled(c)
 	return nil
 }
 

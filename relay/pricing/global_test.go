@@ -8,10 +8,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/apitype"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // MockAdaptor implements the adaptor.Adaptor interface for testing
@@ -28,7 +29,7 @@ func (m *MockAdaptor) GetModelRatio(modelName string) float64 {
 	if price, exists := m.pricing[modelName]; exists {
 		return price.Ratio
 	}
-	return 2.5 * 0.000001 // Default fallback
+	return 2.5 * billingratio.MilliTokensUsd // Default fallback
 }
 
 func (m *MockAdaptor) GetCompletionRatio(modelName string) float64 {
@@ -69,24 +70,24 @@ func mockGetAdaptor(apiType int) adaptor.Adaptor {
 		return &MockAdaptor{
 			name: "openai",
 			pricing: map[string]adaptor.ModelConfig{
-				"gpt-4":         {Ratio: 30 * 0.000001, CompletionRatio: 2.0},
-				"gpt-3.5-turbo": {Ratio: 1.5 * 0.000001, CompletionRatio: 2.0},
+				"gpt-4":         {Ratio: 30 * billingratio.MilliTokensUsd, CompletionRatio: 2.0},
+				"gpt-3.5-turbo": {Ratio: 1.5 * billingratio.MilliTokensUsd, CompletionRatio: 2.0},
 			},
 		}
 	case apitype.Anthropic:
 		return &MockAdaptor{
 			name: "anthropic",
 			pricing: map[string]adaptor.ModelConfig{
-				"claude-3-opus":   {Ratio: 15 * 0.000001, CompletionRatio: 5.0},
-				"claude-3-sonnet": {Ratio: 3 * 0.000001, CompletionRatio: 5.0},
+				"claude-3-opus":   {Ratio: 15 * billingratio.MilliTokensUsd, CompletionRatio: 5.0},
+				"claude-3-sonnet": {Ratio: 3 * billingratio.MilliTokensUsd, CompletionRatio: 5.0},
 			},
 		}
 	case apitype.Gemini:
 		return &MockAdaptor{
 			name: "gemini",
 			pricing: map[string]adaptor.ModelConfig{
-				"gemini-2.5-flash": {Ratio: 0.30 * 0.000001, CompletionRatio: 2.5 / 0.30},
-				"gpt-4":            {Ratio: 25 * 0.000001, CompletionRatio: 2.5}, // Conflict with OpenAI
+				"gemini-2.5-flash": {Ratio: 0.30 * billingratio.MilliTokensUsd, CompletionRatio: 2.5 / 0.30},
+				"gpt-4":            {Ratio: 25 * billingratio.MilliTokensUsd, CompletionRatio: 2.5}, // Conflict with OpenAI
 			},
 		}
 	default:
@@ -136,7 +137,7 @@ func TestGlobalPricingMerging(t *testing.T) {
 
 	// Test conflict resolution (first adapter wins)
 	require.Contains(t, pricing, "gpt-4", "Expected gpt-4 to be in global pricing")
-	expectedRatio := 30 * 0.000001 // OpenAI's pricing should win
+	expectedRatio := 30 * billingratio.MilliTokensUsd // OpenAI's pricing should win
 	require.Equal(t, expectedRatio, pricing["gpt-4"].Ratio, "Expected gpt-4 ratio to be OpenAI's pricing")
 }
 
@@ -148,12 +149,14 @@ func TestGetGlobalModelRatio(t *testing.T) {
 	InitializeGlobalPricingManager(mockGetAdaptor)
 
 	// Test existing model
-	ratio := GetGlobalModelRatio("gpt-3.5-turbo")
-	expectedRatio := 1.5 * 0.000001
+	ratio, exists := GetGlobalModelRatio("gpt-3.5-turbo")
+	expectedRatio := 1.5 * billingratio.MilliTokensUsd
+	require.True(t, exists)
 	require.Equal(t, expectedRatio, ratio)
 
 	// Test non-existing model
-	ratio = GetGlobalModelRatio("non-existent-model")
+	ratio, exists = GetGlobalModelRatio("non-existent-model")
+	require.False(t, exists)
 	require.Equal(t, float64(0), ratio, "Expected 0 for non-existent model")
 }
 
@@ -165,12 +168,14 @@ func TestGetGlobalCompletionRatio(t *testing.T) {
 	InitializeGlobalPricingManager(mockGetAdaptor)
 
 	// Test existing model
-	ratio := GetGlobalCompletionRatio("claude-3-opus")
+	ratio, exists := GetGlobalCompletionRatio("claude-3-opus")
 	expectedRatio := 5.0
+	require.True(t, exists)
 	require.Equal(t, expectedRatio, ratio)
 
 	// Test non-existing model
-	ratio = GetGlobalCompletionRatio("non-existent-model")
+	ratio, exists = GetGlobalCompletionRatio("non-existent-model")
+	require.False(t, exists)
 	require.Equal(t, float64(0), ratio, "Expected 0 for non-existent model")
 }
 
@@ -183,28 +188,28 @@ func TestThreeLayerPricing(t *testing.T) {
 
 	// Test Layer 1: Channel overrides (highest priority)
 	channelOverrides := map[string]float64{
-		"gpt-4": 100 * 0.000001, // Override
+		"gpt-4": 100 * billingratio.MilliTokensUsd, // Override
 	}
 	openaiAdaptor := mockGetAdaptor(apitype.OpenAI)
 
 	ratio := GetModelRatioWithThreeLayers("gpt-4", channelOverrides, openaiAdaptor)
-	expectedRatio := 100 * 0.000001
+	expectedRatio := 100 * billingratio.MilliTokensUsd
 	require.Equal(t, expectedRatio, ratio, "Expected channel override ratio")
 
 	// Test Layer 2: Adapter pricing (second priority)
 	ratio = GetModelRatioWithThreeLayers("gpt-4", nil, openaiAdaptor)
-	expectedRatio = 30 * 0.000001 // OpenAI's pricing
+	expectedRatio = 30 * billingratio.MilliTokensUsd // OpenAI's pricing
 	require.Equal(t, expectedRatio, ratio, "Expected adapter ratio")
 
 	// Test Layer 3: Global pricing (third priority)
 	// Use a model that exists in global pricing but not in the current adapter
 	ratio = GetModelRatioWithThreeLayers("claude-3-opus", nil, openaiAdaptor)
-	expectedRatio = 15 * 0.000001 // From global pricing (Anthropic)
+	expectedRatio = 15 * billingratio.MilliTokensUsd // From global pricing (Anthropic)
 	require.Equal(t, expectedRatio, ratio, "Expected global pricing ratio")
 
 	// Test Layer 4: Final fallback
 	ratio = GetModelRatioWithThreeLayers("completely-unknown-model", nil, openaiAdaptor)
-	expectedRatio = 2.5 * 0.000001 // Final fallback
+	expectedRatio = 2.5 * billingratio.MilliTokensUsd // Final fallback
 	require.Equal(t, expectedRatio, ratio, "Expected fallback ratio")
 }
 
@@ -313,6 +318,6 @@ func TestIsGlobalPricingInitialized(t *testing.T) {
 	// Test initialized state
 	InitializeGlobalPricingManager(mockGetAdaptor)
 	// Force initialization by accessing global pricing
-	GetGlobalModelRatio("test-model")
+	GetGlobalModelRatio("test-model") // trigger init
 	require.True(t, IsGlobalPricingInitialized(), "Expected global pricing to be initialized")
 }

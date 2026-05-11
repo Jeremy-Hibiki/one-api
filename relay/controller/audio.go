@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,20 +17,19 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/billing"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 type commonAudioRequest struct {
@@ -127,7 +125,7 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	}
 
 	// Use three-layer pricing system
-	pricingAdaptor := relay.GetAdaptor(channelType)
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	modelRatio := pricing.GetModelRatioWithThreeLayers(audioModel, channelModelRatio, pricingAdaptor)
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
 	ratio := modelRatio * groupRatio
@@ -167,10 +165,6 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	if userQuota-preConsumedQuota < 0 {
 		return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
-	err = model.CacheDecreaseUserQuota(ctx, userId, preConsumedQuota)
-	if err != nil {
-		return openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
-	}
 	if userQuota > 100*preConsumedQuota &&
 		(tokenQuotaUnlimited || tokenQuota > 100*preConsumedQuota) {
 		// in this case, we do not pre-consume quota
@@ -182,12 +176,22 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		if err != nil {
 			return openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
 		}
+		syncUserQuotaCacheAfterPreConsume(ctx, userId, preConsumedQuota, "audio_preconsume")
+
+		// Billing audit safety net
+		markPreConsumed(c, preConsumedQuota)
+		defer billingAuditSafetyNet(c)
+
+		provisionalLogId := recordProvisionalLog(c, meta, audioModel, preConsumedQuota)
+		c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
 	}
+	provLogID := c.GetInt(ctxkey.ProvisionalLogId)
 	succeed := false
 	defer func() {
 		if succeed {
 			return
 		}
+		markBillingReconciled(c)
 		if preConsumedQuota > 0 {
 			// we need to roll back the pre-consumed quota under lifecycle tracking
 			defer func() {
@@ -329,6 +333,14 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	// }
 
 	if resp.StatusCode != http.StatusOK {
+		// Reconcile provisional log to 0 since upstream returned error
+		if provLogID > 0 {
+			if err := model.ReconcileConsumeLog(ctx, provLogID, 0,
+				"upstream error, refunded", 0, 0, 0, nil); err != nil {
+				lg.Warn("failed to reconcile provisional log on upstream error",
+					zap.Error(err), zap.Int("provisional_log_id", provLogID))
+			}
+		}
 		// Reconcile provisional record to 0 since upstream returned error
 		if err := model.UpdateUserRequestCostQuotaByRequestID(userId, c.GetString(ctxkey.RequestId), 0); err != nil {
 			lg.Warn("update user request cost to zero failed", zap.Error(err))
@@ -337,6 +349,7 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	}
 
 	succeed = true
+	markBillingReconciled(c)
 	quotaDelta := quota - preConsumedQuota
 
 	// Capture trace ID from gin context now; the background context will not carry gin
@@ -364,7 +377,7 @@ func RelayAudioHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 			ElapsedTime:      helper.CalcElapsedTime(meta.StartTime), // capture request latency in ms
 		}
 		graceful.GoCritical(bgctx, "audioPostConsumeWithLog", func(cctx context.Context) {
-			billing.PostConsumeQuotaWithLog(cctx, tokenId, quotaDelta, quota, entry)
+			billing.PostConsumeQuotaWithLog(cctx, tokenId, quotaDelta, quota, entry, provLogID)
 		})
 
 		// Reconcile user request cost to final quota (override provisional value)
@@ -403,12 +416,10 @@ func getTextFromVerboseJSON(body []byte) (string, error) {
 }
 
 func getTextFromSRT(body []byte) (string, error) {
-	scanner := bufio.NewScanner(strings.NewReader(string(body)))
-	helper.ConfigureScannerBuffer(scanner)
 	var builder strings.Builder
 	var textLine bool
-	for scanner.Scan() {
-		line := scanner.Text()
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		if textLine {
 			builder.WriteString(line)
 			textLine = false
@@ -417,9 +428,6 @@ func getTextFromSRT(body []byte) (string, error) {
 			textLine = true
 			continue
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return "", err
 	}
 	return builder.String(), nil
 }

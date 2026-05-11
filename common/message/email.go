@@ -13,7 +13,7 @@ import (
 
 	"github.com/Laisky/errors/v2"
 
-	"github.com/songquanpeng/one-api/common/config"
+	"github.com/Laisky/one-api/common/config"
 )
 
 // loginAuth implements the LOGIN authentication mechanism
@@ -226,7 +226,7 @@ func SendEmail(subject string, receiver string, content string) error {
 	// use the domain extracted above as EHLO local name; fallback is "localhost"
 	client, preAuthMechs, usingTLS, err := dialSMTPClient(ctx, addr, domain)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "dial SMTP client")
 	}
 	defer client.Close()
 

@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 func TestGetRequestURL(t *testing.T) {
@@ -109,28 +109,28 @@ func TestConvertRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "Remove penalty parameters for grok-4-fast-reasoning",
+			name: "Remove penalty parameters for grok-4-1-fast-reasoning",
 			inputRequest: &model.GeneralOpenAIRequest{
-				Model:            "grok-4-fast-reasoning",
+				Model:            "grok-4-1-fast-reasoning",
 				PresencePenalty:  float64Ptr(0.5),
 				FrequencyPenalty: float64Ptr(0.3),
 				Messages:         []model.Message{{Role: "user", Content: "hello"}},
 			},
 			expectedRequest: &model.GeneralOpenAIRequest{
-				Model:    "grok-4-fast-reasoning",
+				Model:    "grok-4-1-fast-reasoning",
 				Messages: []model.Message{{Role: "user", Content: "hello"}},
 			},
 		},
 		{
-			name: "Remove penalty parameters for grok-4-fast-non-reasoning",
+			name: "Remove penalty parameters for grok-4-1-fast-non-reasoning",
 			inputRequest: &model.GeneralOpenAIRequest{
-				Model:            "grok-4-fast-non-reasoning",
+				Model:            "grok-4-1-fast-non-reasoning",
 				PresencePenalty:  float64Ptr(0.5),
 				FrequencyPenalty: float64Ptr(0.3),
 				Messages:         []model.Message{{Role: "user", Content: "hello"}},
 			},
 			expectedRequest: &model.GeneralOpenAIRequest{
-				Model:    "grok-4-fast-non-reasoning",
+				Model:    "grok-4-1-fast-non-reasoning",
 				Messages: []model.Message{{Role: "user", Content: "hello"}},
 			},
 		},
@@ -444,6 +444,7 @@ func TestGetModelList(t *testing.T) {
 	assert.NotEmpty(t, models)
 	// Should include grok models from ModelRatios
 	assert.Contains(t, models, "grok-code-fast-1")
+	assert.Contains(t, models, "grok-4-1-fast-non-reasoning")
 }
 
 func TestGetDefaultModelPricing(t *testing.T) {
@@ -664,4 +665,83 @@ func stringPtr(s string) *string {
 
 func float64Ptr(f float64) *float64 {
 	return &f
+}
+
+// TestHandleImageResponse_UpstreamEmptyDataEmitsDataArray verifies that an
+// upstream payload with `"data": []` is forwarded with `"data":[]` (never null).
+func TestHandleImageResponse_UpstreamEmptyDataEmitsDataArray(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	body := `{"data":[]}`
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	a := &Adaptor{}
+	usage, errWS := a.handleImageResponse(c, resp)
+	require.Nil(t, errWS)
+	require.Nil(t, usage)
+
+	out := rec.Body.String()
+	require.Contains(t, out, `"data":[]`)
+	require.NotContains(t, out, `"data":null`)
+}
+
+// TestHandleImageResponse_UpstreamErrorEnvelopeEmitsDataArray verifies that an
+// upstream payload missing the data key (e.g. an error envelope without data)
+// still produces a valid OpenAI-shaped response with `"data":[]`.
+func TestHandleImageResponse_UpstreamErrorEnvelopeEmitsDataArray(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	body := `{"error":{"message":"upstream rejected"}}`
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	a := &Adaptor{}
+	usage, errWS := a.handleImageResponse(c, resp)
+	require.Nil(t, errWS)
+	require.Nil(t, usage)
+
+	out := rec.Body.String()
+	require.Contains(t, out, `"data":[]`)
+	require.NotContains(t, out, `"data":null`)
+}
+
+// TestHandleImageResponse_PopulatedRoundTrips sanity-checks normal upstream
+// payloads with images.
+func TestHandleImageResponse_PopulatedRoundTrips(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	body := `{"data":[{"url":"https://example.com/a.png","b64_json":"AAAA","revised_prompt":"p"}]}`
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+
+	a := &Adaptor{}
+	usage, errWS := a.handleImageResponse(c, resp)
+	require.Nil(t, errWS)
+	require.Nil(t, usage)
+
+	var parsed ImageResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &parsed))
+	require.Len(t, parsed.Data, 1)
+	require.Equal(t, "https://example.com/a.png", parsed.Data[0].URL)
+	require.Equal(t, "AAAA", parsed.Data[0].B64Json)
+	require.Equal(t, "p", parsed.Data[0].RevisedPrompt)
 }

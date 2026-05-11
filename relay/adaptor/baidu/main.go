@@ -1,7 +1,6 @@
 package baidu
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,14 +14,14 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/constant"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/constant"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // https://cloud.baidu.com/doc/WENXINWORKSHOP/s/flfmc9do2
@@ -146,21 +145,48 @@ func embeddingResponseBaidu2OpenAI(response *EmbeddingResponse) *openai.Embeddin
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	lg := gmw.GetLogger(c)
 	var usage model.Usage
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(bufio.ScanLines)
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
 	common.SetEventStreamHeaders(c)
 
-	for scanner.Scan() {
-		data := scanner.Text()
+	var streamErr error
+	for {
+		line, err := lineReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			var baiduResponse ChatStreamResponse
+			if err := json.NewDecoder(line.Large).Decode(&baiduResponse); err != nil {
+				lg.Error("error unmarshalling oversized stream response", zap.Error(err))
+				continue
+			}
+			if baiduResponse.Usage.TotalTokens != 0 {
+				usage.TotalTokens = baiduResponse.Usage.TotalTokens
+				usage.PromptTokens = baiduResponse.Usage.PromptTokens
+				usage.CompletionTokens = baiduResponse.Usage.TotalTokens - baiduResponse.Usage.PromptTokens
+			}
+			response := streamResponseBaidu2OpenAI(&baiduResponse)
+			if err := render.ObjectData(c, response); err != nil {
+				lg.Error("error rendering stream response", zap.Error(err))
+			}
+			continue
+		}
+
+		data := line.Text()
 		if len(data) < 6 {
 			continue
 		}
 		data = data[6:]
 
 		var baiduResponse ChatStreamResponse
-		err := json.Unmarshal([]byte(data), &baiduResponse)
+		err = json.Unmarshal([]byte(data), &baiduResponse)
 		if err != nil {
 			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
@@ -177,8 +203,8 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		lg.Error("error reading stream", zap.Error(err), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		lg.Error("error reading stream", zap.Error(streamErr))
 	}
 
 	render.Done(c)
@@ -280,7 +306,7 @@ func GetAccessToken(apiKey string) (string, error) {
 	}
 	accessToken, err := getBaiduAccessTokenHelper(apiKey)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "get baidu access token")
 	}
 	if accessToken == nil {
 		return "", errors.New("GetAccessToken return a nil token")

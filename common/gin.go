@@ -12,7 +12,7 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/ctxkey"
 )
 
 // GetRequestBody reads and caches the request body so it can be reused later in the handler chain.
@@ -39,14 +39,8 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 		return errors.Wrap(err, "get request body failed")
 	}
 
-	logger := gmw.GetLogger(c)
-	if _, ok := c.Get(ctxkey.RequestModel); !ok {
-		preview, truncated := SanitizePayloadForLogging(requestBody, DefaultLogBodyLimit)
-		logger.Debug("receive user request",
-			zap.String("method", c.Request.Method),
-			zap.Int("body_bytes", len(requestBody)),
-			zap.Bool("body_truncated", truncated),
-			zap.ByteString("request", preview))
+	if err = LogClientRequestPayload(c, "", DefaultLogBodyLimit); err != nil {
+		return errors.Wrap(err, "log client request payload failed")
 	}
 
 	// check v should be a pointer
@@ -70,7 +64,41 @@ func UnmarshalBodyReusable(c *gin.Context, v any) error {
 	return nil
 }
 
+// LogClientRequestPayload emits a DEBUG log for inbound request payload once per request.
+// It truncates oversized values using SanitizePayloadForLogging and restores request body for reuse.
+func LogClientRequestPayload(c *gin.Context, label string, limit int) error {
+	if logged, ok := c.Get(ctxkey.ClientRequestPayloadLogged); ok {
+		if loggedFlag, ok := logged.(bool); ok && loggedFlag {
+			return nil
+		}
+	}
+
+	body, err := GetRequestBody(c)
+	if err != nil {
+		return errors.Wrap(err, "get request body failed")
+	}
+
+	preview, truncated := SanitizePayloadForLogging(body, limit)
+	fields := []zap.Field{
+		zap.String("method", c.Request.Method),
+		zap.String("url", c.Request.URL.String()),
+		zap.Int("body_bytes", len(body)),
+		zap.Bool("body_truncated", truncated),
+		zap.ByteString("body_preview", preview),
+	}
+	if label != "" {
+		fields = append(fields, zap.String("label", label))
+	}
+
+	gmw.GetLogger(c).Debug("client request received", fields...)
+	c.Set(ctxkey.ClientRequestPayloadLogged, true)
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
+	return nil
+}
+
 // SetEventStreamHeaders configures the standard headers required for server-sent event responses.
+// It also flushes the headers immediately so reverse proxies (like Cloudflare)
+// see the 200 response right away, preventing premature timeout (524) errors.
 func SetEventStreamHeaders(c *gin.Context) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -78,4 +106,5 @@ func SetEventStreamHeaders(c *gin.Context) {
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Header().Set("Pragma", "no-cache") // This is for legacy HTTP; I'm pretty sure.
+	c.Writer.Flush()                            // Send headers immediately to keep reverse proxies alive.
 }

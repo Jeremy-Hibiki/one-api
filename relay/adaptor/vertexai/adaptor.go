@@ -10,21 +10,21 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	channelhelper "github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
-	vertexaiClaude "github.com/songquanpeng/one-api/relay/adaptor/vertexai/claude"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/deepseek"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/imagen"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/qwen"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/veo"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	relayModel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/adaptor"
+	channelhelper "github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/geminiOpenaiCompatible"
+	vertexaiClaude "github.com/Laisky/one-api/relay/adaptor/vertexai/claude"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/deepseek"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/imagen"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/openai"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/qwen"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/veo"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	relayModel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 var _ adaptor.Adaptor = new(Adaptor)
@@ -223,9 +223,6 @@ func (a *Adaptor) GetModelList() []string {
 	models = append(models, adaptor.GetModelListFromPricing(openai.ModelRatios)...)
 	models = append(models, adaptor.GetModelListFromPricing(qwen.ModelRatios)...)
 
-	// Add VertexAI-specific models
-	models = append(models, "gemini-embedding-001", "aqa")
-
 	return models
 }
 
@@ -259,13 +256,6 @@ func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
 
 	// Import Qwen models from qwen subadaptor
 	maps.Copy(pricing, qwen.ModelRatios)
-
-	// Add VertexAI-specific models that don't belong to subadaptors
-	// Using global ratio.MilliTokensUsd = 0.5 for consistent quota-based pricing
-
-	// VertexAI-specific models
-	pricing["gemini-embedding-001"] = adaptor.ModelConfig{Ratio: 0.15 * ratio.MilliTokensUsd, CompletionRatio: 1}
-	pricing["aqa"] = adaptor.ModelConfig{Ratio: 1, CompletionRatio: 1}
 
 	return pricing
 }
@@ -301,6 +291,7 @@ const (
 	EndpointTypeOpenAI
 	EndpointTypeQwen
 	EndpointTypeImagen
+	EndpointTypeVeo
 	EndpointTypeClaude
 	EndpointTypeGemini
 )
@@ -316,6 +307,8 @@ func getModelEndpointType(modelName string) ModelEndpointType {
 		return EndpointTypeQwen
 	case isImagenModel(modelName):
 		return EndpointTypeImagen
+	case isVeoModel(modelName):
+		return EndpointTypeVeo
 	case strings.Contains(modelName, "claude"):
 		return EndpointTypeClaude
 	default:
@@ -340,6 +333,8 @@ func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 		return a.buildQwenURL(meta)
 	case EndpointTypeImagen:
 		return a.buildImagenURL(meta)
+	case EndpointTypeVeo:
+		return a.buildVeoURL(meta)
 	case EndpointTypeClaude:
 		return a.buildClaudeURL(meta)
 	case EndpointTypeGemini:
@@ -396,6 +391,16 @@ func (a *Adaptor) buildImagenURL(meta *meta.Meta) (string, error) {
 		baseHost, meta.Config.VertexAIProjectID, location, meta.ActualModelName), nil
 }
 
+// buildVeoURL builds URL for Veo video generation models.
+func (a *Adaptor) buildVeoURL(meta *meta.Meta) (string, error) {
+	// Veo models use the long-running predict endpoint.
+	// Docs: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo-video-generation
+	baseHost, location := a.getDefaultHostAndLocation(meta)
+
+	return fmt.Sprintf("https://%s/v1/projects/%s/locations/%s/publishers/google/models/%s:predictLongRunning",
+		baseHost, meta.Config.VertexAIProjectID, location, meta.ActualModelName), nil
+}
+
 // buildClaudeURL builds URL for Claude models
 func (a *Adaptor) buildClaudeURL(meta *meta.Meta) (string, error) {
 	// Claude models use rawPredict
@@ -409,7 +414,9 @@ func (a *Adaptor) buildClaudeURL(meta *meta.Meta) (string, error) {
 func (a *Adaptor) buildGeminiURL(meta *meta.Meta) (string, error) {
 	// Gemini (and other text models) use generateContent / streamGenerateContent
 	var suffix string
-	if meta.IsStream {
+	if meta.Mode == relaymode.Embeddings {
+		suffix = "batchEmbedContents"
+	} else if meta.IsStream {
 		suffix = "streamGenerateContent?alt=sse"
 	} else {
 		suffix = "generateContent"
@@ -469,6 +476,14 @@ func isImagenModel(model string) bool {
 		return false
 	}
 	return strings.HasPrefix(model, "imagen-") || strings.HasPrefix(model, "imagegeneration@")
+}
+
+// isVeoModel returns true if the model name belongs to Vertex AI Veo family.
+func isVeoModel(model string) bool {
+	if model == "" {
+		return false
+	}
+	return strings.HasPrefix(model, "veo-")
 }
 
 // isDeepSeekModel returns true if the model name belongs to DeepSeek family.

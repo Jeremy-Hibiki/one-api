@@ -9,12 +9,12 @@ import (
 	"github.com/Laisky/zap"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/blacklist"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/blacklist"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/random"
 )
 
 const (
@@ -54,6 +54,7 @@ type User struct {
 	AffCode          string          `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
 	InviterId        int             `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
 	MCPToolBlacklist JSONStringSlice `json:"mcp_tool_blacklist" gorm:"type:text"`
+	Metadata         UserMetadata    `json:"metadata" gorm:"type:text;serializer:json"`
 	CreatedAt        int64           `json:"created_at" gorm:"bigint;autoCreateTime:milli"`
 	UpdatedAt        int64           `json:"updated_at" gorm:"bigint;autoUpdateTime:milli"`
 }
@@ -99,12 +100,18 @@ func GetAllUsers(startIdx int, num int, order string, sortBy string, sortOrder s
 	}
 
 	err = query.Find(&users).Error
-	return users, err
+	if err != nil {
+		return nil, errors.Wrap(err, "get all users")
+	}
+	return users, nil
 }
 
 func GetUserCount() (count int64, err error) {
 	err = DB.Model(&User{}).Where("status != ?", UserStatusDeleted).Count(&count).Error
-	return count, err
+	if err != nil {
+		return 0, errors.Wrap(err, "count users")
+	}
+	return count, nil
 }
 
 func SearchUsers(keyword string, sortBy string, sortOrder string) (users []*User, err error) {
@@ -115,7 +122,10 @@ func SearchUsers(keyword string, sortBy string, sortOrder string) (users []*User
 	} else {
 		err = DB.Omit("password").Where("username LIKE ? or email LIKE ? or display_name LIKE ?", keyword+"%", keyword+"%", keyword+"%").Order(orderClause).Find(&users).Error
 	}
-	return users, err
+	if err != nil {
+		return nil, errors.Wrap(err, "search users")
+	}
+	return users, nil
 }
 
 func GetUserById(id int, selectAll bool) (*User, error) {
@@ -129,7 +139,10 @@ func GetUserById(id int, selectAll bool) (*User, error) {
 	} else {
 		err = DB.Omit("password", "access_token").First(&user, "id = ?", id).Error
 	}
-	return &user, err
+	if err != nil {
+		return nil, errors.Wrapf(err, "get user by id %d", id)
+	}
+	return &user, nil
 }
 
 func GetUserIdByAffCode(affCode string) (int, error) {
@@ -138,7 +151,10 @@ func GetUserIdByAffCode(affCode string) (int, error) {
 	}
 	var user User
 	err := DB.Select("id").First(&user, "aff_code = ?", affCode).Error
-	return user.Id, err
+	if err != nil {
+		return 0, errors.Wrapf(err, "get user id by aff code %s", affCode)
+	}
+	return user.Id, nil
 }
 
 func DeleteUserById(id int) (err error) {

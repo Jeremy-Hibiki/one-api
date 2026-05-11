@@ -1,6 +1,6 @@
 package channeltype
 
-import "github.com/songquanpeng/one-api/relay/apitype"
+import "github.com/Laisky/one-api/relay/apitype"
 
 func ToAPIType(channelType int) int {
 	apiType := apitype.OpenAI
@@ -55,6 +55,8 @@ func ToAPIType(channelType int) int {
 		apiType = apitype.XAI
 	case Copilot:
 		apiType = apitype.Copilot
+	case Fireworks:
+		apiType = apitype.Fireworks
 	}
 
 	return apiType
@@ -178,6 +180,8 @@ func IdToName(channelType int) string {
 		return "geminiopenaicompatible"
 	case Copilot:
 		return "copilot"
+	case Fireworks:
+		return "fireworks"
 	case Dummy:
 		return "dummy"
 	default:

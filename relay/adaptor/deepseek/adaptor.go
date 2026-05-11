@@ -1,18 +1,23 @@
 package deepseek
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/Laisky/errors/v2"
+	gmw "github.com/Laisky/gin-middlewares/v7"
+	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/common/structuredjson"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/common/deepseekcompat"
+	"github.com/Laisky/one-api/relay/adaptor/common/structuredjson"
+	"github.com/Laisky/one-api/relay/adaptor/openai_compatible"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 type Adaptor struct {
@@ -88,6 +93,10 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 		request.ReasoningEffort = nil
 	}
 
+	normalizeDeepSeekThinkingConfig(c, request)
+
+	normalizeDeepSeekToolMessageContent(c, request)
+
 	if request.ResponseFormat != nil {
 		if request.ResponseFormat.JsonSchema != nil {
 			structuredjson.EnsureInstruction(request)
@@ -96,6 +105,80 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	}
 
 	return request, nil
+}
+
+// normalizeDeepSeekThinkingConfig coerces thinking.type into values accepted by DeepSeek.
+// DeepSeek chat completion currently supports only enabled/disabled.
+func normalizeDeepSeekThinkingConfig(c *gin.Context, request *model.GeneralOpenAIRequest) {
+	if request == nil || request.Thinking == nil {
+		return
+	}
+
+	originalType := request.Thinking.Type
+	normalizedType, changed := deepseekcompat.NormalizeThinkingType(originalType, request.Thinking.BudgetTokens)
+	if !changed {
+		return
+	}
+
+	request.Thinking.Type = normalizedType
+	gmw.GetLogger(c).Debug("normalized deepseek thinking type for provider compatibility",
+		zap.String("model", request.Model),
+		zap.String("original_type", originalType),
+		zap.String("normalized_type", normalizedType),
+		zap.Intp("budget_tokens", request.Thinking.BudgetTokens),
+	)
+}
+
+// normalizeDeepSeekToolMessageContent converts non-string tool message content into strings for DeepSeek compatibility.
+// DeepSeek requires `messages[].content` for role=tool to be a string and rejects arrays/maps.
+func normalizeDeepSeekToolMessageContent(c *gin.Context, request *model.GeneralOpenAIRequest) {
+	lg := gmw.GetLogger(c)
+	normalizedCount := 0
+
+	for i := range request.Messages {
+		message := &request.Messages[i]
+		if message.Role != "tool" {
+			continue
+		}
+
+		if _, ok := message.Content.(string); ok {
+			continue
+		}
+
+		normalized := message.StringContent()
+		if normalized == "" {
+			if message.Content == nil {
+				normalized = ""
+			} else {
+				encoded, err := json.Marshal(message.Content)
+				if err != nil {
+					lg.Debug("deepseek tool message fallback marshal failed",
+						zap.Int("message_index", i),
+						zap.String("original_content_type", fmt.Sprintf("%T", message.Content)),
+						zap.Error(err),
+					)
+					normalized = fmt.Sprintf("%v", message.Content)
+				} else {
+					normalized = string(encoded)
+				}
+			}
+		}
+
+		message.Content = normalized
+		normalizedCount++
+		lg.Debug("normalized deepseek tool message content",
+			zap.Int("message_index", i),
+			zap.String("normalized_content_type", "string"),
+			zap.Int("normalized_content_length", len(normalized)),
+		)
+	}
+
+	if normalizedCount > 0 {
+		lg.Debug("normalized deepseek tool messages for provider compatibility",
+			zap.Int("normalized_count", normalizedCount),
+			zap.Int("message_count", len(request.Messages)),
+		)
+	}
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, request *model.ImageRequest) (any, error) {

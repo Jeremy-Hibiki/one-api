@@ -10,10 +10,19 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+)
+
+const (
+	claudeToolTypeWebSearch            = "web_search"
+	claudeToolTypeWebSearchPreview     = "web_search_preview"
+	claudeToolTypeToolSearchRegex      = "tool_search_tool_regex"
+	claudeToolTypeToolSearchBM25       = "tool_search_tool_bm25"
+	claudeToolTypeToolSearchRegexAlias = "tool_search_tool_regex_"
+	claudeToolTypeToolSearchBM25Alias  = "tool_search_tool_bm25_"
 )
 
 // ConvertClaudeRequest converts Claude Messages API request to OpenAI format for OpenAI-compatible adapters
@@ -25,6 +34,7 @@ func ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, er
 	// Convert Claude Messages API request to OpenAI format first
 	openaiRequest := &model.GeneralOpenAIRequest{
 		Model:               request.Model,
+		ExtraBody:           maps.Clone(request.ExtraBody),
 		MaxCompletionTokens: &request.MaxTokens,
 		Temperature:         request.Temperature,
 		TopP:                request.TopP,
@@ -104,7 +114,7 @@ func ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequest) (any, er
 		var tools []model.Tool
 		for _, claudeTool := range request.Tools {
 			if strings.TrimSpace(claudeTool.Type) != "" && claudeTool.InputSchema == nil {
-				tools = append(tools, model.Tool{Type: strings.TrimSpace(claudeTool.Type)})
+				tools = append(tools, model.Tool{Type: normalizeClaudeBuiltinToolType(claudeTool.Type)})
 				continue
 			}
 			parameters, ok := claudeTool.InputSchema.(map[string]any)
@@ -155,6 +165,29 @@ func structuredPromotionDisabled(metaInfo *meta.Meta) bool {
 	}
 
 	return false
+}
+
+// normalizeClaudeBuiltinToolType maps Anthropic server-tool identifiers to
+// OpenAI-compatible built-in types while preserving unknown tool names.
+func normalizeClaudeBuiltinToolType(toolType string) string {
+	normalized := strings.TrimSpace(toolType)
+	if normalized == "" {
+		return normalized
+	}
+
+	lower := strings.ToLower(normalized)
+	switch lower {
+	case claudeToolTypeWebSearch,
+		claudeToolTypeWebSearchPreview,
+		claudeToolTypeToolSearchRegex,
+		claudeToolTypeToolSearchBM25:
+		return claudeToolTypeWebSearch
+	}
+	if strings.HasPrefix(lower, claudeToolTypeToolSearchRegexAlias) || strings.HasPrefix(lower, claudeToolTypeToolSearchBM25Alias) {
+		return claudeToolTypeWebSearch
+	}
+
+	return normalized
 }
 
 type pendingOpenAIMessage struct {
@@ -262,6 +295,33 @@ func convertClaudeBlocks(role string, blocks []any) []model.Message {
 					Arguments: argsStr,
 				},
 			})
+		case "server_tool_use":
+			id, _ := blockMap["id"].(string)
+			name, _ := blockMap["name"].(string)
+			msg := ensurePending()
+			var argsStr string
+			if input := blockMap["input"]; input != nil {
+				if inputBytes, err := json.Marshal(input); err == nil {
+					argsStr = string(inputBytes)
+				}
+			}
+			msg.message.ToolCalls = append(msg.message.ToolCalls, model.Tool{
+				Id:   id,
+				Type: "function",
+				Function: &model.Function{
+					Name:      name,
+					Arguments: argsStr,
+				},
+			})
+		case "thinking", "redacted_thinking":
+			// Map Claude thinking blocks to OpenAI reasoning content.
+			// Signatures are intentionally not carried over since the OpenAI
+			// format has no equivalent field; the upstream OpenAI-compatible
+			// provider will generate its own reasoning tokens.
+			if thinking, ok := blockMap["thinking"].(string); ok && thinking != "" {
+				msg := ensurePending()
+				msg.message.Thinking = &thinking
+			}
 		case "tool_result":
 			flush()
 			if toolMsg := convertClaudeToolResultBlock(blockMap); toolMsg != nil {
@@ -473,7 +533,10 @@ func containsClaudeToolUsage(messages []model.ClaudeMessage) bool {
 					continue
 				}
 				typeStr, _ := block["type"].(string)
-				if strings.EqualFold(typeStr, "tool_use") || strings.EqualFold(typeStr, "tool_result") {
+				if strings.EqualFold(typeStr, "tool_use") ||
+					strings.EqualFold(typeStr, "tool_result") ||
+					strings.EqualFold(typeStr, "server_tool_use") ||
+					strings.EqualFold(typeStr, "tool_search_tool_result") {
 					return true
 				}
 			}
@@ -604,8 +667,8 @@ func HandleClaudeMessagesResponse(c *gin.Context, resp *http.Response, meta *met
 	// Check if this is a Claude Messages conversion
 	if isClaudeConversion, exists := c.Get(ctxkey.ClaudeMessagesConversion); !exists || !isClaudeConversion.(bool) {
 		// Not a Claude Messages conversion, proceed normally
-		err, usage := handler(c, resp, meta.PromptTokens, meta.ActualModelName)
-		return usage, err
+		errWithStatus, usage := handler(c, resp, meta.PromptTokens, meta.ActualModelName)
+		return usage, errWithStatus
 	}
 
 	// Claude Messages conversion path

@@ -1,15 +1,17 @@
-import { ImageAttachment as ImageAttachmentType } from "@/components/chat/ImageAttachment";
-import { useNotifications } from "@/components/ui/notifications";
-import {
-  getModelCapabilities,
-  isOpenAIMediumOnlyReasoningModel,
-} from "@/lib/model-capabilities";
-import { Message } from "@/lib/utils";
-import { useCallback } from "react";
-import { UsePlaygroundChatProps, UsePlaygroundChatReturn } from "./chat/types";
-import { useChatCompletionStream } from "./chat/useChatCompletionStream";
-import { useChatState } from "./chat/useChatState";
-import { useChatStream } from "./chat/useChatStream";
+import { ImageAttachment as ImageAttachmentType } from '@/components/chat/ImageAttachment';
+import { useNotifications } from '@/components/ui/notifications';
+import { getModelCapabilities, isOpenAIMediumOnlyReasoningModel } from '@/lib/model-capabilities';
+import { Message } from '@/lib/utils';
+import type { AddEventInput } from '@/types/realtime';
+import { useCallback, useEffect, useRef } from 'react';
+import { UsePlaygroundChatProps, UsePlaygroundChatReturn } from './chat/types';
+import { useChatCompletionStream } from './chat/useChatCompletionStream';
+import { useChatState } from './chat/useChatState';
+import { useChatStream } from './chat/useChatStream';
+
+interface UsePlaygroundChatPropsWithEvents extends UsePlaygroundChatProps {
+  addEvent?: (entry: AddEventInput) => void;
+}
 
 export function usePlaygroundChat({
   selectedToken,
@@ -30,23 +32,21 @@ export function usePlaygroundChat({
   setMessages,
   expandedReasonings,
   setExpandedReasonings,
-}: UsePlaygroundChatProps): UsePlaygroundChatReturn {
+  addEvent,
+}: UsePlaygroundChatPropsWithEvents): UsePlaygroundChatReturn {
+  const addEventRef = useRef<typeof addEvent>(addEvent);
+  useEffect(() => {
+    addEventRef.current = addEvent;
+  });
   const { notify } = useNotifications();
 
-  const {
-    isStreaming,
-    setIsStreaming,
-    abortControllerRef,
-    updateThrottleRef,
-    throttledUpdateMessage,
-    scheduleUpdate,
-    addErrorMessage,
-  } = useChatState({
-    messages,
-    setMessages,
-    expandedReasonings,
-    setExpandedReasonings,
-  });
+  const { isStreaming, setIsStreaming, abortControllerRef, updateThrottleRef, throttledUpdateMessage, scheduleUpdate, addErrorMessage } =
+    useChatState({
+      messages,
+      setMessages,
+      expandedReasonings,
+      setExpandedReasonings,
+    });
 
   const { streamResponse } = useChatStream({
     selectedToken,
@@ -70,12 +70,7 @@ export function usePlaygroundChat({
 
   const sendMessage = useCallback(
     async (messageContent: string, images?: ImageAttachmentType[]) => {
-      if (
-        (!messageContent.trim() && (!images || images.length === 0)) ||
-        !selectedModel ||
-        !selectedToken ||
-        isStreaming
-      ) {
+      if ((!messageContent.trim() && (!images || images.length === 0)) || !selectedModel || !selectedToken || isStreaming) {
         return;
       }
 
@@ -83,27 +78,25 @@ export function usePlaygroundChat({
         const contentArray: any[] = [];
         if (messageContent.trim()) {
           contentArray.push({
-            type: "text",
+            type: 'text',
             text: messageContent.trim(),
           });
         }
         if (images && images.length > 0) {
           images.forEach((image) => {
             contentArray.push({
-              type: "image_url",
+              type: 'image_url',
               image_url: {
                 url: image.base64,
               },
             });
           });
         }
-        return contentArray.length === 1 && contentArray[0].type === "text"
-          ? messageContent.trim()
-          : contentArray;
+        return contentArray.length === 1 && contentArray[0].type === 'text' ? messageContent.trim() : contentArray;
       };
 
       const userMessage: Message = {
-        role: "user",
+        role: 'user',
         content: formatMessageContent(),
         timestamp: Date.now(),
       };
@@ -113,8 +106,8 @@ export function usePlaygroundChat({
       setIsStreaming(true);
 
       const assistantMessage: Message = {
-        role: "assistant",
-        content: "",
+        role: 'assistant',
+        content: '',
         reasoning_content: null,
         timestamp: Date.now(),
         model: selectedModel,
@@ -125,26 +118,21 @@ export function usePlaygroundChat({
 
       const capabilities = getModelCapabilities(selectedModel);
       const effectiveReasoningEffort =
-        capabilities.supportsReasoningEffort && reasoningEffort !== "none"
+        capabilities.supportsReasoningEffort && reasoningEffort !== 'none'
           ? selectedModel && isOpenAIMediumOnlyReasoningModel(selectedModel)
-            ? "medium"
+            ? 'medium'
             : reasoningEffort
           : undefined;
 
       const requestBody = {
         messages: (() => {
           const filteredMessages = newMessages
-            .filter((msg) => msg.role !== "error")
+            .filter((msg) => msg.role !== 'error')
             .map((msg) => ({ role: msg.role, content: msg.content }));
           if (systemMessage.trim()) {
-            const hasSystemMessage = filteredMessages.some(
-              (msg) => msg.role === "system"
-            );
+            const hasSystemMessage = filteredMessages.some((msg) => msg.role === 'system');
             if (!hasSystemMessage) {
-              return [
-                { role: "system", content: systemMessage.trim() },
-                ...filteredMessages,
-              ];
+              return [{ role: 'system', content: systemMessage.trim() }, ...filteredMessages];
             }
           }
           return filteredMessages;
@@ -166,7 +154,7 @@ export function usePlaygroundChat({
         ...(capabilities.supportsStop &&
           stopSequences && {
             stop: stopSequences
-              .split(",")
+              .split(',')
               .map((s) => s.trim())
               .filter((s) => s),
           }),
@@ -176,17 +164,21 @@ export function usePlaygroundChat({
         ...(capabilities.supportsThinking &&
           thinkingEnabled && {
             thinking: {
-              type: "enabled",
+              type: 'enabled',
               budget_tokens: thinkingBudgetTokens[0],
             },
           }),
         stream: true,
       };
 
-      await streamChatCompletion(
-        requestBody,
-        abortControllerRef.current.signal
-      );
+      addEventRef.current?.({ direction: 'out', type: 'request', payload: requestBody, transport: 'sse' });
+      try {
+        await streamChatCompletion(requestBody, abortControllerRef.current.signal);
+        addEventRef.current?.({ direction: 'in', type: 'done', payload: {}, transport: 'sse' });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        addEventRef.current?.({ direction: 'in', type: 'error', payload: { message: errMsg }, transport: 'sse' });
+      }
     },
     [
       selectedModel,
@@ -219,8 +211,8 @@ export function usePlaygroundChat({
       setIsStreaming(true);
 
       const assistantMessage: Message = {
-        role: "assistant",
-        content: "",
+        role: 'assistant',
+        content: '',
         reasoning_content: null,
         timestamp: Date.now(),
         model: selectedModel,
@@ -231,28 +223,21 @@ export function usePlaygroundChat({
 
       const capabilities = getModelCapabilities(selectedModel);
       const effectiveReasoningEffort =
-        capabilities.supportsReasoningEffort &&
-        reasoningEffort &&
-        reasoningEffort !== "none"
+        capabilities.supportsReasoningEffort && reasoningEffort && reasoningEffort !== 'none'
           ? selectedModel && isOpenAIMediumOnlyReasoningModel(selectedModel)
-            ? "medium"
+            ? 'medium'
             : reasoningEffort
           : undefined;
 
       const requestBody = {
         messages: (() => {
           const filteredMessages = existingMessages
-            .filter((msg) => msg.role !== "error")
+            .filter((msg) => msg.role !== 'error')
             .map((msg) => ({ role: msg.role, content: msg.content }));
           if (systemMessage.trim()) {
-            const hasSystemMessage = filteredMessages.some(
-              (msg) => msg.role === "system"
-            );
+            const hasSystemMessage = filteredMessages.some((msg) => msg.role === 'system');
             if (!hasSystemMessage) {
-              return [
-                { role: "system", content: systemMessage.trim() },
-                ...filteredMessages,
-              ];
+              return [{ role: 'system', content: systemMessage.trim() }, ...filteredMessages];
             }
           }
           return filteredMessages;
@@ -274,7 +259,7 @@ export function usePlaygroundChat({
         ...(capabilities.supportsStop &&
           stopSequences && {
             stop: stopSequences
-              .split(",")
+              .split(',')
               .map((s) => s.trim())
               .filter((s) => s),
           }),
@@ -284,17 +269,21 @@ export function usePlaygroundChat({
         ...(capabilities.supportsThinking &&
           thinkingEnabled && {
             thinking: {
-              type: "enabled",
+              type: 'enabled',
               budget_tokens: thinkingBudgetTokens[0],
             },
           }),
         stream: true,
       };
 
-      await streamChatCompletion(
-        requestBody,
-        abortControllerRef.current.signal
-      );
+      addEventRef.current?.({ direction: 'out', type: 'request', payload: requestBody, transport: 'sse' });
+      try {
+        await streamChatCompletion(requestBody, abortControllerRef.current.signal);
+        addEventRef.current?.({ direction: 'in', type: 'done', payload: {}, transport: 'sse' });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        addEventRef.current?.({ direction: 'in', type: 'error', payload: { message: errMsg }, transport: 'sse' });
+      }
     },
     [
       selectedModel,
@@ -320,6 +309,7 @@ export function usePlaygroundChat({
   const stopGeneration = useCallback(() => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
+      addEventRef.current?.({ direction: 'out', type: 'cancel', payload: {}, transport: 'sse' });
     }
   }, []);
 

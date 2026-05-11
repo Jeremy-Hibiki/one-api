@@ -1,7 +1,6 @@
 package tencent
 
 import (
-	"bufio"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,15 +18,16 @@ import (
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/conv"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/constant"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/conv"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/constant"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
@@ -40,18 +40,11 @@ func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
 		})
 	}
 	return &ChatRequest{
-		Model:                      &request.Model,
-		Stream:                     &request.Stream,
-		Messages:                   messages,
-		TopP:                       request.TopP,
-		Temperature:                request.Temperature,
-		EnableEnhancement:          request.EnableEnhancement,
-		Citation:                   request.Citation,
-		SearchInfo:                 request.SearchInfo,
-		EnableSpeedSearch:          request.EnableSpeedSearch,
-		EnableDeepSearch:           request.EnableDeepSearch,
-		ForceSearchEnhancement:     request.ForceSearchEnhancement,
-		EnableRecommendedQuestions: request.EnableRecommendedQuestions,
+		Model:       &request.Model,
+		Stream:      &request.Stream,
+		Messages:    messages,
+		TopP:        request.TopP,
+		Temperature: request.Temperature,
 	}
 }
 
@@ -116,11 +109,13 @@ func embeddingResponseTencent2OpenAI(response *EmbeddingResponse) *openai.Embedd
 }
 
 func responseTencent2OpenAI(response *ChatResponse) *openai.TextResponse {
+	// Initialize Choices to a non-nil empty slice so JSON-encoded responses always
+	// emit `"choices":[]` instead of `null` when upstream returns no choices.
 	fullTextResponse := openai.TextResponse{
-		Id:         response.ReqID,
-		Object:     "chat.completion",
-		Created:    helper.GetTimestamp(),
-		SearchInfo: response.SearchInfo,
+		Id:      response.ReqID,
+		Object:  "chat.completion",
+		Created: helper.GetTimestamp(),
+		Choices: make([]openai.TextResponseChoice, 0, len(response.Choices)),
 		Usage: model.Usage{
 			PromptTokens:     response.Usage.PromptTokens,
 			CompletionTokens: response.Usage.CompletionTokens,
@@ -131,9 +126,8 @@ func responseTencent2OpenAI(response *ChatResponse) *openai.TextResponse {
 		choice := openai.TextResponseChoice{
 			Index: 0,
 			Message: model.Message{
-				Role:             "assistant",
-				Content:          response.Choices[0].Messages.Content,
-				ReasoningContent: response.Choices[0].Messages.ReasoningContent,
+				Role:    "assistant",
+				Content: response.Choices[0].Messages.Content,
 			},
 			FinishReason: response.Choices[0].FinishReason,
 		}
@@ -143,45 +137,71 @@ func responseTencent2OpenAI(response *ChatResponse) *openai.TextResponse {
 }
 
 func streamResponseTencent2OpenAI(c *gin.Context, TencentResponse *ChatResponse) *openai.ChatCompletionsStreamResponse {
+	// Pre-size Choices to capacity 1 since each Tencent stream chunk carries at most
+	// one choice; ensures `"choices":[]` on the wire for empty frames.
 	response := openai.ChatCompletionsStreamResponse{
 		Id:      tracing.GenerateChatCompletionID(c),
 		Object:  "chat.completion.chunk",
 		Created: helper.GetTimestamp(),
 		Model:   "tencent-hunyuan",
+		Choices: make([]openai.ChatCompletionsStreamResponseChoice, 0, 1),
 	}
 	if len(TencentResponse.Choices) > 0 {
 		var choice openai.ChatCompletionsStreamResponseChoice
 		choice.Delta.Content = TencentResponse.Choices[0].Delta.Content
-		choice.Delta.ReasoningContent = TencentResponse.Choices[0].Delta.ReasoningContent
 		if TencentResponse.Choices[0].FinishReason == "stop" {
 			choice.FinishReason = &constant.StopFinishReason
 		}
 		response.Choices = append(response.Choices, choice)
-	}
-	if TencentResponse.SearchInfo != nil {
-		response.SearchInfo = TencentResponse.SearchInfo
 	}
 	return &response
 }
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, string) {
 	var responseText string
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(bufio.ScanLines)
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
 	common.SetEventStreamHeaders(c)
 
 	lg := gmw.GetLogger(c)
-	for scanner.Scan() {
-		data := scanner.Text()
+	var streamErr error
+	for {
+		line, err := lineReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			var tencentResponse ChatResponse
+			if err := json.NewDecoder(line.Large).Decode(&tencentResponse); err != nil {
+				lg.Error("error unmarshalling oversized stream response", zap.Error(err))
+				continue
+			}
+
+			response := streamResponseTencent2OpenAI(c, &tencentResponse)
+			if len(response.Choices) != 0 {
+				responseText += conv.AsString(response.Choices[0].Delta.Content)
+			}
+
+			if err := render.ObjectData(c, response); err != nil {
+				lg.Error("error rendering stream response", zap.Error(err))
+			}
+			continue
+		}
+
+		data := line.Text()
 		if len(data) < 5 || !strings.HasPrefix(data, "data:") {
 			continue
 		}
 		data = strings.TrimPrefix(data, "data:")
 
 		var tencentResponse ChatResponse
-		err := json.Unmarshal([]byte(data), &tencentResponse)
+		err = json.Unmarshal([]byte(data), &tencentResponse)
 		if err != nil {
 			lg.Error("error unmarshalling stream response", zap.Error(err))
 			continue
@@ -198,8 +218,8 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		lg.Error("error reading stream", zap.Error(err), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		lg.Error("error reading stream", zap.Error(streamErr))
 	}
 
 	render.Done(c)

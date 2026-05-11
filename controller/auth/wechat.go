@@ -11,10 +11,10 @@ import (
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/controller"
-	"github.com/songquanpeng/one-api/model"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/controller"
+	"github.com/Laisky/one-api/model"
 )
 
 type wechatLoginResponse struct {
@@ -29,7 +29,7 @@ func getWeChatIdByCode(code string) (string, error) {
 	}
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/wechat/user?code=%s", config.WeChatServerAddress, code), nil)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "create wechat request")
 	}
 	req.Header.Set("Authorization", config.WeChatServerToken)
 	client := http.Client{
@@ -37,13 +37,13 @@ func getWeChatIdByCode(code string) (string, error) {
 	}
 	httpResponse, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "send wechat request")
 	}
 	defer httpResponse.Body.Close()
 	var res wechatLoginResponse
 	err = json.NewDecoder(httpResponse.Body).Decode(&res)
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, "decode wechat response")
 	}
 	if !res.Success {
 		return "", errors.New(res.Message)

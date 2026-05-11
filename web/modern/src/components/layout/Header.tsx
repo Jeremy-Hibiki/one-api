@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { NavigationDrawer } from '@/components/ui/mobile-drawer';
 import { useResponsive } from '@/hooks/useResponsive';
+import { useSystemStatus } from '@/hooks/useSystemStatus';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/stores/auth';
 import {
@@ -27,6 +28,7 @@ import {
   MessageSquare,
   Server,
   Settings,
+  User,
   Users,
   Wrench,
   Zap,
@@ -61,27 +63,37 @@ export function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLogoutDialogOpen, setLogoutDialogOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const { isMobile, isTablet } = useResponsive();
+  const { isMobile } = useResponsive();
+  const { systemStatus } = useSystemStatus();
 
   const isAdmin = user?.role >= 10;
-  const chatLink = localStorage.getItem('chat_link');
 
-  const navigationItems = [
-    { name: t('common.dashboard'), to: '/dashboard', show: true },
-    { name: t('common.tokens'), to: '/tokens', show: true },
-    { name: t('common.logs'), to: '/logs', show: true },
-    { name: t('common.users'), to: '/users', show: isAdmin },
-    { name: t('common.channels'), to: '/channels', show: isAdmin },
-    { name: t('common.mcps'), to: '/mcps', show: isAdmin },
-    { name: t('common.redemptions'), to: '/redemptions', show: isAdmin },
-    { name: t('common.topup'), to: '/topup', show: true },
-    { name: t('common.models'), to: '/models', show: true },
-    { name: t('common.tools'), to: '/tools', show: isAdmin },
-    { name: t('common.status'), to: '/status', show: true },
-    { name: t('common.playground'), to: '/chat', show: true },
-    { name: t('common.about'), to: '/about', show: true },
-    { name: t('common.settings'), to: '/settings', show: isAdmin },
-  ]
+  // Navigation items visible to logged-in users
+  const authenticatedNavItems = user
+    ? [
+        { name: t('common.dashboard'), to: '/dashboard', show: true },
+        { name: t('common.tokens'), to: '/tokens', show: true },
+        { name: t('common.logs'), to: '/logs', show: true },
+        { name: t('common.users'), to: '/users', show: isAdmin },
+        { name: t('common.channels'), to: '/channels', show: isAdmin },
+        { name: t('common.mcps'), to: '/mcps', show: isAdmin },
+        { name: t('common.redemptions'), to: '/redemptions', show: isAdmin },
+        { name: t('common.topup'), to: '/topup', show: true },
+        { name: t('common.models'), to: '/models', show: true },
+        { name: t('common.tools'), to: '/tools', show: true },
+        { name: t('common.status'), to: '/status', show: true },
+        { name: t('common.playground'), to: '/chat', show: true },
+        { name: t('common.about'), to: '/about', show: true },
+        { name: t('common.settings'), to: '/settings', show: isAdmin },
+      ]
+    : [
+        // Public navigation for anonymous users
+        { name: t('common.models'), to: '/models', show: true },
+        { name: t('common.tools'), to: '/tools', show: true },
+        { name: t('common.status'), to: '/status', show: true },
+      ];
+
+  const navigationItems = authenticatedNavItems
     .filter((item) => item.show)
     .map((item) => ({
       ...item,
@@ -89,8 +101,6 @@ export function Header() {
       icon: navigationIcons[item.to as keyof typeof navigationIcons],
       isActive: location.pathname === item.to,
     }));
-
-  const isActivePage = (path: string) => location.pathname === path;
 
   const performLogout = async () => {
     setIsLoggingOut(true);
@@ -116,12 +126,12 @@ export function Header() {
             {/* Logo and Brand */}
             <div className="flex items-center flex-shrink-0">
               <Link to="/" className="text-xl font-bold hover:text-primary transition-colors truncate max-w-[55vw] sm:max-w-none mr-4">
-                {localStorage.getItem('system_name') || 'OneAPI'}
+                {systemStatus.system_name || 'OneAPI'}
               </Link>
             </div>
 
             {/* Navigation - Collapses items dynamically */}
-            {user && !isMobile && <HeaderNav items={navigationItems} />}
+            {!isMobile && <HeaderNav items={navigationItems} />}
 
             {/* Actions and User Menu */}
             <div className="flex items-center space-x-2 flex-shrink-0">
@@ -147,6 +157,10 @@ export function Header() {
                           <span className="font-medium truncate">{user.username}</span>
                         </DropdownMenuLabel>
                         <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => navigate('/settings')} className="flex items-center gap-2">
+                          <User className="h-4 w-4" />
+                          {t('header.profile')}
+                        </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => setLogoutDialogOpen(true)} className="flex items-center gap-2">
                           <LogOut className="h-4 w-4" />
                           {t('common.logout')}
@@ -170,10 +184,18 @@ export function Header() {
                 </>
               ) : (
                 <div className="flex items-center space-x-2">
-                  <Link
-                    to="/register"
-                    className={`font-medium text-muted-foreground hover:text-primary transition-colors ${isMobile ? 'text-sm' : 'text-sm'}`}
-                  >
+                  {isMobile && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setMobileMenuOpen(true)}
+                      className="touch-target"
+                      aria-label="Open navigation menu"
+                    >
+                      <Menu className="h-5 w-5" />
+                    </Button>
+                  )}
+                  <Link to="/register" className="font-medium text-sm text-muted-foreground hover:text-primary transition-colors">
                     {t('common.register')}
                   </Link>
                   <Button asChild size="sm" className="touch-target">
@@ -186,27 +208,40 @@ export function Header() {
         </div>
 
         {/* Mobile Navigation Drawer */}
-        {user && (
-          <NavigationDrawer
-            isOpen={mobileMenuOpen}
-            onClose={() => setMobileMenuOpen(false)}
-            navigationItems={navigationItems}
-            title={t('header.navigation')}
-            footer={
-              <Button
-                variant="outline"
-                className="w-full touch-target gap-2"
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  setLogoutDialogOpen(true);
-                }}
-              >
-                <LogOut className="h-4 w-4" />
-                {t('common.logout')}
-              </Button>
-            }
-          />
-        )}
+        <NavigationDrawer
+          isOpen={mobileMenuOpen}
+          onClose={() => setMobileMenuOpen(false)}
+          navigationItems={navigationItems}
+          title={t('header.navigation')}
+          footer={
+            user ? (
+              <div className="flex flex-col gap-2">
+                <Button
+                  variant="outline"
+                  className="w-full touch-target gap-2"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    navigate('/settings');
+                  }}
+                >
+                  <User className="h-4 w-4" />
+                  {t('header.profile')}
+                </Button>
+                <Button
+                  variant="outline"
+                  className="w-full touch-target gap-2"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setLogoutDialogOpen(true);
+                  }}
+                >
+                  <LogOut className="h-4 w-4" />
+                  {t('common.logout')}
+                </Button>
+              </div>
+            ) : undefined
+          }
+        />
       </header>
 
       <Dialog open={isLogoutDialogOpen} onOpenChange={setLogoutDialogOpen}>

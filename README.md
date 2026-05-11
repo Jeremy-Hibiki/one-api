@@ -11,7 +11,7 @@ Open‑source version of OpenRouter, managed through a unified gateway that hand
 5. Supporting multi‑tenant management, allowing each tenant to set distinct quotas and permissions.
 6. Supporting generation of sub‑API Keys; each tenant can create multiple sub‑API Keys, each of which can be bound to different models and quotas.
 
-![](https://s3.laisky.com/uploads/2025/07/oneapi.drawio.png)
+![](https://s3.laisky.com/uploads/2026/04/one-api.png)
 
 Also welcome to register and use my deployed one-api gateway, which supports various mainstream models. For usage instructions, please refer to <https://wiki.laisky.com/projects/gpt/pay/>.
 
@@ -20,7 +20,7 @@ Try it at <https://oneapi.laisky.com>, login with `test` / `12345678`. 🚀
 ```plain
 === One-API Compatibility Matrix 2025-12-12T04:37:09Z ===
 
-Request Format                         gpt-4o-mini  gpt-5-mini   claude-haiku-4-5  gemini-2.5-flash  openai/gpt-oss-20b  deepseek-chat  grok-4-fast-non-reasoning  azure-gpt-5-nano
+Request Format                         gpt-4o-mini  gpt-5-mini   claude-haiku-4-5  gemini-2.5-flash  openai/gpt-oss-20b  deepseek-chat  grok-4-1-fast-non-reasoning  azure-gpt-5-nano
 Chat (stream=false)                    PASS 11.21s  PASS 13.10s  PASS 8.52s        PASS 4.64s        PASS 9.52s          PASS 7.08s     PASS 3.08s                 PASS 14.68s
 Chat (stream=true)                     PASS 13.23s  PASS 13.37s  PASS 2.31s        PASS 6.02s        PASS 4.56s          PASS 10.92s    PASS 9.72s                 PASS 15.30s
 Chat Tools (stream=false)              PASS 5.60s   PASS 12.94s  PASS 7.69s        PASS 7.11s        PASS 3.14s          PASS 8.71s     PASS 5.48s                 PASS* 35.02s
@@ -134,6 +134,7 @@ The original author stopped maintaining the project, leaving critical PRs and ne
       - [Support replicate chat models](#support-replicate-chat-models)
     - [DeepSeek Features](#deepseek-features)
       - [Support deepseek-reasoner](#support-deepseek-reasoner)
+      - [DeepSeek V4](#deepseek-v4)
     - [OpenRouter Features](#openrouter-features)
       - [Support OpenRouter's reasoning content](#support-openrouters-reasoning-content)
     - [Cohere](#cohere)
@@ -143,7 +144,14 @@ The original author stopped maintaining the project, leaving critical PRs and ne
     - [Moonshot Features](#moonshot-features)
       - [Support kimi-k2 Family](#support-kimi-k2-family)
     - [GLM Features](#glm-features)
-      - [Support GLM-4 Family](#support-glm-4-family)
+      - [Flagship Models - Text](#flagship-models---text)
+      - [Flagship Models - Visual](#flagship-models---visual)
+      - [Language Models](#language-models)
+      - [Reasoning Models](#reasoning-models)
+      - [Multimodal Models](#multimodal-models)
+      - [Image Generation Models](#image-generation-models)
+      - [Other Models](#other-models)
+      - [GLM OCR](#glm-ocr)
     - [XAI / Grok Features](#xai--grok-features)
       - [Support XAI/Grok Text \& Image Models](#support-xaigrok-text--image-models)
     - [Black Forest Labs Features](#black-forest-labs-features)
@@ -206,6 +214,8 @@ Support internationalization (i18n) in the web frontend, including English, Chin
 #### Unified Billing System
 
 All channels share a four-layer billing pipeline (channel overrides → adapter defaults → global fallback → safe default) with support for tiered token pricing, cached prompt buckets, and per-second/per-image media meters. Administrators can fetch defaults, override specific models, and audit every call via `X-Oneapi-Request-Id`; see [docs/arch/billing.md](./docs/arch/billing.md) for internals and [docs/manuals/billing.md](./docs/manuals/billing.md) for the operational playbook.
+
+Marketplace and aggregation-channel pricing snapshots such as OpenRouter, Together AI, Fireworks, Replicate, Cloudflare, and Novita are maintained from official provider docs or machine-readable official APIs rather than third-party trackers.
 
 #### Support Open Telemetry
 
@@ -280,6 +290,8 @@ Supports two URL parameters: `thinking` and `reasoning_format`.
   - `reasoning_content`: DeepSeek official API format, returned in the `reasoning_content` field.
   - `reasoning`: OpenRouter format, returned in the `reasoning` field.
   - `thinking`: Claude format, returned in the `thinking` field.
+
+OpenAI Chat Completions, Response API, and Claude Messages requests also accept an `extra_body` object for allowlisted provider-specific passthrough fields. OneAPI flattens allowlisted keys into the upstream root payload, preserves explicit top-level request fields, and rejects malformed or non-allowlisted entries.
 
 ##### Reasoning Format - reasoning-content
 
@@ -532,7 +544,7 @@ Response:
 
 #### Support openai images edits
 
-- [feat: support openai images edits api #1369](https://github.com/songquanpeng/one-api/pull/1369)
+- [feat: support openai images edits api #1369](https://github.com/Laisky/one-api/pull/1369)
 
 ```sh
 curl --location 'https://oneapi.laisky.com/v1/images/edits' \
@@ -558,11 +570,11 @@ Response:
 
 #### Support OpenAI o1/o1-mini/o1-preview
 
-- [feat: add openai o1 #1990](https://github.com/songquanpeng/one-api/pull/1990)
+- [feat: add openai o1 #1990](https://github.com/Laisky/one-api/pull/1990)
 
 #### Support gpt-4o-audio
 
-- [feat: support gpt-4o-audio #2032](https://github.com/songquanpeng/one-api/pull/2032)
+- [feat: support gpt-4o-audio #2032](https://github.com/Laisky/one-api/pull/2032)
 
 ```sh
 
@@ -651,7 +663,7 @@ Response:
 
 #### Support OpenAI web search models
 
-- [feature: support openai web search models #2189](https://github.com/songquanpeng/one-api/pull/2189)
+- [feature: support openai web search models #2189](https://github.com/Laisky/one-api/pull/2189)
 
 support `gpt-4o-search-preview` & `gpt-4o-mini-search-preview`
 
@@ -848,11 +860,13 @@ Response:
 
 #### Support o3-mini & o3 & o4-mini & gpt-4.1 & o3-pro & reasoning content
 
-- [feat: extend support for o3 models and update model ratios #2048](https://github.com/songquanpeng/one-api/pull/2048)
+- [feat: extend support for o3 models and update model ratios #2048](https://github.com/Laisky/one-api/pull/2048)
 
 ![](https://s3.laisky.com/uploads/2025/06/o3-pro.png)
 
 #### Support OpenAI Response API
+
+Also support websocket for OpenAI Response API.
 
 ```sh
 curl --location 'https://oneapi.laisky.com/v1/responses' \
@@ -896,6 +910,10 @@ Response:
 ```
 
 #### Support gpt-5 family
+
+gpt-5.5 / gpt-5.5-2026-04-23
+
+gpt-5.4 / gpt-5.4-pro
 
 gpt-5.2 / gpt-5.2-2025-12-11 / gpt-5.2-pro / gpt-5.2-pro-2025-12-11 / gpt-5.2-codex
 
@@ -1066,15 +1084,15 @@ curl --location 'https://oneapi.laisky.com/v1/videos/video_691611812ca88190bfb12
 
 #### (Merged) Support aws claude
 
-- [feat: support aws bedrockruntime claude3 #1328](https://github.com/songquanpeng/one-api/pull/1328)
-- [feat: add new claude models #1910](https://github.com/songquanpeng/one-api/pull/1910)
+- [feat: support aws bedrockruntime claude3 #1328](https://github.com/Laisky/one-api/pull/1328)
+- [feat: add new claude models #1910](https://github.com/Laisky/one-api/pull/1910)
 
 ![](https://s3.laisky.com/uploads/2024/12/oneapi-claude.png)
 
 #### Support claude-3-7-sonnet & thinking
 
-- [feat: support claude-3-7-sonnet #2143](https://github.com/songquanpeng/one-api/pull/2143/files)
-- [feat: support claude thinking #2144](https://github.com/songquanpeng/one-api/pull/2144)
+- [feat: support claude-3-7-sonnet #2143](https://github.com/Laisky/one-api/pull/2143/files)
+- [feat: support claude thinking #2144](https://github.com/Laisky/one-api/pull/2144)
 
 By default, the thinking mode is not enabled. You need to manually pass the `thinking` field in the request body to enable it.
 
@@ -1104,33 +1122,33 @@ You can use any model you like for Claude Code, even if the model doesn’t nati
 
 ![](https://s3.laisky.com/uploads/2025/09/claude-sonnet-4-5.png)
 
-claude-opus-4-0 / claude-opus-4-1 / claude-opus-4-5 / claude-sonnet-4-0 / claude-sonnet-4-5 / claude-haiku-4-5
+claude-opus-4-0 / claude-opus-4-1 / claude-opus-4-5 / claude-opus-4-6 / claude-opus-4-7 / claude-sonnet-4-0 / claude-sonnet-4-5 / claude-sonnet-4-6 / claude-haiku-4-5
 
 ### Google (Gemini & Vertex) Features
 
 #### Support gemini-2.0-flash-exp
 
-- [feat: add gemini-2.0-flash-exp #1983](https://github.com/songquanpeng/one-api/pull/1983)
+- [feat: add gemini-2.0-flash-exp #1983](https://github.com/Laisky/one-api/pull/1983)
 
 ![](https://s3.laisky.com/uploads/2024/12/oneapi-gemini-flash.png)
 
 #### Support gemini-2.0-flash
 
-- [feat: support gemini-2.0-flash #2055](https://github.com/songquanpeng/one-api/pull/2055)
+- [feat: support gemini-2.0-flash #2055](https://github.com/Laisky/one-api/pull/2055)
 
 #### Support gemini-2.0-flash-thinking-exp-01-21
 
-- [feature: add deepseek-reasoner & gemini-2.0-flash-thinking-exp-01-21 #2045](https://github.com/songquanpeng/one-api/pull/2045)
+- [feature: add deepseek-reasoner & gemini-2.0-flash-thinking-exp-01-21 #2045](https://github.com/Laisky/one-api/pull/2045)
 
 #### Support Vertex Imagen3
 
-- [feat: support vertex imagen3 #2030](https://github.com/songquanpeng/one-api/pull/2030)
+- [feat: support vertex imagen3 #2030](https://github.com/Laisky/one-api/pull/2030)
 
 ![](https://s3.laisky.com/uploads/2025/01/oneapi-imagen3.png)
 
 #### Support gemini multimodal output #2197
 
-- [feature: support gemini multimodal output #2197](https://github.com/songquanpeng/one-api/pull/2197)
+- [feature: support gemini multimodal output #2197](https://github.com/Laisky/one-api/pull/2197)
 
 ![](https://s3.laisky.com/uploads/2025/03/gemini-multimodal.png)
 
@@ -1146,7 +1164,7 @@ claude-opus-4-0 / claude-opus-4-1 / claude-opus-4-5 / claude-sonnet-4-0 / claude
 
 #### Support gemini-3 family
 
-Support gemini-3-pro-preview / gemini-3-pro-image-preview / gemini-3-flash-preview
+Support gemini-3.1-pro-preview / gemini-3.1-pro-preview-customtools / gemini-3-pro-preview / gemini-3-pro-image-preview / gemini-3-flash-preview / gemini-3.1-flash-image-preview / gemini-3.1-flash-lite-preview
 
 ### OpenCode Support
 
@@ -1216,7 +1234,7 @@ To get started, create or edit `~/.config/opencode/opencode.json` like this:
 
 #### Support AWS cross-region inferences
 
-- [fix: support aws cross region inferences #2182](https://github.com/songquanpeng/one-api/pull/2182)
+- [fix: support aws cross region inferences #2182](https://github.com/Laisky/one-api/pull/2182)
 
 #### Support AWS BedRock Inference Profile
 
@@ -1226,8 +1244,8 @@ To get started, create or edit `~/.config/opencode/opencode.json` like this:
 
 #### Support replicate flux & remix
 
-- [feature: 支持 replicate 的绘图 #1954](https://github.com/songquanpeng/one-api/pull/1954)
-- [feat: image edits/inpaiting 支持 replicate 的 flux remix #1986](https://github.com/songquanpeng/one-api/pull/1986)
+- [feature: 支持 replicate 的绘图 #1954](https://github.com/Laisky/one-api/pull/1954)
+- [feat: image edits/inpaiting 支持 replicate 的 flux remix #1986](https://github.com/Laisky/one-api/pull/1986)
 
 ![](https://s3.laisky.com/uploads/2024/12/oneapi-replicate-1.png)
 
@@ -1237,19 +1255,23 @@ To get started, create or edit `~/.config/opencode/opencode.json` like this:
 
 #### Support replicate chat models
 
-- [feat: 支持 replicate chat models #1989](https://github.com/songquanpeng/one-api/pull/1989)
+- [feat: 支持 replicate chat models #1989](https://github.com/Laisky/one-api/pull/1989)
 
 ### DeepSeek Features
 
 #### Support deepseek-reasoner
 
-- [feature: add deepseek-reasoner & gemini-2.0-flash-thinking-exp-01-21 #2045](https://github.com/songquanpeng/one-api/pull/2045)
+- [feature: add deepseek-reasoner & gemini-2.0-flash-thinking-exp-01-21 #2045](https://github.com/Laisky/one-api/pull/2045)
+
+#### DeepSeek V4
+
+Support deepseek-v4-flash / deepseek-v4-pro
 
 ### OpenRouter Features
 
 #### Support OpenRouter's reasoning content
 
-- [feat: support OpenRouter reasoning #2108](https://github.com/songquanpeng/one-api/pull/2108)
+- [feat: support OpenRouter reasoning #2108](https://github.com/Laisky/one-api/pull/2108)
 
 By default, the thinking mode is automatically enabled for the deepseek-r1 model, and the response is returned in the open-router format.
 
@@ -1335,24 +1357,131 @@ Support:
 
 ### GLM Features
 
-Support:
+#### Flagship Models - Text
 
-- `glm-zero-preview`
-- `glm-3-turbo`
-- `cogview-3-flash`
-- `codegeex-4`
-- `embedding-3`
-- `embedding-2`
+`glm-5-turbo` / `glm-5` / `glm-4.7` / `glm-4.7-flashx` / `glm-4.7-flash` / `glm-4.6` / `glm-4.5` / `glm-4.5-x` / `glm-4.5-air` / `glm-4.5-airx`
 
-#### Support GLM-4 Family
+#### Flagship Models - Visual
 
-- `glm-4.6`
-- `glm-4.5`
-- `glm-4.5-x`
-- `glm-4.5-air`
-- `glm-4.5-airx`
-- `glm-4.5-flash`
-- `glm-4v-flash`
+`glm-5v-turbo` / `glm-4.6v` / `glm-4.6v-flashx` / `glm-4.5v` / `glm-4.6v-flash` / `glm-4v-flash`
+
+#### Language Models
+
+`glm-4-plus` / `glm-4-air` / `glm-4-airx` / `glm-4-flashx-250414` / `glm-4-long` / `glm-4-assistant` / `glm-4-flash-250414` / `glm-4.5-flash` / `glm-4-flash`
+
+#### Reasoning Models
+
+`glm-z1-air` / `glm-z1-airx` / `glm-z1-flashx` / `glm-4.1v-thinking-flashx` / `glm-4.1v-thinking-flash`
+
+#### Multimodal Models
+
+`glm-4v-plus-0111` / `glm-4v-plus` / `glm-4v` / `glm-4-voice`
+
+#### Image Generation Models
+
+`cogview-4` / `cogview-3-plus` / `cogview-3` / `cogview-3-flash` / `cogviewx` / `cogviewx-flash`
+
+#### Other Models
+
+`charglm-4` / `emohaa` / `codegeex-4` / `rerank` / `embedding-3` / `embedding-2` / `glm-3-turbo` / `glm-zero-preview`
+
+#### GLM OCR
+
+```sh
+curl --location 'https://oneapi.laisky.com/api/paas/v4/layout_parsing' \
+--header 'Content-Type: application/json' \
+--header 'Authorization: ••••••' \
+--data '{
+    "model": "glm-ocr",
+    "file": "https://s3.laisky.com/uploads/2026/04/IMG_5867.jpeg"
+
+}'
+```
+
+Response:
+
+```json
+{
+  "created": 1775094925,
+  "data_info": {
+    "num_pages": 1,
+    "pages": [
+      {
+        "height": 4032,
+        "width": 3024
+      }
+    ]
+  },
+  "id": "202604020955171fc1a13d434945b8",
+  "layout_details": [
+    [
+      {
+        "bbox_2d": [1348, 297, 2104, 502],
+        "content": "## metro",
+        "height": 4032,
+        "index": 0,
+        "label": "text",
+        "native_label": "paragraph_title",
+        "width": 3024
+      },
+      {
+        "bbox_2d": [877, 587, 2171, 695],
+        "content": "Store #100256（613）823-8825",
+        "height": 4032,
+        "index": 1,
+        "label": "text",
+        "native_label": "text",
+        "width": 3024
+      },
+      {
+        "bbox_2d": [877, 680, 2102, 785],
+        "content": "E&OE HST# R105216170",
+        "height": 4032,
+        "index": 2,
+        "label": "text",
+        "native_label": "text",
+        "width": 3024
+      },
+      {
+        "bbox_2d": [524, 820, 2564, 3724],
+        "content": "<table><thead><tr><th>MEAT</th><th></th><th></th></tr></thead><tbody><tr><td>LSM.PORK SHLD BL</td><td></td><td>4.31</td></tr><tr><td>THE KEG BBQ BACK</td><td></td><td>17.99</td></tr><tr><td>Saving 3.00</td><td></td><td></td></tr><tr><td>PRODUCE</td><td></td><td></td></tr><tr><td>TOFU MEDIUM-FIRM</td><td></td><td>2.99</td></tr><tr><td>PREMIUM BANANA</td><td>0.685 kg @ $1.74/kg</td><td>1.19</td></tr><tr><td>GINGER</td><td>0.235 kg @ $6.59/kg</td><td>1.55</td></tr><tr><td>PEP.GRN LG HOT</td><td>0.340 kg @ $11.00/kg</td><td>3.74</td></tr><tr><td>(2)GARLIC</td><td>2 @ $1.99</td><td>3.98</td></tr><tr><td>SEAFOOD</td><td></td><td>7.99</td></tr><tr><td>BW BREADED FISH</td><td></td><td>7.99</td></tr><tr><td>Saving 3.00</td><td></td><td></td></tr><tr><td>SUBTOTAL</td><td></td><td>43.74</td></tr><tr><td>TOTAL</td><td></td><td>43.74</td></tr><tr><td>CREDIT CR</td><td></td><td>43.74</td></tr><tr><td>Total number of items sold</td><td></td><td>9</td></tr></tbody></table>",
+        "height": 4032,
+        "index": 3,
+        "label": "table",
+        "native_label": "table",
+        "width": 3024
+      },
+      {
+        "bbox_2d": [581, 3593, 2462, 3886],
+        "content": "RETAIN RECEIPT FOR PRODUCT RETURN WITHIN 14 DAYS. SEE STORE FOR DETAILS",
+        "height": 4032,
+        "index": 4,
+        "label": "text",
+        "native_label": "text",
+        "width": 3024
+      },
+      {
+        "bbox_2d": [612, 3892, 2464, 4030],
+        "content": "CUSTOMER CARE NUMBER 1-866-595-5554",
+        "height": 4032,
+        "index": 5,
+        "label": "text",
+        "native_label": "text",
+        "width": 3024
+      }
+    ]
+  ],
+  "layout_visualization": [],
+  "md_results": "## metro\n\nStore #100256（613）823-8825\n\nE&OE HST# R105216170\n\n<table><thead><tr><th>MEAT</th><th></th><th></th></tr></thead><tbody><tr><td>LSM.PORK SHLD BL</td><td></td><td>4.31</td></tr><tr><td>THE KEG BBQ BACK</td><td></td><td>17.99</td></tr><tr><td>Saving 3.00</td><td></td><td></td></tr><tr><td>PRODUCE</td><td></td><td></td></tr><tr><td>TOFU MEDIUM-FIRM</td><td></td><td>2.99</td></tr><tr><td>PREMIUM BANANA</td><td>0.685 kg @ $1.74/kg</td><td>1.19</td></tr><tr><td>GINGER</td><td>0.235 kg @ $6.59/kg</td><td>1.55</td></tr><tr><td>PEP.GRN LG HOT</td><td>0.340 kg @ $11.00/kg</td><td>3.74</td></tr><tr><td>(2)GARLIC</td><td>2 @ $1.99</td><td>3.98</td></tr><tr><td>SEAFOOD</td><td></td><td>7.99</td></tr><tr><td>BW BREADED FISH</td><td></td><td>7.99</td></tr><tr><td>Saving 3.00</td><td></td><td></td></tr><tr><td>SUBTOTAL</td><td></td><td>43.74</td></tr><tr><td>TOTAL</td><td></td><td>43.74</td></tr><tr><td>CREDIT CR</td><td></td><td>43.74</td></tr><tr><td>Total number of items sold</td><td></td><td>9</td></tr></tbody></table>\n\nRETAIN RECEIPT FOR PRODUCT RETURN WITHIN 14 DAYS. SEE STORE FOR DETAILS\n\nCUSTOMER CARE NUMBER 1-866-595-5554",
+  "model": "glm-ocr",
+  "request_id": "202604020955171fc1a13d434945b8",
+  "usage": {
+    "completion_tokens": 604,
+    "prompt_tokens": 7666,
+    "total_tokens": 8270
+  }
+}
+```
 
 ### XAI / Grok Features
 
@@ -1368,13 +1497,13 @@ Support:
 
 ## Bug Fixes & Enterprise-Grade Improvements (Including Security Enhancements)
 
-- [BUGFIX: Several issues when updating tokens #1933](https://github.com/songquanpeng/one-api/pull/1933)
-- [feat(audio): count whisper-1 quota by audio duration #2022](https://github.com/songquanpeng/one-api/pull/2022)
+- [BUGFIX: Several issues when updating tokens #1933](https://github.com/Laisky/one-api/pull/1933)
+- [feat(audio): count whisper-1 quota by audio duration #2022](https://github.com/Laisky/one-api/pull/2022)
 - [fix: Fix issue where high-quota users using low-quota tokens aren't pre-charged, causing large token deficits under high concurrency #25](https://github.com/Laisky/one-api/pull/25)
-- [fix: channel test false negative #2065](https://github.com/songquanpeng/one-api/pull/2065)
-- [fix: resolve "bufio.Scanner: token too long" error by increasing buffer size #2128](https://github.com/songquanpeng/one-api/pull/2128)
-- [feat: Enhance VolcEngine channel support with bot model #2131](https://github.com/songquanpeng/one-api/pull/2131)
-- [fix: models API returns models in deactivated channels #2150](https://github.com/songquanpeng/one-api/pull/2150)
+- [fix: channel test false negative #2065](https://github.com/Laisky/one-api/pull/2065)
+- [fix: resolve "bufio.Scanner: token too long" error by increasing buffer size #2128](https://github.com/Laisky/one-api/pull/2128)
+- [feat: Enhance VolcEngine channel support with bot model #2131](https://github.com/Laisky/one-api/pull/2131)
+- [fix: models API returns models in deactivated channels #2150](https://github.com/Laisky/one-api/pull/2150)
 - [fix: Automatically close channel when connection fails](https://github.com/Laisky/one-api/pull/34)
 - [fix: update EmailDomainWhitelist submission logic #33](https://github.com/Laisky/one-api/pull/33)
 - [fix: send ByAll](https://github.com/Laisky/one-api/pull/35)

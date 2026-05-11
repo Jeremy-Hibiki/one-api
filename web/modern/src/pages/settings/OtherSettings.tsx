@@ -86,7 +86,6 @@ export function OtherSettings() {
       setLoading(true);
       // Unified API call - complete URL with /api prefix
       await api.put('/api/option/', { key, value });
-      console.log(`Updated ${key}`);
     } catch (error) {
       console.error(`Error updating ${key}:`, error);
     } finally {
@@ -101,10 +100,9 @@ export function OtherSettings() {
 
   const checkUpdate = async () => {
     try {
-      // Unified API call - complete URL with /api prefix
-      const res = await api.get('/api/option/update');
-      const { success, data } = res.data;
-      if (success && data) {
+      const res = await fetch('https://api.github.com/repos/Laisky/one-api/releases/latest');
+      const data = await res.json();
+      if (data.tag_name) {
         setUpdateData(data);
       }
     } catch (error) {
@@ -221,7 +219,7 @@ export function OtherSettings() {
                       </FormLabel>
                       <div className="flex gap-2">
                         <FormControl>
-                          <Input placeholder="default" {...field} />
+                          <Input placeholder="modern" {...field} />
                         </FormControl>
                         <Button onClick={() => submitField('Theme')}>{t('other_settings.branding.save')}</Button>
                       </div>

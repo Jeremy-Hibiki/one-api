@@ -21,6 +21,23 @@
       "top_up_link": "Enlace de recarga",
       "top_up_link_desc": "Enlace externo para que los usuarios compren o recarguen cuota."
     },
+    "group_ratio": {
+      "description": "Configure los multiplicadores de facturación por grupo de canales. Para añadir un grupo nuevo basta con agregar una entrada aquí.",
+      "fix_errors_first": "Corrija los errores JSON antes de guardar.",
+      "format": "Formatear JSON",
+      "help": "Objeto JSON cuyas claves son nombres de grupos y cuyos valores son multiplicadores aplicados al precio base (p. ej. vip: 0,8 significa 20 % de descuento).",
+      "invalid_entries": "Estas entradas de grupo deben usar un número ≥ 0 y una clave no vacía: {{keys}}",
+      "invalid_json": "Error al analizar JSON: {{message}}",
+      "label": "Ratio de grupos (JSON)",
+      "save": "Guardar ratio de grupos",
+      "save_failed": "No se pudo guardar el ratio de grupos",
+      "saved_message": "Ratio de grupos actualizado.",
+      "saved_success": "Guardado",
+      "saving": "Guardando...",
+      "shape_invalid": "El ratio de grupos debe ser un objeto JSON con la forma { \"nombreGrupo\": ratio }.",
+      "title": "Grupos y ratios",
+      "unsaved": "Cambios sin guardar"
+    },
     "loading": "Cargando ajustes operativos...",
     "logs": {
       "clear_button": "Borrar registros antes de esta fecha",
@@ -66,7 +83,7 @@
       "system_name": "Nombre del sistema",
       "system_name_desc": "Nombre que se muestra en la interfaz y en los correos.",
       "theme": "Tema",
-      "theme_desc": "Nombre del tema de la UI. Soportados: default, berry, air, modern.",
+      "theme_desc": "Nombre del tema de la UI. Soportados: berry, air, modern.",
       "title": "Identidad del sistema"
     },
     "content": {
@@ -105,20 +122,97 @@
       "get_invite_link": "Obtener enlace de invitación",
       "title": "Token de acceso e invitación"
     },
+    "oauth_binding": {
+      "bind_failed": "No se pudo iniciar el flujo de vinculación",
+      "bind_lark": "Vincular Lark",
+      "bind_oidc": "Vincular OIDC",
+      "binding": "Vinculando...",
+      "bound_lark": "Cuenta de Lark vinculada",
+      "bound_oidc": "Cuenta OIDC vinculada",
+      "description": "Vincula proveedores de identidad de terceros a tu cuenta para iniciar sesión con un clic.",
+      "lark_label": "Lark",
+      "not_bound": "No vinculada",
+      "oidc_label": "OIDC",
+      "title": "Vinculación de cuentas",
+      "unbind_failed": "No se pudo desvincular la cuenta",
+      "unbind_lark": "Desvincular Lark",
+      "unbind_oidc": "Desvincular OIDC",
+      "unbind_success": "Cuenta desvinculada correctamente"
+    },
+    "passkey": {
+      "delete_button": "Eliminar",
+      "delete_confirm": "¿Estás seguro de que deseas eliminar esta passkey?",
+      "description": "Usa la biometría, llaves de seguridad o tu dispositivo para iniciar sesión sin contraseña.",
+      "errors": {
+        "delete_failed": "Error al eliminar la passkey",
+        "load_failed": "Error al cargar las passkeys",
+        "not_supported": "Las passkeys no son compatibles con este navegador",
+        "register_failed": "Error al registrar la passkey",
+        "rename_failed": "Error al renombrar la passkey",
+        "webauthn_unavailable": "WebAuthn no está disponible"
+      },
+      "list_title": "Tus Passkeys",
+      "name_label": "Nombre de la Passkey",
+      "name_placeholder": "p. ej. MacBook Touch ID",
+      "no_passkeys": "No hay passkeys registradas.",
+      "no_passkeys_desc": "Agrega una passkey para habilitar el inicio de sesión sin contraseña con biometría o una llave de seguridad.",
+      "not_supported_desc": "Tu navegador no es compatible con passkeys. Prueba con un navegador moderno como Chrome, Safari o Edge.",
+      "processing": "Procesando...",
+      "recommended": "Recomendado",
+      "register_button": "Agregar Passkey",
+      "registered": "Registrada",
+      "rename_button": "Renombrar",
+      "rename_placeholder": "Introduce el nuevo nombre",
+      "sign_count": "Número de usos",
+      "title": "Passkeys (WebAuthn)"
+    },
     "profile_info": {
+      "bind_email": "Bind Email",
+      "bind_success": "Email updated successfully",
+      "binding_email": "Binding email...",
       "description": "Actualiza tu información personal y ajustes de cuenta.",
       "display_name": "Nombre para mostrar",
       "display_name_placeholder": "Introduce un nombre para mostrar",
       "email": "Correo electrónico",
+      "email_help": "Changing email requires verification. Send a code to the new address and confirm it below.",
       "email_placeholder": "Introduce un correo",
+      "email_verification_code_placeholder": "Enter email verification code",
       "failed": "La actualización falló",
-      "password": "Nueva contraseña (deja vacío para mantener la actual)",
-      "password_placeholder": "Introduce una nueva contraseña",
+      "load_failed": "Failed to load profile information",
+      "send_code": "Send Verification Code",
+      "send_code_success": "Verification code sent. Check your inbox.",
+      "sending_code": "Sending code...",
       "success": "Perfil actualizado correctamente",
       "title": "Información del perfil",
       "update_button": "Actualizar perfil",
       "updating": "Actualizando...",
       "username": "Nombre de usuario"
+    },
+    "security": {
+      "description": "Gestiona cómo inicias sesión y protege tu cuenta.",
+      "password": {
+        "confirm_password": "Confirmar contraseña",
+        "confirm_password_placeholder": "Vuelve a introducir la nueva contraseña",
+        "description": "Usa una contraseña segura y única como método alternativo de inicio de sesión.",
+        "failed": "Error al actualizar la contraseña",
+        "mismatch": "Las contraseñas no coinciden",
+        "new_password": "Nueva contraseña",
+        "new_password_placeholder": "Introduce la nueva contraseña",
+        "success": "Contraseña actualizada correctamente",
+        "title": "Contraseña",
+        "update_button": "Actualizar contraseña",
+        "updating": "Actualizando..."
+      },
+      "status": {
+        "passkey_off": "Sin passkey",
+        "passkey_on": "Passkey habilitada",
+        "password_off": "Sin contraseña",
+        "password_on": "Contraseña establecida",
+        "title": "Resumen de seguridad",
+        "totp_off": "Sin TOTP",
+        "totp_on": "TOTP habilitado"
+      },
+      "title": "Seguridad de la cuenta"
     },
     "totp": {
       "cancel": "Cancelar",
@@ -215,7 +309,7 @@
       "SMTPToken": "Contraseña o token SMTP usado para autenticarse (se almacena de forma segura).",
       "ServerAddress": "URL base pública del servidor (para enlaces y callbacks).",
       "SystemName": "Nombre del sistema mostrado en la interfaz y correos.",
-      "Theme": "Tema de la UI (default, berry, air, modern).",
+      "Theme": "Tema de la UI (berry, air, modern).",
       "TopUpLink": "Enlace externo para comprar o recargar cuota.",
       "TurnstileCheckEnabled": "Activar Cloudflare Turnstile en acciones críticas (registro/restablecimiento).",
       "TurnstileSecretKey": "Clave secreta de Turnstile usada por el servidor (mantener privada).",
@@ -226,6 +320,17 @@
       "WeChatServerToken": "Token de verificación para la integración con WeChat (se almacena de forma segura)."
     },
     "disabled": "Desactivado",
+    "email_whitelist": {
+      "add": "Añadir",
+      "duplicate_domain": "El dominio \"{{domain}}\" ya está en la lista.",
+      "duplicate_title": "Dominio duplicado",
+      "empty": "Aún no se han añadido dominios.",
+      "input_aria": "Nuevo dominio de correo",
+      "invalid_domain": "\"{{domain}}\" no es un dominio válido.",
+      "invalid_title": "Dominio inválido",
+      "placeholder": "p. ej. example.com",
+      "remove_aria": "Eliminar {{domain}}"
+    },
     "enabled": "Activado",
     "groups": {
       "authentication": {
@@ -273,6 +378,14 @@
     "loading": "Cargando opciones...",
     "no_description": "Aún no hay una descripción para esta opción.",
     "no_options": "No hay opciones disponibles o faltan permisos.",
+    "oidc_discovery": {
+      "button": "Obtener endpoints",
+      "failed_title": "Fallo al descubrir OIDC",
+      "invalid_url": "OidcWellKnown debe ser una URL http(s) válida antes de descubrir.",
+      "missing_endpoints": "El documento de descubrimiento no incluye: {{endpoints}}",
+      "success_message": "Se guardaron los endpoints de autorización, token y userinfo.",
+      "success_title": "Endpoints OIDC actualizados"
+    },
     "option_value_aria": "Valor de {{key}}",
     "refresh": "Actualizar",
     "save": "Guardar",

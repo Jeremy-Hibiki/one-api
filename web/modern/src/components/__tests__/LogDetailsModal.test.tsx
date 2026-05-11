@@ -1,44 +1,43 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import type { Mock } from 'vitest'
-import { render, screen, act, waitFor } from '@testing-library/react'
-import type { ReactNode } from 'react'
+import { act, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { MemoryRouter } from 'react-router-dom';
+import type { Mock } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/components/ui/dialog', () => {
-  const Dialog = ({ children }: { children: ReactNode }) => <>{children}</>
+  const Dialog = ({ children }: { children: ReactNode }) => <>{children}</>;
   const DialogContent = ({ children, className }: { children: ReactNode; className?: string }) => (
     <div className={className}>{children}</div>
-  )
-  const DialogHeader = ({ children }: { children: ReactNode }) => <div>{children}</div>
-  const DialogTitle = ({ children }: { children: ReactNode }) => <div>{children}</div>
-  const DialogDescription = ({ children }: { children: ReactNode }) => <div>{children}</div>
-  return { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription }
-})
+  );
+  const DialogHeader = ({ children }: { children: ReactNode }) => <div>{children}</div>;
+  const DialogTitle = ({ children }: { children: ReactNode }) => <div>{children}</div>;
+  const DialogDescription = ({ children }: { children: ReactNode }) => <div>{children}</div>;
+  return { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription };
+});
 
 vi.mock('@/components/ui/scroll-area', () => ({
-  ScrollArea: ({ children, className }: { children: ReactNode; className?: string }) => (
-    <div className={className}>{children}</div>
-  ),
-}))
+  ScrollArea: ({ children, className }: { children: ReactNode; className?: string }) => <div className={className}>{children}</div>,
+}));
 
 vi.mock('@/components/ui/separator', () => ({
   Separator: ({ className }: { className?: string }) => <hr className={className} />,
-}))
+}));
 
 vi.mock('@/components/ui/tooltip', () => ({
   TooltipProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
   Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
   TooltipTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
   TooltipContent: ({ children }: { children: ReactNode }) => <>{children}</>,
-}))
+}));
 
 vi.mock('@/components/ui/alert', () => ({
   Alert: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   AlertDescription: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-}))
+}));
 
 vi.mock('@/components/ui/skeleton', () => ({
   Skeleton: ({ className }: { className?: string }) => <div className={className} data-testid="skeleton" />,
-}))
+}));
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -49,18 +48,18 @@ vi.mock('@/lib/api', () => ({
       response: { use: vi.fn() },
     },
   },
-}))
+}));
 
-import { LogDetailsModal } from '../LogDetailsModal'
-import { LOG_TYPES } from '@/lib/constants/logs'
-import { useAuthStore } from '@/lib/stores/auth'
-import { formatTimestamp, renderQuota } from '@/lib/utils'
-import type { LogEntry } from '@/types/log'
-import { api } from '@/lib/api'
+import { api } from '@/lib/api';
+import { LOG_TYPES } from '@/lib/constants/logs';
+import { useAuthStore } from '@/lib/stores/auth';
+import { formatTimestamp, renderQuota } from '@/lib/utils';
+import type { LogEntry } from '@/types/log';
+import { LogDetailsModal } from '../LogDetailsModal';
 
-const apiGetMock = () => api.get as Mock
+const apiGetMock = () => api.get as Mock;
 
-type AuthUser = NonNullable<ReturnType<typeof useAuthStore.getState>['user']>
+type AuthUser = NonNullable<ReturnType<typeof useAuthStore.getState>['user']>;
 
 const defaultUser: AuthUser = {
   id: 1,
@@ -70,29 +69,36 @@ const defaultUser: AuthUser = {
   quota: 1000,
   used_quota: 0,
   group: 'default',
-}
+};
 
 const formatLatencyForTest = (ms?: number) => {
-  if (!ms) return '-'
-  if (ms < 1000) return `${ms}ms`
-  return `${(ms / 1000).toFixed(1)}s`
-}
+  if (!ms) return '-';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+};
+
+const renderLogDetailsModal = (log: LogEntry) =>
+  render(
+    <MemoryRouter>
+      <LogDetailsModal open onOpenChange={vi.fn()} log={log} />
+    </MemoryRouter>
+  );
 
 describe('LogDetailsModal', () => {
   beforeEach(() => {
-    localStorage.clear()
+    localStorage.clear();
     act(() => {
-      useAuthStore.setState({ user: defaultUser, token: 'token', isAuthenticated: true })
-    })
-    apiGetMock().mockReset()
-  })
+      useAuthStore.setState({ user: defaultUser, token: 'token', isAuthenticated: true });
+    });
+    apiGetMock().mockReset();
+  });
 
   afterEach(() => {
     act(() => {
-      useAuthStore.setState({ user: null, token: null, isAuthenticated: false })
-    })
-    localStorage.clear()
-  })
+      useAuthStore.setState({ user: null, token: null, isAuthenticated: false });
+    });
+    localStorage.clear();
+  });
 
   it('renders a detailed view that mirrors the logs table fields', async () => {
     const log: LogEntry = {
@@ -100,6 +106,7 @@ describe('LogDetailsModal', () => {
       type: LOG_TYPES.CONSUME,
       created_at: 1_700_000_000,
       model_name: 'gpt-4',
+      origin_model_name: 'public-alias',
       token_name: 'prod-token',
       username: '',
       channel: 12,
@@ -107,7 +114,6 @@ describe('LogDetailsModal', () => {
       prompt_tokens: 1_200,
       completion_tokens: 800,
       cached_prompt_tokens: 200,
-      cached_completion_tokens: 150,
       elapsed_time: 2_345,
       request_id: 'req-123',
       trace_id: '',
@@ -120,46 +126,45 @@ describe('LogDetailsModal', () => {
           ephemeral_1h: 60,
         },
       },
-    }
+    };
 
     await act(async () => {
-      render(<LogDetailsModal open onOpenChange={vi.fn()} log={log} />)
-    })
+      renderLogDetailsModal(log);
+    });
 
-    expect(screen.getByText(/log entry details/i)).toBeInTheDocument()
-    expect(screen.getAllByText(/consume/i).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(formatTimestamp(log.created_at)).length).toBeGreaterThan(0)
-    expect(screen.getByText(renderQuota(log.quota))).toBeInTheDocument()
-    expect(screen.getByText('gpt-4')).toBeInTheDocument()
-    expect(screen.getByText('prod-token')).toBeInTheDocument()
-    expect(screen.getByText('fallback-user')).toBeInTheDocument()
-    expect(screen.getByText('12')).toBeInTheDocument()
-    expect(screen.getByText(formatLatencyForTest(log.elapsed_time))).toBeInTheDocument()
+    expect(screen.getByText(/log entry details/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/consume/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(formatTimestamp(log.created_at)).length).toBeGreaterThan(0);
+    expect(screen.getByText(renderQuota(log.quota))).toBeInTheDocument();
+    expect(screen.getByText('gpt-4')).toBeInTheDocument();
+    expect(screen.getByText('public-alias')).toBeInTheDocument();
+    expect(screen.getByText(/requested model/i)).toBeInTheDocument();
+    expect(screen.getByText('prod-token')).toBeInTheDocument();
+    expect(screen.getByText('fallback-user')).toBeInTheDocument();
+    expect(screen.getByText('12')).toBeInTheDocument();
+    expect(screen.getByText(formatLatencyForTest(log.elapsed_time))).toBeInTheDocument();
 
-    const promptInput = screen.getByText(/prompt tokens \(input\)/i).closest('div')
-    expect(promptInput).toHaveTextContent('1200')
+    const promptInput = screen.getByText(/prompt tokens \(input\)/i).closest('div');
+    expect(promptInput).toHaveTextContent('1200');
 
-    const completionOutput = screen.getByText(/completion tokens \(output\)/i).closest('div')
-    expect(completionOutput).toHaveTextContent('800')
+    const completionOutput = screen.getByText(/completion tokens \(output\)/i).closest('div');
+    expect(completionOutput).toHaveTextContent('800');
 
-    const cacheWrite5m = screen.getByText(/cache write 5m tokens/i).closest('div')
-    expect(cacheWrite5m).toHaveTextContent('100')
+    const cacheWrite5m = screen.getByText(/cache write 5m tokens/i).closest('div');
+    expect(cacheWrite5m).toHaveTextContent('100');
 
-    const cacheWrite1h = screen.getByText(/cache write 1h tokens/i).closest('div')
-    expect(cacheWrite1h).toHaveTextContent('60')
+    const cacheWrite1h = screen.getByText(/cache write 1h tokens/i).closest('div');
+    expect(cacheWrite1h).toHaveTextContent('60');
 
-    const totalTokens = screen.getByText(/total tokens/i).closest('div')
-    expect(totalTokens).toHaveTextContent('2000')
+    const totalTokens = screen.getByText(/total tokens/i).closest('div');
+    expect(totalTokens).toHaveTextContent('2000');
 
-    const totalCachedTokens = screen.getByText(/total cached tokens/i).closest('div')
-    expect(totalCachedTokens).toHaveTextContent('350')
-
-    expect(screen.getByText('Stream')).toBeInTheDocument()
-    expect(screen.getByText('System Reset')).toBeInTheDocument()
-    expect(screen.getByText(/req-123/)).toBeInTheDocument()
-    expect(screen.getByText(/tracing data is not available/i)).toBeInTheDocument()
-    expect(screen.getByText(/ephemeral_5m/i)).toBeInTheDocument()
-  })
+    expect(screen.getByText('Stream')).toBeInTheDocument();
+    expect(screen.getByText('System Reset')).toBeInTheDocument();
+    expect(screen.getByText(/req-123/)).toBeInTheDocument();
+    expect(screen.getByText(/tracing data is not available/i)).toBeInTheDocument();
+    expect(screen.getByText(/ephemeral_5m/i)).toBeInTheDocument();
+  });
 
   it('fetches and renders tracing information when a trace ID is present', async () => {
     const log: LogEntry = {
@@ -174,12 +179,11 @@ describe('LogDetailsModal', () => {
       prompt_tokens: 600,
       completion_tokens: 400,
       cached_prompt_tokens: 0,
-      cached_completion_tokens: 0,
       elapsed_time: 3_000,
       request_id: 'req-trace',
       trace_id: 'trace-abc',
       metadata: {},
-    }
+    };
 
     const traceResponse = {
       success: true,
@@ -213,22 +217,101 @@ describe('LogDetailsModal', () => {
           type: LOG_TYPES.CONSUME,
         },
       },
-    }
+    };
 
-    apiGetMock().mockResolvedValue({ data: traceResponse } as any)
+    apiGetMock().mockResolvedValue({ data: traceResponse } as any);
 
     await act(async () => {
-      render(<LogDetailsModal open onOpenChange={vi.fn()} log={log} />)
-    })
+      renderLogDetailsModal(log);
+    });
 
     await waitFor(() => {
-      expect(apiGetMock()).toHaveBeenCalledWith('/api/trace/log/77')
-    })
+      expect(apiGetMock()).toHaveBeenCalledWith('/api/trace/log/77');
+    });
 
-    expect(await screen.findByText(/request information/i)).toBeInTheDocument()
-    expect(screen.getByText('POST')).toBeInTheDocument()
-    expect(screen.getByText('200')).toBeInTheDocument()
-    expect(screen.getByText(/total request time/i)).toBeInTheDocument()
-    expect(screen.getAllByText(/request received/i).length).toBeGreaterThan(0)
-  })
-})
+    expect(await screen.findByText(/request information/i)).toBeInTheDocument();
+    expect(screen.getByText('POST')).toBeInTheDocument();
+    expect(screen.getByText('200')).toBeInTheDocument();
+    expect(screen.getByText(/total request time/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/request received/i).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['MANAGE', LOG_TYPES.MANAGE],
+    ['SYSTEM', LOG_TYPES.SYSTEM],
+    ['TEST', LOG_TYPES.TEST],
+    ['TOPUP', LOG_TYPES.TOPUP],
+  ])('fetches trace data for %s logs when trace_id is present (regression: not CONSUME-gated)', async (_label, type) => {
+    const log: LogEntry = {
+      id: 99,
+      type,
+      created_at: 1_700_200_000,
+      model_name: '',
+      token_name: '',
+      username: 'trace-any',
+      channel: 1,
+      quota: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_prompt_tokens: 0,
+      elapsed_time: 100,
+      request_id: 'req-any',
+      trace_id: 'trace-any',
+      metadata: {},
+    };
+
+    apiGetMock().mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          id: 12,
+          trace_id: 'trace-any',
+          url: '/api/channel/test/3',
+          method: 'GET',
+          status: 200,
+          created_at: 1_700_200_000,
+          updated_at: 1_700_200_001,
+          timestamps: {},
+          durations: { total_time: 100 },
+          log: { id: 99, user_id: 1, username: 'trace-any', content: '', type },
+        },
+      },
+    } as any);
+
+    await act(async () => {
+      renderLogDetailsModal(log);
+    });
+
+    await waitFor(() => {
+      expect(apiGetMock()).toHaveBeenCalledWith('/api/trace/log/99');
+    });
+  });
+
+  it('does not fetch trace data when trace_id is empty regardless of log type', async () => {
+    const log: LogEntry = {
+      id: 100,
+      type: LOG_TYPES.CONSUME,
+      created_at: 1_700_300_000,
+      model_name: 'gpt-4',
+      token_name: 't',
+      username: 'u',
+      channel: 1,
+      quota: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_prompt_tokens: 0,
+      elapsed_time: 0,
+      request_id: '',
+      trace_id: '',
+      metadata: {},
+    };
+
+    apiGetMock().mockResolvedValue({ data: { success: true, data: null } } as any);
+
+    await act(async () => {
+      renderLogDetailsModal(log);
+    });
+
+    expect(apiGetMock()).not.toHaveBeenCalled();
+  });
+});

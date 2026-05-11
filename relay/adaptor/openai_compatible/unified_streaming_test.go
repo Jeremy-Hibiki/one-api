@@ -12,7 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // Test data constants
@@ -337,6 +337,38 @@ func TestStreamingContext_ProcessStreamChunk(t *testing.T) {
 			require.Equal(t, 1, ctx.chunksProcessed, "expected chunksProcessed to be 1")
 		})
 	}
+}
+
+// TestUnifiedStreamProcessing_OversizedChunk verifies oversized chat chunks stream correctly.
+func TestUnifiedStreamProcessing_OversizedChunk(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+
+	largeContent := strings.Repeat("U", 128*1024)
+	sse := strings.Join([]string{
+		`data: {"id":"unified-big","object":"chat.completion.chunk","created":1700000000,"model":"` + testModelName + `","choices":[{"index":0,"delta":{"content":"` + largeContent + `"}}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(sse)),
+	}
+
+	errResp, usage := UnifiedStreamProcessing(c, resp, 0, testModelName, false)
+	require.Nil(t, errResp)
+	require.NotNil(t, usage)
+
+	body := w.Body.String()
+	require.Contains(t, body, largeContent[:1024])
+	require.Contains(t, body, largeContent[len(largeContent)-1024:])
+	require.Contains(t, body, "[DONE]")
 }
 
 // TestStreamingContext_ManageBufferCapacity tests buffer management

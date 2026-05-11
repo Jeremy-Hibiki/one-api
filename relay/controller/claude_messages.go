@@ -14,24 +14,68 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/metrics"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/metrics"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor/anthropic"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
 )
 
 // ClaudeMessagesRequest is an alias for the model.ClaudeRequest to follow DRY principle
 type ClaudeMessagesRequest = relaymodel.ClaudeRequest
+
+type claudeUpstreamErrorEnvelope struct {
+	Type  string `json:"type"`
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// shouldRetryClaudeInvalidThinkingSignature reports whether the upstream failure matches Anthropic's invalid replayed thinking signature error.
+// shouldRetryClaudeInvalidThinkingSignature returns true only for the specific invalid-request signature failure we can safely recover from.
+func shouldRetryClaudeInvalidThinkingSignature(statusCode int, responseBody []byte) bool {
+	if statusCode != http.StatusBadRequest || len(responseBody) == 0 {
+		return false
+	}
+
+	var envelope claudeUpstreamErrorEnvelope
+	if err := json.Unmarshal(responseBody, &envelope); err == nil {
+		if strings.EqualFold(strings.TrimSpace(envelope.Error.Type), "invalid_request_error") &&
+			(strings.Contains(envelope.Error.Message, "Invalid `signature` in `thinking` block") ||
+				strings.Contains(envelope.Error.Message, ".thinking.signature: Field required")) {
+			return true
+		}
+	}
+
+	return bytes.Contains(responseBody, []byte("Invalid `signature` in `thinking` block")) ||
+		bytes.Contains(responseBody, []byte(".thinking.signature: Field required"))
+}
+
+// readAndRestoreResponseBody reads an HTTP response body and restores it for subsequent consumers.
+// readAndRestoreResponseBody returns the full body bytes or an error if the response body cannot be read.
+func readAndRestoreResponseBody(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "read upstream response body")
+	}
+	if err := resp.Body.Close(); err != nil {
+		return nil, errors.Wrap(err, "close upstream response body")
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
+}
 
 // RelayClaudeMessagesHelper handles Claude Messages API requests with direct pass-through
 func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
@@ -49,10 +93,6 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 	meta.IsStream = claudeRequest.Stream != nil && *claudeRequest.Stream
 
-	if reqBody, ok := c.Get(ctxkey.KeyRequestBody); ok {
-		lg.Debug("get claude messages request", zap.ByteString("body", reqBody.([]byte)))
-	}
-
 	// map model name
 	meta.OriginModelName = claudeRequest.Model
 	claudeRequest.Model = meta.ActualModelName
@@ -63,17 +103,22 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 
 	// get channel model ratio
 	channelModelRatio, channelCompletionRatio := getChannelRatios(c)
+	channelModelConfigs := getChannelModelConfigs(c)
 
 	// get model ratio using three-layer pricing system
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	modelRatio := pricing.GetModelRatioWithThreeLayers(claudeRequest.Model, channelModelRatio, pricingAdaptor)
 	completionRatio := pricing.GetCompletionRatioWithThreeLayers(claudeRequest.Model, channelCompletionRatio, pricingAdaptor)
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
 
 	ratio := modelRatio * groupRatio
 
-	// pre-consume quota based on estimated input tokens
-	promptTokens := getClaudeMessagesPromptTokens(gmw.Ctx(c), claudeRequest)
+	// pre-consume quota based on estimated input tokens.
+	// For large request bodies, use a fast byte-based estimation (body_size / 4)
+	// instead of full token counting which requires parsing all message content.
+	// The actual token count from the upstream response is used for final billing.
+	rawBodyForEstimate, _ := common.GetRequestBody(c)
+	promptTokens := estimateClaudeMessagesPromptTokens(gmw.Ctx(c), claudeRequest, len(rawBodyForEstimate))
 	meta.PromptTokens = promptTokens
 	preConsumedQuota, bizErr := preConsumeClaudeMessagesQuota(c, claudeRequest, promptTokens, ratio, completionRatio, meta)
 	if bizErr != nil {
@@ -82,6 +127,11 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			zap.Error(bizErr.RawError))
 		return bizErr
 	}
+	markPreConsumed(c, preConsumedQuota)
+	defer billingAuditSafetyNet(c)
+
+	provisionalLogId := recordProvisionalLog(c, meta, claudeRequest.Model, preConsumedQuota)
+	c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
 
 	adaptorInstance := relay.GetAdaptor(meta.APIType)
 	if adaptorInstance == nil {
@@ -89,36 +139,107 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 	adaptorInstance.Init(meta)
 
-	// convert request using adaptor's ConvertClaudeRequest method
-	convertedRequest, err := adaptorInstance.ConvertClaudeRequest(c, claudeRequest)
-	if err != nil {
-		// Check if this is a validation error and preserve the correct HTTP status code
-		//
-		// This is for AWS, which must be different from other providers that are
-		// based on proprietary systems such as OpenAI, etc.
-		switch {
-		case strings.Contains(err.Error(), "does not support the v1/messages endpoint"):
-			return openai.ErrorWrapper(err, "invalid_request_error", http.StatusBadRequest)
-		default:
-			return openai.ErrorWrapper(err, "convert_request_failed", http.StatusInternalServerError)
+	// Declare response variables early so goto postConsume does not skip over them.
+	var (
+		usage                 *relaymodel.Usage
+		respErr               *relaymodel.ErrorWithStatusCode
+		mcpIncrementalCharged int64
+		resp                  *http.Response
+		origResp              *http.Response
+		upstreamCapture       *loggingReadCloser
+		requestBody           io.Reader
+		convertedRequest      any
+		passthroughBody       []byte
+	)
+
+	// Tool Search + MCP integration: when the request contains a tool_search_tool and
+	// there are MCP tools in the catalog, inject them as deferred tools and run a
+	// Claude-native MCP execution loop that handles tool discovery and execution.
+	if hasToolSearchInClaudeRequest(claudeRequest) && !meta.IsStream {
+		toolSearchRegistry, tsErr := injectDeferredMCPToolsForToolSearch(c, claudeRequest)
+		if tsErr != nil {
+			return openai.ErrorWrapper(tsErr, "tool_search_mcp_inject_failed", http.StatusInternalServerError)
 		}
+		if toolSearchRegistry != nil {
+			lg.Debug("tool search with MCP tools detected, using Claude-native MCP loop")
+
+			// Convert request to set pass-through flags (for headers etc.)
+			if _, cerr := adaptorInstance.ConvertClaudeRequest(c, claudeRequest); cerr != nil {
+				return wrapConvertRequestError(cerr)
+			}
+
+			// Disable streaming for the MCP loop
+			noStream := false
+			claudeRequest.Stream = &noStream
+
+			response, mcpUsage, mcpSummary, incrementalCharged, execErr := executeClaudeToolSearchMCPLoop(
+				c, meta, claudeRequest, toolSearchRegistry, adaptorInstance, preConsumedQuota,
+			)
+			if execErr != nil {
+				_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "tool_search_mcp_loop_failed")
+				return execErr
+			}
+			if mcpSummary != nil && mcpSummary.summary != nil {
+				var existing *model.ToolUsageSummary
+				if raw, ok := c.Get(ctxkey.ToolInvocationSummary); ok {
+					if summary, ok := raw.(*model.ToolUsageSummary); ok {
+						existing = summary
+					}
+				}
+				merged := mergeToolUsageSummaries(existing, mcpSummary.summary)
+				c.Set(ctxkey.ToolInvocationSummary, merged)
+			}
+			if response != nil {
+				if errResp := writeClaudeResponse(c, response); errResp != nil {
+					_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "write_tool_search_response_failed")
+					return openai.ErrorWrapper(errResp, "write_tool_search_response_failed", http.StatusInternalServerError)
+				}
+			}
+			usage = mcpUsage
+			mcpIncrementalCharged = incrementalCharged
+			goto postConsume
+		}
+	}
+
+	// convert request using adaptor's ConvertClaudeRequest method
+	convertedRequest, err = adaptorInstance.ConvertClaudeRequest(c, claudeRequest)
+	if err != nil {
+		return wrapConvertRequestError(err)
 	}
 
 	// Determine request body:
 	// - If adaptor marks direct pass-through, forward the Claude Messages payload
 	//   but ensure the mapped model name is applied to the raw JSON
 	// - Otherwise, marshal the converted request
-	var requestBody io.Reader
+	// requestBody declared above
 	if passthrough, ok := c.Get(ctxkey.ClaudeDirectPassthrough); ok && passthrough.(bool) {
 		rawBody, gerr := common.GetRequestBody(c)
 		if gerr != nil {
 			return openai.ErrorWrapper(gerr, "get_original_body_failed", http.StatusInternalServerError)
 		}
-		rewritten, rerr := rewriteClaudeRequestBody(rawBody, claudeRequest)
-		if rerr != nil {
-			return openai.ErrorWrapper(rerr, "rewrite_claude_body_failed", http.StatusInternalServerError)
+		sanitizedBody, unsignedThinkingStats, serr := rewriteAndSanitizeClaudeRequestBody(rawBody, claudeRequest)
+		if serr != nil {
+			return openai.ErrorWrapper(serr, "rewrite_sanitize_claude_body_failed", http.StatusInternalServerError)
 		}
-		requestBody = bytes.NewReader(rewritten)
+		passthroughBody = sanitizedBody
+		requestBody = bytes.NewReader(sanitizedBody)
+
+		// Log signature-bearing thinking blocks count for diagnostics
+		sigCount := countThinkingSignatures(rawBody)
+		if sigCount > 0 || unsignedThinkingStats.RemovedThinkingBlocks > 0 {
+			fields := []zap.Field{
+				zap.Int("signature_count", sigCount),
+				zap.Int("removed_unsigned_thinking_blocks", unsignedThinkingStats.RemovedThinkingBlocks),
+				zap.Int("removed_empty_assistant_messages", unsignedThinkingStats.RemovedAssistantMessages),
+				zap.Int("raw_body_len", len(rawBody)),
+				zap.Int("sanitized_body_len", len(sanitizedBody)),
+				zap.Bool("body_bytes_preserved", bytes.Contains(sanitizedBody, []byte(`"signature"`))),
+			}
+			if len(unsignedThinkingStats.Locations) > 0 {
+				fields = append(fields, zap.Strings("removed_unsigned_thinking_locations", unsignedThinkingStats.Locations))
+			}
+			lg.Debug("analyzed Claude passthrough thinking blocks", fields...)
+		}
 	} else {
 		requestBytes, merr := json.Marshal(convertedRequest)
 		if merr != nil {
@@ -127,13 +248,6 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		requestBody = bytes.NewReader(requestBytes)
 	}
 
-	// for debug
-	requestBodyBytes, _ := io.ReadAll(requestBody)
-	// Attempt to log outgoing model for diagnostics without printing the entire payload
-	var outgoing struct {
-		Model string `json:"model"`
-	}
-	_ = json.Unmarshal(requestBodyBytes, &outgoing)
 	lg.Debug("prepared Claude upstream request",
 		zap.Bool("passthrough", func() bool {
 			if v, ok := c.Get(ctxkey.ClaudeDirectPassthrough); ok {
@@ -144,18 +258,17 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		}()),
 		zap.String("origin_model", meta.OriginModelName),
 		zap.String("mapped_model", meta.ActualModelName),
-		zap.String("outgoing_model", outgoing.Model),
+		zap.String("outgoing_model", meta.ActualModelName),
 	)
-	requestBody = bytes.NewReader(requestBodyBytes)
 
 	// do request
-	resp, err := adaptorInstance.DoRequest(c, meta, requestBody)
+	resp, err = adaptorInstance.DoRequest(c, meta, requestBody)
 	if err != nil {
 		// ErrorWrapper will log the error, so we don't need to log it here
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
-	origResp := resp
-	upstreamCapture := wrapUpstreamResponse(resp)
+	origResp = resp
+	upstreamCapture = wrapUpstreamResponse(resp)
 	// Immediately record a provisional request cost using estimated base quota
 	// even if the trusted path skipped physical pre-consume.
 	{
@@ -179,8 +292,67 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 
 	// Check for HTTP errors when an HTTP response is returned by the adaptor
 	if resp != nil && resp.StatusCode != http.StatusOK {
+		if passthrough, ok := c.Get(ctxkey.ClaudeDirectPassthrough); ok && passthrough.(bool) && len(passthroughBody) > 0 {
+			responseBody, bodyErr := readAndRestoreResponseBody(resp)
+			if bodyErr != nil {
+				lg.Debug("failed to inspect Claude passthrough error response for signature retry",
+					zap.Error(bodyErr),
+					zap.Int("status_code", resp.StatusCode),
+				)
+			} else if shouldRetryClaudeInvalidThinkingSignature(resp.StatusCode, responseBody) {
+				logUpstreamResponseFromBytes(lg, resp, responseBody, "claude_messages_signature_rejected")
+
+				retryBody, retryStats, retryBodyErr := stripClaudeThinkingFromAssistantHistory(passthroughBody)
+				if retryBodyErr != nil {
+					lg.Debug("failed to build Claude signature retry payload",
+						zap.Error(retryBodyErr),
+						zap.Int("status_code", resp.StatusCode),
+					)
+				} else if retryStats.RemovedThinkingBlocks > 0 {
+					lg.Debug("retrying Claude passthrough after invalid thinking signature",
+						zap.Int("status_code", resp.StatusCode),
+						zap.Int("removed_thinking_blocks", retryStats.RemovedThinkingBlocks),
+						zap.Int("removed_assistant_messages", retryStats.RemovedAssistantMessages),
+					)
+
+					resp, err = adaptorInstance.DoRequest(c, meta, bytes.NewReader(retryBody))
+					if err != nil {
+						return openai.ErrorWrapper(err, "retry_claude_request_failed", http.StatusInternalServerError)
+					}
+					origResp = resp
+					upstreamCapture = wrapUpstreamResponse(resp)
+
+					if resp != nil && resp.StatusCode != http.StatusOK {
+						retryResponseBody, retryReadErr := readAndRestoreResponseBody(resp)
+						if retryReadErr != nil {
+							lg.Debug("failed to inspect Claude signature retry response",
+								zap.Error(retryReadErr),
+								zap.Int("status_code", resp.StatusCode),
+							)
+						} else {
+							logUpstreamResponseFromBytes(lg, resp, retryResponseBody, "claude_messages_signature_retry_failed")
+							lg.Debug("Claude passthrough signature retry still failed",
+								zap.Int("status_code", resp.StatusCode),
+								zap.Int("removed_thinking_blocks", retryStats.RemovedThinkingBlocks),
+								zap.Int("removed_assistant_messages", retryStats.RemovedAssistantMessages),
+							)
+						}
+					} else {
+						lg.Debug("Claude passthrough signature retry succeeded",
+							zap.Int("removed_thinking_blocks", retryStats.RemovedThinkingBlocks),
+							zap.Int("removed_assistant_messages", retryStats.RemovedAssistantMessages),
+						)
+					}
+				}
+			}
+		}
+
+		if resp != nil && resp.StatusCode == http.StatusOK {
+			goto handleResponse
+		}
+
 		graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-			billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+			_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "upstream_http_error")
 		})
 		// Reconcile provisional record to 0 since upstream returned error
 		quotaId := c.GetInt(ctxkey.Id)
@@ -195,14 +367,13 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	c.Set(ctxkey.ClaudeMessagesNative, true)
 
 	// do response - for direct passthrough, forward upstream JSON verbatim; otherwise let adaptor convert
-	var usage *relaymodel.Usage
-	var respErr *relaymodel.ErrorWithStatusCode
-	var mcpIncrementalCharged int64
+
+handleResponse:
 
 	// MCP tool loop handling for Claude Messages requests.
 	if mcpRegistry, mcpToolNames, mcpReq, mcpErr := detectClaudeMCPTools(c, meta, claudeRequest, adaptorInstance); mcpRegistry != nil || mcpErr != nil {
 		if mcpErr != nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "mcp_tool_registry_failed")
 			return openai.ErrorWrapper(mcpErr, "mcp_tool_registry_failed", http.StatusBadRequest)
 		}
 		mcpReq.ToolChoice = normalizeChatToolChoiceForMCP(mcpReq.ToolChoice, mcpToolNames)
@@ -212,7 +383,7 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		}
 		response, mcpUsage, mcpSummary, incrementalCharged, execErr := executeChatMCPToolLoop(c, meta, mcpReq, mcpRegistry, preConsumedQuota)
 		if execErr != nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "mcp_tool_loop_failed")
 			return execErr
 		}
 		if mcpSummary != nil && mcpSummary.summary != nil {
@@ -226,7 +397,7 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			c.Set(ctxkey.ToolInvocationSummary, merged)
 		}
 		if errResp := renderClaudeMessagesFromChatResponse(c, response); errResp != nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "render_claude_response_failed")
 			return errResp
 		}
 		usage = mcpUsage
@@ -342,7 +513,29 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 							PromptTokens:     claudeResp.Usage.InputTokens,
 							CompletionTokens: claudeResp.Usage.OutputTokens,
 							TotalTokens:      claudeResp.Usage.InputTokens + claudeResp.Usage.OutputTokens,
+							CacheWrite5mTokens: func() int {
+								if claudeResp.Usage.CacheCreation != nil {
+									return claudeResp.Usage.CacheCreation.Ephemeral5mInputTokens
+								}
+								return claudeResp.Usage.CacheCreationInputTokens
+							}(),
+							CacheWrite1hTokens: func() int {
+								if claudeResp.Usage.CacheCreation != nil {
+									return claudeResp.Usage.CacheCreation.Ephemeral1hInputTokens
+								}
+								return 0
+							}(),
 						}
+						if claudeResp.Usage.CacheReadInputTokens > 0 {
+							usage.PromptTokensDetails = &relaymodel.UsagePromptTokensDetails{CachedTokens: claudeResp.Usage.CacheReadInputTokens}
+						}
+						lg.Debug("using converted Claude usage for billing",
+							zap.Int("input_tokens", usage.PromptTokens),
+							zap.Int("output_tokens", usage.CompletionTokens),
+							zap.Int("cache_read_input_tokens", claudeResp.Usage.CacheReadInputTokens),
+							zap.Int("cache_write_5m_tokens", usage.CacheWrite5mTokens),
+							zap.Int("cache_write_1h_tokens", usage.CacheWrite1hTokens),
+						)
 					} else {
 						// No usage provided: compute completion tokens from content text
 						accumulated := ""
@@ -438,7 +631,7 @@ func RelayClaudeMessagesHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		// proceed with billing; otherwise, refund pre-consumed quota and return error.
 		if usage == nil {
 			graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-				billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+				_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "do_response_failed_without_usage")
 			})
 			return respErr
 		}
@@ -453,6 +646,7 @@ postConsume:
 
 	// Capture trace ID before launching goroutine
 	traceId := tracing.GetTraceID(c)
+	markBillingReconciled(c)
 	graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(ctx context.Context) {
 		// Use configurable billing timeout with model-specific adjustments
 		baseBillingTimeout := time.Duration(config.BillingTimeoutSec) * time.Second
@@ -466,7 +660,7 @@ postConsume:
 		var quota int64
 
 		go func() {
-			quota = postConsumeClaudeMessagesQuotaWithTraceID(ctx, requestId, traceId, usage, meta, claudeRequest, ratio, preConsumedQuota, mcpIncrementalCharged, modelRatio, groupRatio, channelCompletionRatio)
+			quota = postConsumeClaudeMessagesQuotaWithTraceID(ctx, requestId, traceId, usage, meta, claudeRequest, ratio, preConsumedQuota, mcpIncrementalCharged, modelRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio)
 
 			// Reconcile request cost with final quota (override provisional value)
 			if quota != 0 {
@@ -481,7 +675,7 @@ postConsume:
 		case <-done:
 			// Billing completed successfully
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
 				elapsedTime := time.Since(meta.StartTime)
 

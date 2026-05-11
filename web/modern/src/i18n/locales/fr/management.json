@@ -7,15 +7,18 @@
       "disable": "Désactiver",
       "edit": "Modifier",
       "enable": "Activer",
+      "refresh_balance": "Actualiser le solde de {{name}}",
       "test": "Tester"
     },
     "columns": {
       "actions": "Actions",
+      "balance": "Solde",
       "created": "Créé",
       "group": "Groupe",
       "id": "ID",
       "name": "Nom",
       "priority": "Priorité",
+      "priority_input_label": "Priorité de {{name}}",
       "response": "Réponse",
       "status": "Statut",
       "testing_model": "Modèle de test",
@@ -107,6 +110,10 @@
         },
         "51": {
           "description": "Format compatible Gemini OpenAI"
+        },
+        "53": {
+          "description": "Surface compatible OpenAI de GitHub Copilot (jeton échangé via GitHub)",
+          "tip": "La clé du canal doit être un jeton d'accès GitHub ; l'URL de base est par défaut https://api.githubcopilot.com"
         }
       },
       "cloudflare": {
@@ -197,6 +204,15 @@
         "help": "Restreindre l'accès à des groupes d'utilisateurs spécifiques. Vide signifie que tous les utilisateurs peuvent y accéder. Le groupe par défaut est toujours conservé.",
         "label": "Groupes *"
       },
+      "hidden_models": {
+        "custom_placeholder": "Ajouter un modèle masqué...",
+        "help": "Les modèles listés ici sont servis par ce canal, mais ne sont pas renvoyés par /v1/models et sont rejetés pour les requêtes utilisateur directes. Utile pour exposer un alias unifié via Model Mapping.",
+        "label": "Modèles masqués",
+        "no_match": "Aucun modèle trouvé",
+        "no_selection": "Aucun modèle masqué sélectionné",
+        "search_placeholder": "Rechercher des modèles masqués...",
+        "selected_count": "Modèles masqués ({{count}})"
+      },
       "inference_profile": {
         "help": "Carte JSON du nom du modèle vers l'ARN du profil d'inférence AWS Bedrock. Utilisez pour router certains modèles via des profils d'inférence Bedrock spécifiques.",
         "label": "Carte ARN de profil d'inférence (AWS Bedrock)",
@@ -285,7 +301,32 @@
         "help": "Maximum requests per minute. 0 means unlimited.",
         "label": "Rate Limit"
       },
+      "save_warning": {
+        "cancel": "Retour",
+        "confirm": "Enregistrer quand même",
+        "description": "Les clés de Model Mapping suivantes ne figurent pas dans les Modèles Pris en Charge. Les requêtes vers ces alias seront rejetées par le routeur même si le mappage est enregistré :",
+        "hint": "Corrigez chaque entrée, ou enregistrez quand même pour conserver le mappage tel quel.",
+        "target_description": "Les cibles de Model Mapping suivantes ne sont pas reconnues comme des modèles de ce canal. Le fournisseur upstream peut rejeter ces requêtes :",
+        "title": "Model Mapping contient des entrées suspectes"
+      },
       "spark": {
+        "api_key": {
+          "help": "APIKey iFlytek associé à l'APISecret.",
+          "label": "APIKey *",
+          "placeholder": "APIKey"
+        },
+        "api_secret": {
+          "help": "APISecret iFlytek associé à l'APIKey.",
+          "label": "APISecret *",
+          "placeholder": "APISecret"
+        },
+        "app_id": {
+          "help": "APPID iFlytek pour l'application Spark.",
+          "label": "APPID *",
+          "placeholder": "APPID"
+        },
+        "heading": "Configuration iFlytek Spark",
+        "note": "La clé API finale sera construite ainsi : APPID|APISecret|APIKey",
         "version": {
           "help": "Sélectionnez la version de l'API pour iFlytek Spark (ex: v3.5).",
           "label": "Version Spark",
@@ -296,6 +337,25 @@
         "help": "Texte facultatif ajouté comme message système à chaque requête envoyée via ce canal. Utilisez pour des garde-fous ou un style. Les clients peuvent toujours remplacer par leurs propres messages système.",
         "label": "Invite système (System Prompt)",
         "placeholder": "Invite système facultative à ajouter à toutes les requêtes"
+      },
+      "tencent": {
+        "app_id": {
+          "help": "AppId du compte Tencent Cloud associé aux identifiants API.",
+          "label": "AppId *",
+          "placeholder": "AppId"
+        },
+        "heading": "Configuration Tencent Hunyuan",
+        "note": "La clé API finale sera construite ainsi : AppId|SecretId|SecretKey",
+        "secret_id": {
+          "help": "SecretId Tencent Cloud pour l'authentification API.",
+          "label": "SecretId *",
+          "placeholder": "SecretId"
+        },
+        "secret_key": {
+          "help": "SecretKey Tencent Cloud associé au SecretId.",
+          "label": "SecretKey *",
+          "placeholder": "SecretKey"
+        }
       },
       "title": {
         "create": "Créer un canal",
@@ -347,13 +407,20 @@
         "api_key_required": "La clé API est requise.",
         "base_url_required": "L'URL de base est requise pour ce type de canal.",
         "error_title": "Erreur de validation",
+        "hidden_models_not_supported": "Ces modèles masqués ne sont actuellement pas pris en charge par le canal : {{models}}",
+        "hidden_models_unreachable_alias": "Ces modèles masqués sont utilisés comme sources de Model Mapping, donc les alias publics deviendront inaccessibles : {{models}}",
         "inference_profile_invalid": "La carte ARN de profil d'inférence contient un JSON invalide.",
         "invalid_json": "Format JSON invalide",
         "invalid_json_short": "✗ JSON invalide",
         "invalid_json_title": "JSON invalide",
+        "mapping_keys_not_supported": "Ces clés de mappage ne figurent pas dans les Modèles Pris en Charge ; les requêtes vers ces alias seront rejetées : {{models}}",
+        "mapping_targets_not_recognized": "Ces cibles de mappage ne sont pas reconnues comme modèles de ce canal : {{entries}}",
         "model_configs_message": "Les configurations de modèle sont invalides.",
         "model_configs_title": "Configurations invalides",
         "model_mapping_invalid": "Le mappage de modèles contient un JSON invalide.",
+        "model_mapping_invalid_entries": "Ces entrées de Model Mapping ont des valeurs vides ou non chaînes : {{keys}}",
+        "model_mapping_parse_error": "Le JSON de Model Mapping est invalide : {{error}}",
+        "model_mapping_shape_invalid": "Model Mapping doit être un objet JSON de la forme { \"from\": \"to\" }.",
         "oauth_invalid_json": "Le JSON de configuration OAuth JWT est invalide.",
         "oauth_missing_field_message": "Configuration OAuth JWT manquante : {{field}}",
         "oauth_missing_field_title": "Champ manquant",
@@ -387,11 +454,23 @@
     "empty": "Aucun canal trouvé. Créez votre premier canal pour commencer.",
     "group_default": "défaut",
     "notifications": {
+      "balance_failed_message": "Impossible d'actualiser le solde.",
+      "balance_failed_title": "Échec de l'actualisation du solde",
+      "balance_success": "Solde actualisé.",
+      "bulk_balance_success": "Tous les soldes des canaux ont été actualisés.",
+      "bulk_disable_summary_title": "Résumé de désactivation",
+      "bulk_enable_summary_title": "Résumé d'activation",
+      "bulk_status_empty": "Aucun canal disponible à mettre à jour.",
+      "bulk_status_started": "Mise à jour de {{count}} canaux…",
+      "bulk_status_summary": "{{success}} canaux mis à jour, {{failed}} échecs.",
       "bulk_test_failed_title": "Échec du test global",
       "bulk_test_started": "Test global des canaux démarré.",
       "delete_disabled_success": "Canaux désactivés supprimés.",
       "delete_failed_message": "Erreur inconnue",
       "delete_failed_title": "Échec de la suppression",
+      "priority_failed_message": "Impossible de mettre à jour la priorité.",
+      "priority_failed_title": "Échec de la mise à jour",
+      "priority_saved": "Priorité mise à jour.",
       "test_failed_message": "Erreur inconnue",
       "test_failed_title": "Échec du test du canal",
       "test_success": "Test du canal réussi.",
@@ -418,8 +497,13 @@
     },
     "title": "Canaux",
     "toolbar": {
+      "bulk_actions": "Actions groupées",
       "delete_disabled": "Supprimer désactivés",
       "delete_disabled_mobile": "Supprimer tous les désactivés",
+      "disable_visible": "Désactiver les canaux visibles",
+      "enable_visible": "Activer les canaux visibles",
+      "refresh_balances": "Actualiser tous les soldes",
+      "refresh_balances_mobile": "Actualiser les soldes",
       "test_all": "Tout tester",
       "test_all_mobile": "Tester tous les canaux"
     },
@@ -457,10 +541,23 @@
       "title": "Générer des codes de remboursement"
     },
     "edit": {
+      "actions": {
+        "back_to_list": "Retour à la liste",
+        "copied": "Copié",
+        "copy": "Copier",
+        "copy_all": "Tout copier",
+        "download_codes": "Télécharger les codes"
+      },
+      "code_generated_hint": "Copiez le code ci-dessous ; il ne sera plus affiché avec son nom.",
+      "codes_generated": "{{count}} codes générés",
+      "codes_generated_aria": "Codes de remboursement générés",
+      "codes_generated_hint": "Enregistrez les codes maintenant — une fois cette page quittée, ils ne pourront plus être récupérés en lot.",
       "description": {
         "create": "Créer un nouveau code de remboursement",
         "edit": "Mettre à jour les paramètres du code de remboursement"
       },
+      "download_codes": "Télécharger les codes",
+      "download_filename_prefix": "redemption-codes",
       "loading": "Chargement du remboursement...",
       "notifications": {
         "create_success": "Remboursement créé avec succès",
@@ -631,6 +728,13 @@
         "placeholder": "Rechercher des jetons par nom...",
         "quota_label": "Quota : {{quota}}"
       },
+      "share": {
+        "ama": "AMA 问天",
+        "lobechat": "LobeChat",
+        "next_chat": "ChatGPT Next Web",
+        "open_in_client": "Ouvrir dans un client",
+        "opencat": "OpenCat"
+      },
       "status": {
         "disabled": "Désactivé",
         "enabled": "Activé",
@@ -691,6 +795,8 @@
         "cancel": "Annuler",
         "create": "Créer l'utilisateur",
         "creating": "Création...",
+        "disable_2fa": "Désactiver la 2FA de l'utilisateur",
+        "disabling_2fa": "Désactivation...",
         "update": "Mettre à jour l'utilisateur",
         "updating": "Mise à jour..."
       },
@@ -699,8 +805,15 @@
         "help_email": "Aide : E-mail",
         "help_group": "Aide : Groupe",
         "help_password": "Aide : Mot de passe",
+        "help_password_locked": "Aide : Verrouiller le mot de passe",
         "help_quota": "Aide : Quota",
         "help_username": "Aide : Nom d'utilisateur"
+      },
+      "confirm_2fa": {
+        "cancel": "Annuler",
+        "confirm": "Désactiver 2FA",
+        "description": "Désactiver l'authentification à deux facteurs pour {{username}} ? Il pourra se connecter sans code 2FA.",
+        "title": "Désactiver 2FA"
       },
       "description": {
         "create": "Créer un nouveau compte utilisateur",
@@ -736,7 +849,12 @@
           "help": "La longueur minimale dépend de la politique. Laissez vide lors de la modification pour conserver inchangé.",
           "label_create": "Mot de passe *",
           "label_edit": "Nouveau mot de passe (laisser vide pour conserver l'actuel)",
+          "locked_hint": "Le mot de passe est verrouillé. Désactivez « Verrouiller le mot de passe » pour le modifier. L'enregistrement d'un nouveau MFA est aussi bloqué pendant le verrouillage.",
           "placeholder": "Entrez le mot de passe"
+        },
+        "password_locked": {
+          "help": "Lorsque cette option est activée, personne ne peut modifier le mot de passe de cet utilisateur et l'utilisateur ne peut pas activer de nouveau TOTP/passkey. Seul un administrateur root peut déverrouiller.",
+          "label": "Verrouiller le mot de passe (root uniquement)"
         },
         "quota": {
           "help": "Les unités de quota sont des jetons. L'estimation USD utilise le ratio par unité configuré par l'administrateur.",
@@ -752,6 +870,18 @@
       "notifications": {
         "create_success": "Utilisateur créé avec succès",
         "update_success": "Utilisateur mis à jour avec succès"
+      },
+      "notifications_2fa": {
+        "failed_message": "Impossible de désactiver 2FA.",
+        "failed_title": "La désactivation 2FA a échoué",
+        "success_message": "Authentification à deux facteurs désactivée.",
+        "success_title": "2FA désactivée"
+      },
+      "sections": {
+        "security_lock": {
+          "description": "Restreindre les modifications sensibles pour cet utilisateur. Lorsque le verrou est actif, la modification du mot de passe et l'enregistrement d'un nouveau MFA sont tous deux bloqués. Seuls les administrateurs root peuvent l'activer.",
+          "title": "Verrou de sécurité"
+        }
       },
       "title": {
         "create": "Créer un utilisateur",
@@ -772,9 +902,12 @@
     "page": {
       "actions": {
         "delete": "Supprimer",
+        "demote": "Rétrograder",
         "disable": "Désactiver",
+        "disable_2fa": "Désactiver 2FA",
         "edit": "Modifier",
         "enable": "Activer",
+        "promote": "Promouvoir",
         "topup": "Recharger"
       },
       "columns": {
@@ -788,13 +921,35 @@
         "used_quota": "Quota utilisé",
         "username": "Nom d'utilisateur"
       },
+      "confirm": {
+        "cancel": "Annuler",
+        "confirm": "Confirmer",
+        "demote_description": "Rétrograder {{username}} en utilisateur normal ? Il perdra ses privilèges d'administrateur.",
+        "demote_title": "Rétrograder l'utilisateur",
+        "disable_2fa_description": "Désactiver l'authentification à deux facteurs pour {{username}} ? Il pourra se connecter sans code 2FA.",
+        "disable_2fa_title": "Désactiver 2FA",
+        "promote_description": "Promouvoir {{username}} en administrateur ? Il obtiendra des privilèges d'administrateur.",
+        "promote_title": "Promouvoir l'utilisateur"
+      },
       "description": "Gérer les utilisateurs",
       "empty": "Aucun utilisateur trouvé. Ajoutez votre premier utilisateur pour commencer.",
       "notifications": {
         "action_failed_message": "Impossible d'appliquer le changement.",
         "action_failed_title": "L'action a échoué",
+        "demote_failed_message": "Impossible de rétrograder l'utilisateur.",
+        "demote_failed_title": "La rétrogradation a échoué",
+        "demote_success_message": "Utilisateur {{username}} rétrogradé.",
+        "demote_success_title": "Utilisateur rétrogradé",
+        "disable_2fa_failed_message": "Impossible de désactiver 2FA.",
+        "disable_2fa_failed_title": "La désactivation 2FA a échoué",
+        "disable_2fa_success_message": "Authentification à deux facteurs désactivée pour {{username}}.",
+        "disable_2fa_success_title": "2FA désactivée",
         "load_failed_message": "Échec du chargement des utilisateurs.",
         "load_failed_title": "Accès refusé",
+        "promote_failed_message": "Impossible de promouvoir l'utilisateur.",
+        "promote_failed_title": "La promotion a échoué",
+        "promote_success_message": "Utilisateur {{username}} promu.",
+        "promote_success_title": "Utilisateur promu",
         "search_failed_message": "La recherche a échoué.",
         "search_failed_title": "La recherche a échoué"
       },
@@ -811,6 +966,7 @@
         "remaining_quota_title": "Restant : {{quota}}",
         "role": {
           "admin": "Admin",
+          "guest": "Invité",
           "super_admin": "Super Admin",
           "user": "Utilisateur"
         },

@@ -18,16 +18,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/copier"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/anthropic"
-	"github.com/songquanpeng/one-api/relay/adaptor/aws/utils"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/anthropic"
+	"github.com/Laisky/one-api/relay/adaptor/aws/utils"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html
@@ -52,6 +52,7 @@ var AwsModelIDMap = map[string]string{
 	"claude-sonnet-4-20250514":   "anthropic.claude-sonnet-4-20250514-v1:0",
 	"claude-sonnet-4-5":          "anthropic.claude-sonnet-4-5-20250929-v1:0",
 	"claude-sonnet-4-5-20250929": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+	"claude-sonnet-4-6":          "anthropic.claude-sonnet-4-6",
 	// opus
 	"claude-3-opus-20240229":   "anthropic.claude-3-opus-20240229-v1:0",
 	"claude-opus-4-0":          "anthropic.claude-opus-4-20250514-v1:0",
@@ -60,6 +61,8 @@ var AwsModelIDMap = map[string]string{
 	"claude-opus-4-1-20250805": "anthropic.claude-opus-4-1-20250805-v1:0",
 	"claude-opus-4-5":          "anthropic.claude-opus-4-5-20251101-v1:0",
 	"claude-opus-4-5-20251101": "anthropic.claude-opus-4-5-20251101-v1:0",
+	"claude-opus-4-6":          "anthropic.claude-opus-4-6-v1",
+	"claude-opus-4-7":          "anthropic.claude-opus-4-7",
 }
 
 func AwsModelID(requestModel string) (string, error) {

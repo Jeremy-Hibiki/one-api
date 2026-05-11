@@ -6,7 +6,7 @@ This document provides essential development information for the One-API project
 
 ### Go Requirements
 
-- **Go Version**: 1.25.0 (cutting-edge version required)
+- **Go Version**: 1.26.0 (cutting-edge version required)
 - **CGO**: Enabled (required for SQLite3 support)
 - **Architecture**: Primarily targets AMD64, multi-arch builds supported
 
@@ -18,14 +18,12 @@ go build -trimpath -ldflags "-s -w" -o one-api
 
 # Frontend builds (multiple templates available)
 make build-frontend-modern      # Primary template (React + TypeScript + Vite)
-make build-frontend-default     # Legacy template
 make build-frontend-air         # Alternative template
 make build-frontend-berry       # Alternative template
 make build-all-templates        # All templates
 
 # Development servers
 make dev-modern                 # Port 3001 (primary)
-make dev-default               # Port 3001
 make dev-air                   # Port 3002
 make dev-berry                 # Port 3003
 ```
@@ -137,15 +135,16 @@ FRONTEND_BASE_URL=https://...      # For slave nodes
 ### Multi-Template Frontend System
 
 - **Modern**: Primary template (React + TypeScript + Vite + Tailwind)
-- **Default/Air/Berry**: Alternative UI themes
+- **Air/Berry**: Alternative UI themes (no longer actively maintained)
 - Each template has independent build system and development server
 - Templates share the same backend API
+- Note: The "default" template has been removed. Users specifying "default" are automatically redirected to "modern".
 
 ## Development Practices
 
 ### Code Organization
 
-- **Local imports first**: `goimports -local module,github.com/songquanpeng/one-api`
+- **Local imports first**: `goimports -local module,github.com/Laisky/one-api`
 - **Extensive linting**: 565-line golangci-lint configuration
 - **Security scanning**: govulncheck integration
 - **Dependency management**: Go modules with version constraints
@@ -208,4 +207,4 @@ FRONTEND_BASE_URL=https://...      # For slave nodes
 
 ---
 
-**Note**: This project uses cutting-edge Go 1.25.0 and maintains high code quality standards through extensive tooling. The adapter pattern is the core architectural decision that enables support for 35+ AI providers while maintaining consistent pricing and request handling.
+**Note**: This project uses cutting-edge Go 1.26.0 and maintains high code quality standards through extensive tooling. The adapter pattern is the core architectural decision that enables support for 35+ AI providers while maintaining consistent pricing and request handling.

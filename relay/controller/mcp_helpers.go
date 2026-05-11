@@ -9,14 +9,14 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/mcp"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	quotautil "github.com/songquanpeng/one-api/relay/quota"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/mcp"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	quotautil "github.com/Laisky/one-api/relay/quota"
 )
 
 // buildFunctionToolFromMCP converts an MCP tool schema into a local function tool definition.
@@ -58,17 +58,17 @@ func parseToolArguments(raw any) (map[string]any, error) {
 		}
 		var parsed map[string]any
 		if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "unmarshal string argument to map")
 		}
 		return parsed, nil
 	default:
 		payload, err := json.Marshal(v)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "marshal argument to json")
 		}
 		var parsed map[string]any
 		if err := json.Unmarshal(payload, &parsed); err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "unmarshal argument payload to map")
 		}
 		return parsed, nil
 	}
@@ -147,17 +147,15 @@ func preConsumeMCPRoundQuota(c *gin.Context, meta *metalib.Meta, request *relaym
 	}
 	userQuota, err := model.CacheGetUserQuota(ctx, meta.UserId)
 	if err != nil {
-		return preConsumedQuota, err
+		return preConsumedQuota, errors.Wrap(err, "get user quota from cache")
 	}
 	if userQuota-preConsumedQuota < 0 {
 		return preConsumedQuota, errors.New("user quota is not enough")
 	}
-	if err := model.CacheDecreaseUserQuota(ctx, meta.UserId, preConsumedQuota); err != nil {
-		return preConsumedQuota, err
-	}
 	if err := model.PreConsumeTokenQuota(ctx, meta.TokenId, preConsumedQuota); err != nil {
-		return preConsumedQuota, err
+		return preConsumedQuota, errors.Wrap(err, "pre-consume token quota")
 	}
+	syncUserQuotaCacheAfterPreConsume(ctx, meta.UserId, preConsumedQuota, "mcp_round_preconsume")
 	return preConsumedQuota, nil
 }
 
@@ -181,7 +179,7 @@ func updateMCPRequestCostProvisional(c *gin.Context, meta *metalib.Meta, quota i
 // updateMCPRequestCostEstimate updates request cost based on accumulated usage after each round.
 // Parameters: c is the Gin context, meta provides request metadata, usage is the accumulated usage, modelName/modelRatio/groupRatio/channelCompletionRatio/pricingAdaptor drive pricing.
 // Returns: none.
-func updateMCPRequestCostEstimate(c *gin.Context, meta *metalib.Meta, usage *relaymodel.Usage, modelName string, modelRatio float64, groupRatio float64, channelCompletionRatio map[string]float64, pricingAdaptor adaptor.Adaptor) {
+func updateMCPRequestCostEstimate(c *gin.Context, meta *metalib.Meta, usage *relaymodel.Usage, modelName string, modelRatio float64, channelModelRatio map[string]float64, groupRatio float64, channelModelConfigs map[string]model.ModelConfigLocal, channelCompletionRatio map[string]float64, pricingAdaptor adaptor.Adaptor) {
 	if c == nil || meta == nil || usage == nil {
 		return
 	}
@@ -194,11 +192,13 @@ func updateMCPRequestCostEstimate(c *gin.Context, meta *metalib.Meta, usage *rel
 		Usage:                  usage,
 		ModelName:              modelName,
 		ModelRatio:             modelRatio,
+		ChannelModelRatio:      channelModelRatio,
 		GroupRatio:             groupRatio,
+		ChannelModelConfigs:    channelModelConfigs,
 		ChannelCompletionRatio: channelCompletionRatio,
 		PricingAdaptor:         pricingAdaptor,
 	})
-	quota := computeResult.TotalQuota + usage.ToolsCost
+	quota := computeResult.TotalQuota
 	if quota < 0 {
 		quota = 0
 	}
@@ -286,13 +286,16 @@ func getRelayUserFromContext(c *gin.Context) (*model.User, error) {
 	if c == nil {
 		return nil, errors.New("context is nil")
 	}
+	if u := getUserObjFromContext(c); u != nil {
+		return u, nil
+	}
 	userID := c.GetInt(ctxkey.Id)
 	if userID == 0 {
 		return nil, errors.New("user id missing")
 	}
 	user, err := model.GetUserById(userID, true)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "get user by id %d", userID)
 	}
 	return user, nil
 }

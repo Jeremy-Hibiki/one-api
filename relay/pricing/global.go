@@ -6,9 +6,10 @@ import (
 
 	"github.com/Laisky/zap"
 
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/apitype"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/apitype"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
 )
 
 // DefaultGlobalPricingAdapters defines which adapters contribute to global pricing fallback
@@ -188,33 +189,33 @@ func (gpm *GlobalPricingManager) mergeAdapterPricing(apiType int) bool {
 }
 
 // GetGlobalModelRatio returns the global model ratio for a given model
-// Returns 0 if the model is not found in global pricing
-func GetGlobalModelRatio(modelName string) float64 {
+// and a boolean indicating whether the model exists in global pricing.
+func GetGlobalModelRatio(modelName string) (float64, bool) {
 	globalPricingManager.mu.RLock()
 	defer globalPricingManager.mu.RUnlock()
 
 	globalPricingManager.ensureInitialized()
 
 	if price, exists := globalPricingManager.globalModelPricing[modelName]; exists {
-		return price.Ratio
+		return price.Ratio, true
 	}
 
-	return 0 // Not found in global pricing
+	return 0, false
 }
 
 // GetGlobalCompletionRatio returns the global completion ratio for a given model
-// Returns 0 if the model is not found in global pricing
-func GetGlobalCompletionRatio(modelName string) float64 {
+// and a boolean indicating whether the model exists in global pricing.
+func GetGlobalCompletionRatio(modelName string) (float64, bool) {
 	globalPricingManager.mu.RLock()
 	defer globalPricingManager.mu.RUnlock()
 
 	globalPricingManager.ensureInitialized()
 
 	if price, exists := globalPricingManager.globalModelPricing[modelName]; exists {
-		return price.CompletionRatio
+		return price.CompletionRatio, true
 	}
 
-	return 0 // Not found in global pricing
+	return 0, false
 }
 
 // GetGlobalModelPricing returns a copy of the entire global pricing map
@@ -245,6 +246,71 @@ func GetGlobalModelConfig(modelName string) (adaptor.ModelConfig, bool) {
 		return cloneModelConfig(cfg), true
 	}
 	return adaptor.ModelConfig{}, false
+}
+
+// GetGlobalModelConfigRatioOnly returns a shallow copy of the global model configuration.
+// It specifically omits deep-cloning of media metadata (Video, Audio, Image) to reduce
+// allocations in hot paths like quota calculation.
+func GetGlobalModelConfigRatioOnly(modelName string) (adaptor.ModelConfig, bool) {
+	globalPricingManager.mu.RLock()
+	defer globalPricingManager.mu.RUnlock()
+
+	globalPricingManager.ensureInitialized()
+
+	if cfg, exists := globalPricingManager.globalModelPricing[modelName]; exists {
+		clone := cfg
+		if len(cfg.Tiers) > 0 {
+			clone.Tiers = append([]adaptor.ModelRatioTier(nil), cfg.Tiers...)
+		}
+		clone.Video = nil
+		clone.Audio = nil
+		clone.Image = nil
+		if cfg.Embedding != nil {
+			clone.Embedding = cfg.Embedding.Clone()
+		}
+		return clone, true
+	}
+	return adaptor.ModelConfig{}, false
+}
+
+func GetGlobalVideoPricing(modelName string) *adaptor.VideoPricingConfig {
+	globalPricingManager.mu.RLock()
+	defer globalPricingManager.mu.RUnlock()
+
+	globalPricingManager.ensureInitialized()
+
+	if cfg, exists := globalPricingManager.globalModelPricing[modelName]; exists {
+		return cfg.Video.Clone()
+	}
+	return nil
+}
+
+// GetGlobalAudioPricing returns the global audio pricing configuration for a given model.
+// The returned configuration is cloned to prevent external mutation of the cache.
+func GetGlobalAudioPricing(modelName string) *adaptor.AudioPricingConfig {
+	globalPricingManager.mu.RLock()
+	defer globalPricingManager.mu.RUnlock()
+
+	globalPricingManager.ensureInitialized()
+
+	if cfg, exists := globalPricingManager.globalModelPricing[modelName]; exists {
+		return cfg.Audio.Clone()
+	}
+	return nil
+}
+
+// GetGlobalImagePricing returns the global image pricing configuration for a given model.
+// The returned configuration is cloned to prevent external mutation of the cache.
+func GetGlobalImagePricing(modelName string) *adaptor.ImagePricingConfig {
+	globalPricingManager.mu.RLock()
+	defer globalPricingManager.mu.RUnlock()
+
+	globalPricingManager.ensureInitialized()
+
+	if cfg, exists := globalPricingManager.globalModelPricing[modelName]; exists {
+		return cfg.Image.Clone()
+	}
+	return nil
 }
 
 // ReloadGlobalPricing forces a reload of the global pricing from contributing adapters
@@ -289,25 +355,26 @@ func GetModelRatioWithThreeLayers(modelName string, channelOverrides map[string]
 
 	// Layer 2: Channel default ratio (adapter's default pricing)
 	if adaptor != nil {
-		ratio := adaptor.GetModelRatio(modelName)
-		// Check if the adapter actually has pricing for this model
-		// If GetModelRatio returns the default fallback, we should try global pricing
-		defaultPricing := adaptor.GetDefaultModelPricing()
-		if _, hasSpecificPricing := defaultPricing[modelName]; hasSpecificPricing {
-			return ratio
+		// Use GetDefaultModelPricing directly to avoid redundant lookups and function calls
+		if price, exists := adaptor.GetDefaultModelPricing()[modelName]; exists {
+			return price.Ratio
 		}
 	}
 
 	// Layer 3: Global model pricing (merged from selected adapters)
 	// Respect explicit zero pricing by checking existence, not value.
-	if globalPricing := GetGlobalModelPricing(); globalPricing != nil {
-		if cfg, exists := globalPricing[modelName]; exists {
-			return cfg.Ratio
-		}
+	if ratio, exists := GetGlobalModelRatio(modelName); exists {
+		return ratio
 	}
 
 	// Layer 4: Final fallback - reasonable default
-	return 2.5 * 0.000001 // 2.5 USD per million tokens
+	fallbackRatio := 2.5 * billingratio.MilliTokensUsd
+	logger.Logger.Debug("pricing fallback used for unknown model",
+		zap.String("model_name", modelName),
+		zap.Float64("fallback_ratio", fallbackRatio),
+		zap.String("unit", "quota_per_token"),
+	)
+	return fallbackRatio // 2.5 USD per million tokens expressed in internal quota units
 }
 
 // GetCompletionRatioWithThreeLayers implements the three-layer completion ratio fallback
@@ -321,20 +388,16 @@ func GetCompletionRatioWithThreeLayers(modelName string, channelOverrides map[st
 
 	// Layer 2: Channel default ratio (adapter's default pricing)
 	if adaptor != nil {
-		ratio := adaptor.GetCompletionRatio(modelName)
-		// Check if the adapter actually has pricing for this model
-		defaultPricing := adaptor.GetDefaultModelPricing()
-		if _, hasSpecificPricing := defaultPricing[modelName]; hasSpecificPricing {
-			return ratio
+		// Use GetDefaultModelPricing directly to avoid redundant lookups and function calls
+		if price, exists := adaptor.GetDefaultModelPricing()[modelName]; exists {
+			return price.CompletionRatio
 		}
 	}
 
 	// Layer 3: Global model pricing (merged from selected adapters)
 	// Respect explicit zero pricing by checking existence, not value.
-	if globalPricing := GetGlobalModelPricing(); globalPricing != nil {
-		if cfg, exists := globalPricing[modelName]; exists {
-			return cfg.CompletionRatio
-		}
+	if ratio, exists := GetGlobalCompletionRatio(modelName); exists {
+		return ratio
 	}
 
 	// Layer 4: Final fallback - reasonable default
@@ -356,11 +419,9 @@ func GetVideoPricingWithThreeLayers(modelName string, channelOverride *adaptor.V
 		}
 	}
 
-	if global := GetGlobalModelPricing(); global != nil {
-		if cfg, exists := global[modelName]; exists {
-			if cfg.Video != nil && cfg.Video.HasData() {
-				return cfg.Video.Clone()
-			}
+	if cfg := GetGlobalVideoPricing(modelName); cfg != nil {
+		if cfg.HasData() {
+			return cfg
 		}
 	}
 
@@ -380,6 +441,9 @@ func cloneModelConfig(src adaptor.ModelConfig) adaptor.ModelConfig {
 	}
 	if src.Image != nil {
 		clone.Image = src.Image.Clone()
+	}
+	if src.Embedding != nil {
+		clone.Embedding = src.Embedding.Clone()
 	}
 	return clone
 }
@@ -407,36 +471,37 @@ type EffectivePricing struct {
 // - If tiers exist, finds the tier whose InputTokenThreshold <= inputTokens and is the highest such threshold.
 // - Optional tier fields inherit from base if zero. Negative cached ratios mean free.
 func ResolveEffectivePricing(modelName string, inputTokens int, adaptor adaptor.Adaptor) EffectivePricing {
-	eff := EffectivePricing{}
 	if adaptor == nil {
-		// Fallback to defaults if adaptor missing
-		baseIn := 2.5 * 0.000001
+		baseIn := 2.5 * billingratio.MilliTokensUsd
 		baseComp := 1.0
-		eff.InputRatio = baseIn
-		eff.OutputRatio = baseIn * baseComp
-		eff.CachedInputRatio = 0
-		eff.CacheWrite5mRatio = 0
-		eff.CacheWrite1hRatio = 0
-		eff.AppliedTierThreshold = 0
-		return eff
+		return EffectivePricing{
+			InputRatio:           baseIn,
+			OutputRatio:          baseIn * baseComp,
+			CachedInputRatio:     0,
+			CacheWrite5mRatio:    0,
+			CacheWrite1hRatio:    0,
+			AppliedTierThreshold: 0,
+		}
 	}
 
-	pricing := adaptor.GetDefaultModelPricing()
-	base, ok := pricing[modelName]
-	if !ok {
-		// Use adaptor fallbacks
-		baseRatio := adaptor.GetModelRatio(modelName)
-		baseComp := adaptor.GetCompletionRatio(modelName)
-		eff.InputRatio = baseRatio
-		eff.OutputRatio = baseRatio * baseComp
-		eff.CachedInputRatio = base.CachedInputRatio // will be zero, as base not exists
-		eff.CacheWrite5mRatio = base.CacheWrite5mRatio
-		eff.CacheWrite1hRatio = base.CacheWrite1hRatio
-		eff.AppliedTierThreshold = 0
-		return eff
+	modelPricing := adaptor.GetDefaultModelPricing()
+	if base, ok := modelPricing[modelName]; ok {
+		return ResolveEffectivePricingFromConfig(inputTokens, base)
 	}
 
-	// Start with base
+	baseRatio := adaptor.GetModelRatio(modelName)
+	baseComp := adaptor.GetCompletionRatio(modelName)
+	return EffectivePricing{
+		InputRatio:           baseRatio,
+		OutputRatio:          baseRatio * baseComp,
+		CachedInputRatio:     0,
+		CacheWrite5mRatio:    0,
+		CacheWrite1hRatio:    0,
+		AppliedTierThreshold: 0,
+	}
+}
+
+func ResolveEffectivePricingFromConfig(inputTokens int, base adaptor.ModelConfig) EffectivePricing {
 	in := base.Ratio
 	comp := base.CompletionRatio
 	cachedIn := base.CachedInputRatio
@@ -444,39 +509,36 @@ func ResolveEffectivePricing(modelName string, inputTokens int, adaptor adaptor.
 	cw1 := base.CacheWrite1hRatio
 	appliedThreshold := 0
 
-	// Find applicable tier (tiers are sorted ascending by threshold)
 	if len(base.Tiers) > 0 {
 		for _, t := range base.Tiers {
-			if inputTokens >= t.InputTokenThreshold {
-				// Apply overrides from this tier
-				if t.Ratio != 0 {
-					in = t.Ratio
-				}
-				if t.CompletionRatio != 0 {
-					comp = t.CompletionRatio
-				}
-				if t.CachedInputRatio != 0 {
-					cachedIn = t.CachedInputRatio
-				}
-				if t.CacheWrite5mRatio != 0 {
-					cw5 = t.CacheWrite5mRatio
-				}
-				if t.CacheWrite1hRatio != 0 {
-					cw1 = t.CacheWrite1hRatio
-				}
-				appliedThreshold = t.InputTokenThreshold
-			} else {
+			if inputTokens < t.InputTokenThreshold {
 				break
 			}
+			if t.Ratio != 0 {
+				in = t.Ratio
+			}
+			if t.CompletionRatio != 0 {
+				comp = t.CompletionRatio
+			}
+			if t.CachedInputRatio != 0 {
+				cachedIn = t.CachedInputRatio
+			}
+			if t.CacheWrite5mRatio != 0 {
+				cw5 = t.CacheWrite5mRatio
+			}
+			if t.CacheWrite1hRatio != 0 {
+				cw1 = t.CacheWrite1hRatio
+			}
+			appliedThreshold = t.InputTokenThreshold
 		}
 	}
 
-	eff.InputRatio = in
-	// Allow completion ratio to be zero if explicitly configured (means free completion tokens)
-	eff.OutputRatio = in * comp
-	eff.CachedInputRatio = cachedIn
-	eff.CacheWrite5mRatio = cw5
-	eff.CacheWrite1hRatio = cw1
-	eff.AppliedTierThreshold = appliedThreshold
-	return eff
+	return EffectivePricing{
+		InputRatio:           in,
+		OutputRatio:          in * comp,
+		CachedInputRatio:     cachedIn,
+		CacheWrite5mRatio:    cw5,
+		CacheWrite1hRatio:    cw1,
+		AppliedTierThreshold: appliedThreshold,
+	}
 }

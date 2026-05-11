@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/helper"
+	"github.com/Laisky/one-api/common/helper"
 )
 
 func TestUpdateConsumeLogByIDFieldValidation(t *testing.T) {
@@ -26,13 +26,18 @@ func TestUpdateConsumeLogByIDFieldValidation(t *testing.T) {
 	require.NoError(t, LOG_DB.Create(logEntry).Error)
 
 	// Allowed fields should update successfully
-	err := UpdateConsumeLogByID(context.Background(), logEntry.Id, map[string]any{"quota": 42, "content": "test consume log updated"})
+	err := UpdateConsumeLogByID(context.Background(), logEntry.Id, map[string]any{
+		"quota":                42,
+		"content":              "test consume log updated",
+		"cached_prompt_tokens": 11,
+	})
 	require.NoError(t, err)
 
 	var updated Log
 	require.NoError(t, LOG_DB.First(&updated, logEntry.Id).Error)
 	assert.Equal(t, 42, updated.Quota)
 	assert.Equal(t, "test consume log updated", updated.Content)
+	assert.Equal(t, 11, updated.CachedPromptTokens)
 
 	// Unsupported fields should return an error
 	err = UpdateConsumeLogByID(context.Background(), logEntry.Id, map[string]any{"unsupported": "value"})

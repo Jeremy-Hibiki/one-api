@@ -1,8 +1,10 @@
 package pricing
 
 import (
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor"
+	"sort"
+
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor"
 )
 
 const (
@@ -46,9 +48,10 @@ func ResolveModelConfig(modelName string, channelConfigs map[string]model.ModelC
 func ResolveAudioPricing(modelName string, channelConfigs map[string]model.ModelConfigLocal, provider adaptor.Adaptor) (*adaptor.AudioPricingConfig, bool) {
 	if channelConfigs != nil {
 		if local, ok := channelConfigs[modelName]; ok {
-			cfg := convertLocalModelConfig(local)
-			if cfg.Audio != nil && cfg.Audio.HasData() {
-				return cfg.Audio.Clone(), true
+			// Optimization: Only convert audio config from local instead of everything.
+			// No clone needed as convertLocalAudio returns a fresh object.
+			if audio := convertLocalAudio(local.Audio); audio != nil && audio.HasData() {
+				return audio, true
 			}
 		}
 	}
@@ -63,9 +66,9 @@ func ResolveAudioPricing(modelName string, channelConfigs map[string]model.Model
 		}
 	}
 
-	if cfg, ok := GetGlobalModelConfig(modelName); ok {
-		if cfg.Audio != nil && cfg.Audio.HasData() {
-			return cfg.Audio.Clone(), true
+	if cfg := GetGlobalAudioPricing(modelName); cfg != nil {
+		if cfg.HasData() {
+			return cfg, true
 		}
 	}
 
@@ -78,9 +81,10 @@ func ResolveAudioPricing(modelName string, channelConfigs map[string]model.Model
 func ResolveImagePricing(modelName string, channelConfigs map[string]model.ModelConfigLocal, provider adaptor.Adaptor) (*adaptor.ImagePricingConfig, bool) {
 	if channelConfigs != nil {
 		if local, ok := channelConfigs[modelName]; ok {
-			cfg := convertLocalModelConfig(local)
-			if cfg.Image != nil && cfg.Image.HasData() {
-				return cfg.Image.Clone(), true
+			// Optimization: Only convert image config from local instead of everything.
+			// No clone needed as convertLocalImage returns a fresh object.
+			if image := convertLocalImage(local.Image); image != nil && image.HasData() {
+				return image, true
 			}
 		}
 	}
@@ -95,9 +99,9 @@ func ResolveImagePricing(modelName string, channelConfigs map[string]model.Model
 		}
 	}
 
-	if cfg, ok := GetGlobalModelConfig(modelName); ok {
-		if cfg.Image != nil && cfg.Image.HasData() {
-			return cfg.Image.Clone(), true
+	if cfg := GetGlobalImagePricing(modelName); cfg != nil {
+		if cfg.HasData() {
+			return cfg, true
 		}
 	}
 
@@ -106,9 +110,28 @@ func ResolveImagePricing(modelName string, channelConfigs map[string]model.Model
 
 func convertLocalModelConfig(local model.ModelConfigLocal) adaptor.ModelConfig {
 	cfg := adaptor.ModelConfig{
-		Ratio:           local.Ratio,
-		CompletionRatio: local.CompletionRatio,
-		MaxTokens:       local.MaxTokens,
+		Ratio:             local.Ratio,
+		CompletionRatio:   local.CompletionRatio,
+		CachedInputRatio:  local.CachedInputRatio,
+		CacheWrite5mRatio: local.CacheWrite5mRatio,
+		CacheWrite1hRatio: local.CacheWrite1hRatio,
+		MaxTokens:         local.MaxTokens,
+	}
+	if len(local.Tiers) > 0 {
+		cfg.Tiers = make([]adaptor.ModelRatioTier, 0, len(local.Tiers))
+		for _, t := range local.Tiers {
+			cfg.Tiers = append(cfg.Tiers, adaptor.ModelRatioTier{
+				Ratio:               t.Ratio,
+				CompletionRatio:     t.CompletionRatio,
+				CachedInputRatio:    t.CachedInputRatio,
+				CacheWrite5mRatio:   t.CacheWrite5mRatio,
+				CacheWrite1hRatio:   t.CacheWrite1hRatio,
+				InputTokenThreshold: t.InputTokenThreshold,
+			})
+		}
+		sort.Slice(cfg.Tiers, func(i, j int) bool {
+			return cfg.Tiers[i].InputTokenThreshold < cfg.Tiers[j].InputTokenThreshold
+		})
 	}
 	if local.Video != nil {
 		cfg.Video = convertLocalVideo(local.Video)
@@ -118,6 +141,9 @@ func convertLocalModelConfig(local model.ModelConfigLocal) adaptor.ModelConfig {
 	}
 	if local.Image != nil {
 		cfg.Image = convertLocalImage(local.Image)
+	}
+	if local.Embedding != nil {
+		cfg.Embedding = convertLocalEmbedding(local.Embedding)
 	}
 	return cfg
 }
@@ -186,6 +212,88 @@ func convertLocalImage(local *model.ImagePricingLocal) *adaptor.ImagePricingConf
 			}
 			cfg.QualitySizeMultipliers[quality] = inner
 		}
+	}
+	return cfg
+}
+
+// convertLocalEmbedding converts the persisted local embedding pricing metadata into adaptor form.
+func convertLocalEmbedding(local *model.EmbeddingPricingLocal) *adaptor.EmbeddingPricingConfig {
+	if local == nil {
+		return nil
+	}
+	return &adaptor.EmbeddingPricingConfig{
+		TextTokenRatio:     local.TextTokenRatio,
+		ImageTokenRatio:    local.ImageTokenRatio,
+		AudioTokenRatio:    local.AudioTokenRatio,
+		VideoTokenRatio:    local.VideoTokenRatio,
+		DocumentTokenRatio: local.DocumentTokenRatio,
+		UsdPerImage:        local.UsdPerImage,
+		UsdPerAudioSecond:  local.UsdPerAudioSecond,
+		UsdPerVideoFrame:   local.UsdPerVideoFrame,
+		UsdPerDocumentPage: local.UsdPerDocumentPage,
+	}
+}
+
+// ResolveModelConfigRatioOnly returns a shallow configuration by applying
+// channel overrides first, then adaptor defaults, then global fallbacks.
+// It omits media metadata to optimize for token-only billing paths.
+func ResolveModelConfigRatioOnly(modelName string, channelConfigs map[string]model.ModelConfigLocal, provider adaptor.Adaptor) (adaptor.ModelConfig, bool) {
+	if channelConfigs != nil {
+		if local, ok := channelConfigs[modelName]; ok {
+			cfg := convertLocalModelConfigRatioOnly(local)
+			return cfg, true
+		}
+	}
+
+	if provider != nil {
+		if defaults := provider.GetDefaultModelPricing(); defaults != nil {
+			if cfg, ok := defaults[modelName]; ok {
+				clone := cfg
+				if len(cfg.Tiers) > 0 {
+					clone.Tiers = append([]adaptor.ModelRatioTier(nil), cfg.Tiers...)
+				}
+				clone.Video = nil
+				clone.Audio = nil
+				clone.Image = nil
+				if cfg.Embedding != nil {
+					clone.Embedding = cfg.Embedding.Clone()
+				}
+				return clone, true
+			}
+		}
+	}
+
+	if cfg, ok := GetGlobalModelConfigRatioOnly(modelName); ok {
+		return cfg, true
+	}
+
+	return adaptor.ModelConfig{}, false
+}
+
+func convertLocalModelConfigRatioOnly(local model.ModelConfigLocal) adaptor.ModelConfig {
+	cfg := adaptor.ModelConfig{
+		Ratio:             local.Ratio,
+		CompletionRatio:   local.CompletionRatio,
+		CachedInputRatio:  local.CachedInputRatio,
+		CacheWrite5mRatio: local.CacheWrite5mRatio,
+		CacheWrite1hRatio: local.CacheWrite1hRatio,
+		MaxTokens:         local.MaxTokens,
+	}
+	if len(local.Tiers) > 0 {
+		cfg.Tiers = make([]adaptor.ModelRatioTier, 0, len(local.Tiers))
+		for _, t := range local.Tiers {
+			cfg.Tiers = append(cfg.Tiers, adaptor.ModelRatioTier{
+				Ratio:               t.Ratio,
+				CompletionRatio:     t.CompletionRatio,
+				CachedInputRatio:    t.CachedInputRatio,
+				CacheWrite5mRatio:   t.CacheWrite5mRatio,
+				CacheWrite1hRatio:   t.CacheWrite1hRatio,
+				InputTokenThreshold: t.InputTokenThreshold,
+			})
+		}
+		sort.Slice(cfg.Tiers, func(i, j int) bool {
+			return cfg.Tiers[i].InputTokenThreshold < cfg.Tiers[j].InputTokenThreshold
+		})
 	}
 	return cfg
 }

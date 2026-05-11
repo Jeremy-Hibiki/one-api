@@ -9,12 +9,12 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai_compatible"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 // ResponseAPIInputTokensDetails models the nested usage block returned by the OpenAI Response API.
@@ -129,7 +129,7 @@ func (d *ResponseAPIOutputTokensDetails) toModel() *model.UsageCompletionTokensD
 func (d *ResponseAPIInputTokensDetails) UnmarshalJSON(data []byte) error {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return errors.Wrap(err, "unmarshal xai input tokens details")
 	}
 
 	// Reset existing values so the struct can be reused.
@@ -175,7 +175,7 @@ func (d *ResponseAPIInputTokensDetails) UnmarshalJSON(data []byte) error {
 func (d *ResponseAPIOutputTokensDetails) UnmarshalJSON(data []byte) error {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
+		return errors.Wrap(err, "unmarshal xai output tokens details")
 	}
 
 	*d = ResponseAPIOutputTokensDetails{}
@@ -268,7 +268,7 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	}
 	// Remove presence_penalty and frequency_penalty for certain grok-4 models as they don't support them
 	switch request.Model {
-	case "grok-4-0709", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning":
+	case "grok-4-0709", "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning", "grok-4.20-multi-agent-0309", "grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning":
 		if request.PresencePenalty != nil {
 			request.PresencePenalty = nil
 		}
@@ -412,8 +412,9 @@ func (a *Adaptor) handleImageResponse(c *gin.Context, resp *http.Response) (usag
 		return nil, openai_compatible.ErrorWrapper(errors.Wrap(parseErr, "parse xai image response"), "parse_response_failed", http.StatusInternalServerError)
 	}
 
-	// Convert to OpenAI format
-	var imageDataList []ImageData
+	// Convert to OpenAI format. Pre-size to a non-nil empty slice so the wire-level
+	// JSON always emits `"data":[]` instead of `null` for empty/error upstream payloads.
+	imageDataList := make([]ImageData, 0, len(xaiResponse.Data))
 	for _, xaiData := range xaiResponse.Data {
 		imageData := ImageData{
 			URL:           xaiData.URL,

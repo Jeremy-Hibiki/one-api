@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,23 +20,24 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/message"
-	"github.com/songquanpeng/one-api/middleware"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/monitor"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/message"
+	"github.com/Laisky/one-api/middleware"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/monitor"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
 
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/controller"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/controller"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	quotautil "github.com/Laisky/one-api/relay/quota"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 func buildTestRequest(model string) *relaymodel.GeneralOpenAIRequest {
@@ -60,7 +60,7 @@ func parseTestResponse(resp string) (*openai.TextResponse, string, error) {
 	var response openai.TextResponse
 	err := json.Unmarshal([]byte(resp), &response)
 	if err != nil {
-		return nil, "", err
+		return nil, "", errors.Wrap(err, "unmarshal test response")
 	}
 	if len(response.Choices) == 0 {
 		return nil, "", errors.New("response has no choices")
@@ -86,18 +86,16 @@ func calculateTestCost(usage *relaymodel.Usage, meta *meta.Meta, request *relaym
 
 	// Use the same group ratio as set in the context (typically 1.0 for tests)
 	groupRatio := 1.0 // Default group ratio for tests
+	computeResult := quotautil.Compute(quotautil.ComputeInput{
+		Usage:                  usage,
+		ModelName:              request.Model,
+		ModelRatio:             modelRatio,
+		GroupRatio:             groupRatio,
+		ChannelCompletionRatio: map[string]float64{request.Model: completionRatio},
+		PricingAdaptor:         pricingAdaptor,
+	})
 
-	// Calculate cost using the same formula as postConsumeQuota
-	promptTokens := usage.PromptTokens
-	completionTokens := usage.CompletionTokens
-	ratio := modelRatio * groupRatio
-
-	quota := int64(math.Ceil((float64(promptTokens)+float64(completionTokens)*completionRatio)*ratio)) + usage.ToolsCost
-	if ratio != 0 && quota <= 0 {
-		quota = 1
-	}
-
-	return quota
+	return computeResult.TotalQuota
 }
 
 func testChannel(ctx context.Context, channel *model.Channel, request *relaymodel.GeneralOpenAIRequest) (responseMessage string, err error, openaiErr *relaymodel.Error) {
@@ -204,10 +202,11 @@ func testChannel(ctx context.Context, channel *model.Channel, request *relaymode
 
 		// Create test log with actual usage information if available
 		testLog := &model.Log{
-			ChannelId:   channel.Id,
-			ModelName:   resolvedModel,
-			Content:     logContent,
-			ElapsedTime: helper.CalcElapsedTime(startTime),
+			ChannelId:       channel.Id,
+			ModelName:       resolvedModel,
+			OriginModelName: requestedModel,
+			Content:         logContent,
+			ElapsedTime:     helper.CalcElapsedTime(startTime),
 		}
 
 		// Include actual token usage and calculated cost in test logs for accurate cost tracking

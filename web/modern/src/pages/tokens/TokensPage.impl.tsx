@@ -1,7 +1,9 @@
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { EnhancedDataTable } from '@/components/ui/enhanced-data-table';
 import { ListActionButton } from '@/components/ui/list-action-button';
 import { ResponsiveActionGroup } from '@/components/ui/responsive-action-group';
@@ -15,7 +17,7 @@ import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/stores/auth';
 import { cn, renderQuota } from '@/lib/utils';
 import type { ColumnDef } from '@tanstack/react-table';
-import { Ban, Check, CheckCircle, Copy, Eye, EyeOff, Plus, Settings, Trash2 } from 'lucide-react';
+import { Ban, Check, CheckCircle, Copy, ExternalLink, Eye, EyeOff, Plus, Settings, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
@@ -44,6 +46,61 @@ const TOKEN_STATUS = {
   EXHAUSTED: 4,
 } as const;
 
+interface ThirdPartyClientContext {
+  chatLink: string;
+  serverAddress: string;
+  encodedServerAddress: string;
+}
+
+export const resolveThirdPartyClientContext = (): ThirdPartyClientContext => {
+  const chatLink = (typeof window !== 'undefined' && window.localStorage.getItem('chat_link')) || '';
+
+  let serverAddress = '';
+  if (typeof window !== 'undefined') {
+    const rawStatus = window.localStorage.getItem('status');
+    if (rawStatus) {
+      try {
+        const parsed = JSON.parse(rawStatus) as { server_address?: string };
+        serverAddress = parsed?.server_address || '';
+      } catch {
+        // Ignore malformed status; fall back to window.location.origin below.
+      }
+    }
+    if (!serverAddress) {
+      serverAddress = window.localStorage.getItem('server_address') || '';
+    }
+    if (!serverAddress && typeof window.location !== 'undefined') {
+      serverAddress = window.location.origin;
+    }
+  }
+
+  return {
+    chatLink,
+    serverAddress,
+    encodedServerAddress: encodeURIComponent(serverAddress),
+  };
+};
+
+export type ThirdPartyClient = 'next' | 'ama' | 'opencat' | 'lobechat';
+
+export const buildThirdPartyClientUrl = (client: ThirdPartyClient, key: string, ctx: ThirdPartyClientContext): string | null => {
+  const { chatLink, serverAddress, encodedServerAddress } = ctx;
+  switch (client) {
+    case 'next':
+      if (!chatLink) return null;
+      return `${chatLink}/#/?settings={"key":"sk-${key}","url":"${serverAddress}"}`;
+    case 'ama':
+      return `ama://set-api-key?server=${encodedServerAddress}&key=sk-${key}`;
+    case 'opencat':
+      return `opencat://team/join?domain=${encodedServerAddress}&token=sk-${key}`;
+    case 'lobechat':
+      if (!chatLink) return null;
+      return `${chatLink}/?settings={"keyVaults":{"openai":{"apiKey":"sk-${key}","baseURL":"${serverAddress}/v1"}}}`;
+    default:
+      return null;
+  }
+};
+
 export const shouldHighlightTokenQuota = (token: Token, userQuota: number | null): boolean => {
   if (userQuota === null || userQuota < 0) {
     return false;
@@ -63,6 +120,7 @@ export function TokensPage() {
   const { isMobile } = useResponsive();
   const userQuota = useAuthStore((state) => state.user?.quota ?? null);
   const { t } = useTranslation();
+  const [confirmDelete, ConfirmDeleteDialog] = useConfirmDialog();
   const tr = useCallback(
     (key: string, defaultValue: string, options?: Record<string, unknown>) => t(`tokens.page.${key}`, { defaultValue, ...options }),
     [t]
@@ -72,7 +130,7 @@ export function TokensPage() {
   const [pageIndex, setPageIndex] = useState(Math.max(0, parseInt(searchParams.get('p') || '1') - 1));
   const [pageSize, setPageSize] = usePageSize(STORAGE_KEYS.PAGE_SIZE);
   const [total, setTotal] = useState(0);
-  const [searchKeyword, setSearchKeyword] = useState('');
+  const [searchKeyword, setSearchKeyword] = useState(searchParams.get('keyword') || '');
   const [searchOptions, setSearchOptions] = useState<SearchOption[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [sortBy, setSortBy] = useState('id');
@@ -94,25 +152,25 @@ export function TokensPage() {
       switch (status) {
         case TOKEN_STATUS.ENABLED:
           return (
-            <Badge variant="default" className="bg-green-100 text-green-800">
+            <Badge variant="default" className="bg-success-muted text-success-foreground">
               {tr('status.enabled', 'Enabled')}
             </Badge>
           );
         case TOKEN_STATUS.DISABLED:
           return (
-            <Badge variant="secondary" className="bg-gray-100 text-gray-800">
+            <Badge variant="secondary" className="bg-muted text-muted-foreground">
               {tr('status.disabled', 'Disabled')}
             </Badge>
           );
         case TOKEN_STATUS.EXPIRED:
           return (
-            <Badge variant="destructive" className="bg-red-100 text-red-800">
+            <Badge variant="destructive" className="bg-destructive/10 text-destructive">
               {tr('status.expired', 'Expired')}
             </Badge>
           );
         case TOKEN_STATUS.EXHAUSTED:
           return (
-            <Badge variant="destructive" className="bg-yellow-100 text-yellow-800">
+            <Badge variant="destructive" className="bg-warning-muted text-warning-foreground">
               {tr('status.exhausted', 'Exhausted')}
             </Badge>
           );
@@ -154,9 +212,13 @@ export function TokensPage() {
     }
   };
 
-  // Load initial data
+  // Load initial data (perform search if keyword is pre-filled from URL)
   useEffect(() => {
-    load(pageIndex, pageSize);
+    if (searchKeyword.trim()) {
+      performSearch();
+    } else {
+      load(pageIndex, pageSize);
+    }
     initializedRef.current = true;
   }, []);
 
@@ -219,9 +281,17 @@ export function TokensPage() {
 
   const performSearch = async () => {
     if (!searchKeyword.trim()) {
+      setSearchParams((prev) => {
+        prev.delete('keyword');
+        return prev;
+      });
       return load(0, pageSize);
     }
 
+    setSearchParams((prev) => {
+      prev.set('keyword', searchKeyword);
+      return prev;
+    });
     setLoading(true);
     try {
       // Unified API call - complete URL with /api prefix
@@ -285,6 +355,47 @@ export function TokensPage() {
     }
   };
 
+  const openInClient = useCallback((token: Token, client: ThirdPartyClient) => {
+    const ctx = resolveThirdPartyClientContext();
+    const url = buildThirdPartyClientUrl(client, token.key, ctx);
+    if (!url) return;
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(url, '_blank');
+    }
+  }, []);
+
+  const renderClientDropdown = (token: Token, label?: string) => {
+    const chatLink = (typeof window !== 'undefined' && window.localStorage.getItem('chat_link')) || '';
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline" size="sm" className="touch-target gap-1" aria-label={tr('share.open_in_client', 'Open in client')}>
+            <ExternalLink className="h-3.5 w-3.5" />
+            {label ?? tr('share.open_in_client', 'Open in client')}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {chatLink ? (
+            <DropdownMenuItem onSelect={() => openInClient(token, 'next')} data-testid={`token-share-next-${token.id}`}>
+              {tr('share.next_chat', 'ChatGPT Next Web')}
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuItem onSelect={() => openInClient(token, 'ama')} data-testid={`token-share-ama-${token.id}`}>
+            {tr('share.ama', 'AMA 问天')}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openInClient(token, 'opencat')} data-testid={`token-share-opencat-${token.id}`}>
+            {tr('share.opencat', 'OpenCat')}
+          </DropdownMenuItem>
+          {chatLink ? (
+            <DropdownMenuItem onSelect={() => openInClient(token, 'lobechat')} data-testid={`token-share-lobechat-${token.id}`}>
+              {tr('share.lobechat', 'LobeChat')}
+            </DropdownMenuItem>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  };
+
   const toggleKeyVisibility = (tokenId: number) => {
     setShowKeys((prev) => ({
       ...prev,
@@ -317,18 +428,25 @@ export function TokensPage() {
         return (
           <div className="flex items-center gap-2">
             <span className="font-mono text-xs">{isVisible ? token.key : maskKey(token.key)}</span>
-            <Button variant="ghost" size="sm" onClick={() => toggleKeyVisibility(token.id)} className="h-6 w-6 p-0">
-              {isVisible ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => toggleKeyVisibility(token.id)}
+              className="h-8 w-8 touch-target"
+              aria-label={isVisible ? tr('key.hide', 'Hide key') : tr('key.show', 'Show key')}
+            >
+              {isVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             </Button>
             <Button
               variant="ghost"
-              size="sm"
+              size="icon"
               onClick={() => copyToClipboard(token)}
-              className="h-6 w-6 p-0"
+              className="h-8 w-8 touch-target"
               disabled={!!copiedTokens[token.id]}
+              aria-label={copiedTokens[token.id] ? tr('key.copied', 'Copied!') : tr('key.copy', 'Copy token')}
               title={copiedTokens[token.id] ? tr('key.copied', 'Copied!') : tr('key.copy', 'Copy token')}
             >
-              {copiedTokens[token.id] ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+              {copiedTokens[token.id] ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
             </Button>
           </div>
         );
@@ -346,7 +464,7 @@ export function TokensPage() {
         const token = row.original;
         const quotaLabel = formatQuotaLabel(token.remain_quota, token.unlimited_quota);
         const highlight = shouldHighlightTokenQuota(token, userQuota);
-        const quotaClasses = cn('font-mono text-sm', highlight && 'text-amber-600 font-semibold');
+        const quotaClasses = cn('font-mono text-sm', highlight && 'text-warning font-semibold');
 
         if (!highlight) {
           return (
@@ -432,13 +550,14 @@ export function TokensPage() {
             <Button variant="outline" size="sm" onClick={() => navigate(`/tokens/edit/${token.id}`)} className="touch-target">
               {tr('actions.edit', 'Edit')}
             </Button>
+            {renderClientDropdown(token)}
             <Button
               variant="outline"
               size="sm"
               onClick={() => manage(token.id, token.status === TOKEN_STATUS.ENABLED ? 'disable' : 'enable')}
               className={cn(
                 'touch-target',
-                token.status === TOKEN_STATUS.ENABLED ? 'text-orange-600 hover:text-orange-700' : 'text-green-600 hover:text-green-700'
+                token.status === TOKEN_STATUS.ENABLED ? 'text-warning hover:text-warning/80' : 'text-success hover:text-success/80'
               )}
             >
               {token.status === TOKEN_STATUS.ENABLED ? tr('actions.disable', 'Disable') : tr('actions.enable', 'Enable')}
@@ -446,11 +565,13 @@ export function TokensPage() {
             <Button
               variant="destructive"
               size="sm"
-              onClick={() => {
+              onClick={async () => {
                 const label = formatTokenLabel(token);
-                if (confirm(tr('confirm.delete', 'Are you sure you want to delete token "{{label}}"?', { label }))) {
-                  manage(token.id, 'delete');
-                }
+                const confirmed = await confirmDelete({
+                  title: tr('confirm.delete_title', 'Delete Token'),
+                  description: tr('confirm.delete', 'Are you sure you want to delete token "{{label}}"?', { label }),
+                });
+                if (confirmed) manage(token.id, 'delete');
               }}
               className="touch-target"
             >
@@ -522,20 +643,22 @@ export function TokensPage() {
                     onClick={() => manage(row.id, row.status === TOKEN_STATUS.ENABLED ? 'disable' : 'enable')}
                     title={row.status === TOKEN_STATUS.ENABLED ? tr('actions.disable', 'Disable') : tr('actions.enable', 'Enable')}
                     className={
-                      row.status === TOKEN_STATUS.ENABLED ? 'text-orange-600 hover:text-orange-700' : 'text-green-600 hover:text-green-700'
+                      row.status === TOKEN_STATUS.ENABLED ? 'text-warning hover:text-warning/80' : 'text-success hover:text-success/80'
                     }
                     icon={row.status === TOKEN_STATUS.ENABLED ? <Ban className="h-4 w-4" /> : <CheckCircle className="h-4 w-4" />}
                   />
                   <ListActionButton
-                    onClick={() => {
+                    onClick={async () => {
                       const label =
                         row.name ||
                         tr('table.id_placeholder', '(ID {{id}})', {
                           id: row.id,
                         });
-                      if (confirm(tr('confirm.delete', 'Are you sure you want to delete token "{{label}}"?', { label }))) {
-                        manage(row.id, 'delete');
-                      }
+                      const confirmed = await confirmDelete({
+                        title: tr('confirm.delete_title', 'Delete Token'),
+                        description: tr('confirm.delete', 'Are you sure you want to delete token "{{label}}"?', { label }),
+                      });
+                      if (confirmed) manage(row.id, 'delete');
                     }}
                     title={tr('actions.delete', 'Delete')}
                     icon={<Trash2 className="h-4 w-4" />}
@@ -556,6 +679,7 @@ export function TokensPage() {
               onSearchChange={searchTokens}
               onSearchValueChange={setSearchKeyword}
               onSearchSubmit={performSearch}
+              onSearchSelect={(key) => navigate(`/tokens/edit/${key}`)}
               searchPlaceholder={tr('search.placeholder', 'Search tokens by name...')}
               allowSearchAdditions={true}
               onRefresh={refresh}
@@ -568,6 +692,8 @@ export function TokensPage() {
           </CardContent>
         </Card>
       </ResponsivePageContainer>
+
+      <ConfirmDeleteDialog />
 
       <Dialog
         open={!!manualCopyToken}

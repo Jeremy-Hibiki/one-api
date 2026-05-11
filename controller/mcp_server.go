@@ -12,11 +12,11 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/mcp"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/mcp"
 )
 
 // MCPServerUpsertRequest describes MCP server create or update payloads.
@@ -143,9 +143,9 @@ func UpdateMCPServer(c *gin.Context) {
 		return
 	}
 
-	var payload MCPServerUpsertRequest
-	if err := json.NewDecoder(c.Request.Body).Decode(&payload); err != nil {
-		helper.RespondError(c, errors.Wrap(err, "decode mcp server"))
+	payload, providedFields, err := bindMCPServerPayload(c)
+	if err != nil {
+		helper.RespondError(c, err)
 		return
 	}
 
@@ -156,6 +156,13 @@ func UpdateMCPServer(c *gin.Context) {
 	}
 
 	applyMCPServerPayload(server, payload)
+	// Mask handling: when the api_key was present in the payload but the value
+	// is a masked secret placeholder, we leave the existing value untouched
+	// and must NOT overwrite the column with an empty string.
+	if payload.APIKey != nil && common.IsMaskedSecret(*payload.APIKey) {
+		delete(providedFields, "api_key")
+	}
+	server.ProvidedFields = providedFields
 	if err := model.UpdateMCPServer(server); err != nil {
 		logger.Error("failed to update mcp server", zap.Error(err))
 		helper.RespondError(c, err)
@@ -167,6 +174,55 @@ func UpdateMCPServer(c *gin.Context) {
 		"message": "",
 		"data":    sanitizeMCPServer(server),
 	})
+}
+
+// bindMCPServerPayload decodes the upsert request and returns a map of which
+// database columns were explicitly present in the raw request body. Mirrors
+// bindChannelPayload so we can persist zero/empty values that GORM's
+// struct-based Updates would otherwise silently skip.
+func bindMCPServerPayload(c *gin.Context) (MCPServerUpsertRequest, map[string]bool, error) {
+	var payload MCPServerUpsertRequest
+	if err := common.UnmarshalBodyReusable(c, &payload); err != nil {
+		return payload, nil, errors.Wrap(err, "unmarshal mcp server payload")
+	}
+
+	requestBody, err := common.GetRequestBody(c)
+	if err != nil {
+		return payload, nil, errors.Wrap(err, "get request body")
+	}
+
+	rawFields := make(map[string]json.RawMessage)
+	if len(requestBody) > 0 {
+		if err := json.Unmarshal(requestBody, &rawFields); err != nil {
+			return payload, nil, errors.Wrap(err, "unmarshal raw mcp server fields")
+		}
+	}
+
+	// Map JSON field names to database column names. Only include columns
+	// that the UpdateMCPServer store path knows how to apply per-column.
+	jsonToColumn := map[string]string{
+		"name":                       "name",
+		"description":                "description",
+		"status":                     "status",
+		"priority":                   "priority",
+		"base_url":                   "base_url",
+		"protocol":                   "protocol",
+		"auth_type":                  "auth_type",
+		"api_key":                    "api_key",
+		"headers":                    "headers",
+		"tool_whitelist":             "tool_whitelist",
+		"tool_blacklist":             "tool_blacklist",
+		"tool_pricing":               "tool_pricing",
+		"auto_sync_enabled":          "auto_sync_enabled",
+		"auto_sync_interval_minutes": "auto_sync_interval_minutes",
+	}
+	provided := make(map[string]bool, len(jsonToColumn))
+	for jsonName, column := range jsonToColumn {
+		if _, ok := rawFields[jsonName]; ok {
+			provided[column] = true
+		}
+	}
+	return payload, provided, nil
 }
 
 // DeleteMCPServer deletes a MCP server by ID.
@@ -295,6 +351,73 @@ func ListMCPServerTools(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    tools,
+	})
+}
+
+// ToolsDisplayServerEntry represents a MCP server with its tools for the public display page.
+type ToolsDisplayServerEntry struct {
+	Server *MCPServerDisplayInfo `json:"server"`
+	Tools  []*model.MCPTool      `json:"tools"`
+}
+
+// MCPServerDisplayInfo is a sanitized view of MCPServer for public display (no secrets).
+type MCPServerDisplayInfo struct {
+	Id       int    `json:"id"`
+	Name     string `json:"name"`
+	Status   int    `json:"status"`
+	Protocol string `json:"protocol"`
+}
+
+// GetToolsDisplay returns all enabled MCP servers and their enabled tools for the public tools page.
+// Anonymous users see all enabled tools; logged-in users see the same (no per-user tool filtering yet).
+func GetToolsDisplay(c *gin.Context) {
+	servers, err := model.ListEnabledMCPServers()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "Failed to load MCP servers: " + err.Error(),
+		})
+		return
+	}
+
+	result := make([]ToolsDisplayServerEntry, 0, len(servers))
+	for _, server := range servers {
+		tools, err := model.GetMCPToolsByServerID(server.Id)
+		if err != nil {
+			continue
+		}
+
+		// Apply server-level pricing overrides and normalize schemas
+		applyMCPToolPricingToTools(tools, server.ToolPricing)
+		normalizeMCPToolInputSchemas(tools)
+
+		// Filter to enabled tools only
+		enabledTools := make([]*model.MCPTool, 0, len(tools))
+		for _, tool := range tools {
+			if tool != nil && tool.Status == 1 {
+				enabledTools = append(enabledTools, tool)
+			}
+		}
+
+		if len(enabledTools) == 0 {
+			continue
+		}
+
+		result = append(result, ToolsDisplayServerEntry{
+			Server: &MCPServerDisplayInfo{
+				Id:       server.Id,
+				Name:     server.Name,
+				Status:   server.Status,
+				Protocol: server.Protocol,
+			},
+			Tools: enabledTools,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    result,
 	})
 }
 

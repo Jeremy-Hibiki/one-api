@@ -19,24 +19,23 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/adaptor/openai_compatible"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 var (
-	responseFallbackDBOnce      sync.Once
-	responseFallbackMigrateOnce sync.Once
-	responseFallbackFixtureMu   sync.Mutex
+	responseFallbackDBOnce    sync.Once
+	responseFallbackFixtureMu sync.Mutex
 )
 
 const (
@@ -160,7 +159,7 @@ func TestRelayResponseAPIHelper_FallbackAzure(t *testing.T) {
 	c.Set(ctxkey.TokenQuotaUnlimited, true)
 	c.Set(ctxkey.TokenQuota, int64(0))
 	c.Set(ctxkey.Username, "response-fallback")
-	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackChannelID, Type: channeltype.Azure})
 	c.Set(ctxkey.Config, model.ChannelConfig{APIVersion: "2024-02-15-preview"})
 
@@ -271,7 +270,7 @@ func TestRelayResponseAPIHelper_FallbackSearchPreviewModel(t *testing.T) {
 	c.Set(ctxkey.TokenQuotaUnlimited, true)
 	c.Set(ctxkey.TokenQuota, int64(0))
 	c.Set(ctxkey.Username, "response-fallback")
-	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
 	apiErr := RelayResponseAPIHelper(c)
@@ -298,6 +297,56 @@ func TestRelayResponseAPIHelper_FallbackSearchPreviewModel(t *testing.T) {
 	require.Equal(t, "search fallback ok", fallbackResp.Output[0].Content[0].Text, "unexpected output content")
 	require.NotNil(t, fallbackResp.Usage)
 	require.Equal(t, 14, fallbackResp.Usage.TotalTokens, "unexpected usage total tokens")
+}
+
+func TestRelayResponseAPIHelper_FallbackGroqGPTOSSMultimodalValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ensureResponseFallbackFixtures(t)
+
+	prevRedis := common.IsRedisEnabled()
+	common.SetRedisEnabled(false)
+	t.Cleanup(func() { common.SetRedisEnabled(prevRedis) })
+
+	prevLogConsume := config.IsLogConsumeEnabled()
+	config.SetLogConsumeEnabled(false)
+	t.Cleanup(func() { config.SetLogConsumeEnabled(prevLogConsume) })
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+
+	requestPayload := `{"model":"openai/gpt-oss-120b","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"describe image"},{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(requestPayload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer groq-key")
+	c.Request = req
+
+	gmw.SetLogger(c, logger.Logger)
+
+	c.Set(ctxkey.Channel, channeltype.Groq)
+	c.Set(ctxkey.ChannelId, fallbackCompatibleChannelID)
+	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackCompatibleChannelID, Type: channeltype.Groq})
+	c.Set(ctxkey.TokenId, fallbackTokenID)
+	c.Set(ctxkey.TokenName, "fallback-token")
+	c.Set(ctxkey.Id, fallbackUserID)
+	c.Set(ctxkey.Group, "default")
+	c.Set(ctxkey.ModelMapping, map[string]string{})
+	c.Set(ctxkey.ChannelRatio, 1.0)
+	c.Set(ctxkey.RequestModel, "openai/gpt-oss-120b")
+	c.Set(ctxkey.BaseURL, "https://api.groq.com/openai")
+	c.Set(ctxkey.ContentType, "application/json")
+	c.Set(ctxkey.RequestId, "req_fallback_groq_validation")
+	c.Set(ctxkey.TokenQuotaUnlimited, true)
+	c.Set(ctxkey.TokenQuota, int64(0))
+	c.Set(ctxkey.Username, "response-fallback")
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
+	c.Set(ctxkey.Config, model.ChannelConfig{})
+
+	apiErr := RelayResponseAPIHelper(c)
+	require.NotNil(t, apiErr, "expected validation error for multimodal gpt-oss request")
+	require.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	require.Equal(t, "invalid_request_error", apiErr.Code)
+	require.Contains(t, apiErr.Message, "openai/gpt-oss-120b")
+	require.Contains(t, apiErr.Message, "only supports text content")
 }
 
 func TestRelayResponseAPIHelper_FallbackBlocksDisallowedWebSearch(t *testing.T) {
@@ -348,7 +397,7 @@ func TestRelayResponseAPIHelper_FallbackBlocksDisallowedWebSearch(t *testing.T) 
 	c.Set(ctxkey.TokenQuotaUnlimited, true)
 	c.Set(ctxkey.TokenQuota, int64(0))
 	c.Set(ctxkey.Username, "response-fallback")
-	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
 	apiErr := RelayResponseAPIHelper(c)
@@ -431,7 +480,7 @@ func TestRelayResponseAPIHelper_FallbackStreaming(t *testing.T) {
 	c.Set(ctxkey.TokenQuotaUnlimited, true)
 	c.Set(ctxkey.TokenQuota, int64(0))
 	c.Set(ctxkey.Username, "response-fallback")
-	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackCompatibleChannelID, Type: channeltype.OpenAICompatible})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
@@ -554,7 +603,7 @@ func TestRelayResponseAPIHelper_FallbackStreamingToolCalls(t *testing.T) {
 	c.Set(ctxkey.TokenQuotaUnlimited, true)
 	c.Set(ctxkey.TokenQuota, int64(0))
 	c.Set(ctxkey.Username, "response-fallback")
-	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackCompatibleChannelID, Type: channeltype.OpenAICompatible})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
@@ -674,7 +723,7 @@ func TestRelayResponseAPIHelper_FallbackAnthropicStreamingHandled(t *testing.T) 
 	c.Set(ctxkey.TokenQuotaUnlimited, true)
 	c.Set(ctxkey.TokenQuota, int64(0))
 	c.Set(ctxkey.Username, "response-fallback")
-	c.Set(ctxkey.UserQuota, int64(1_000_000))
+	c.Set(ctxkey.UserObj, &model.User{Quota: 1_000_000})
 	c.Set(ctxkey.ChannelModel, &model.Channel{Id: fallbackAnthropicChannelID, Type: channeltype.Anthropic})
 	c.Set(ctxkey.Config, model.ChannelConfig{})
 
@@ -830,21 +879,19 @@ func ensureResponseFallbackFixtures(t *testing.T) {
 
 	ensureResponseFallbackDB(t)
 
-	responseFallbackMigrateOnce.Do(func() {
-		err := model.DB.AutoMigrate(
-			&model.User{},
-			&model.Token{},
-			&model.Channel{},
-			&model.UserRequestCost{},
-			&model.Log{},
-			&model.Trace{},
-			&model.MCPServer{},
-			&model.MCPTool{},
-		)
-		require.NoError(t, err, "failed to migrate tables")
-	})
+	err := model.DB.AutoMigrate(
+		&model.User{},
+		&model.Token{},
+		&model.Channel{},
+		&model.UserRequestCost{},
+		&model.Log{},
+		&model.Trace{},
+		&model.MCPServer{},
+		&model.MCPTool{},
+	)
+	require.NoError(t, err, "failed to migrate tables")
 
-	err := model.DB.Where("id = ?", fallbackUserID).Delete(&model.User{}).Error
+	err = model.DB.Where("id = ?", fallbackUserID).Delete(&model.User{}).Error
 	require.NoError(t, err, "failed to clean user fixture")
 	user := &model.User{Id: fallbackUserID, Username: "response-fallback", Quota: 1_000_000, Status: model.UserStatusEnabled}
 	err = model.DB.Create(user).Error

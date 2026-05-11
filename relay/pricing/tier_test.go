@@ -8,9 +8,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/adaptor"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // localMockAdaptor implements adaptor.Adaptor for tests
@@ -23,7 +24,7 @@ func (m *localMockAdaptor) GetModelRatio(modelName string) float64 {
 	if p, ok := m.pricing[modelName]; ok {
 		return p.Ratio
 	}
-	return 2.5 * 0.000001
+	return 2.5 * billingratio.MilliTokensUsd
 }
 func (m *localMockAdaptor) GetCompletionRatio(modelName string) float64 {
 	if p, ok := m.pricing[modelName]; ok {

@@ -13,10 +13,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 func TestConvertClaudeRequest_ToOpenAI(t *testing.T) {
@@ -416,4 +416,171 @@ func TestConvertClaudeRequest_ToolNotPromoted(t *testing.T) {
 	assert.NotEmpty(t, converted.Tools)
 	require.NotNil(t, converted.MaxCompletionTokens)
 	assert.Equal(t, 2048, *converted.MaxCompletionTokens)
+}
+
+func TestConvertClaudeRequest_ToolSearchBuiltinMappedToWebSearch(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	req := &relaymodel.ClaudeRequest{
+		Model:     "claude-sonnet-4-5",
+		MaxTokens: 512,
+		Messages: []relaymodel.ClaudeMessage{
+			{Role: "user", Content: "Find relevant tools for this task."},
+		},
+		Tools: []relaymodel.ClaudeTool{
+			{
+				Type: "tool_search_tool_regex_20251119",
+				Name: "tool_search_tool_regex",
+			},
+		},
+	}
+
+	convertedAny, err := ConvertClaudeRequest(c, req)
+	require.NoError(t, err)
+	converted, ok := convertedAny.(*relaymodel.GeneralOpenAIRequest)
+	require.True(t, ok)
+	require.Len(t, converted.Tools, 1)
+	assert.Equal(t, "web_search", converted.Tools[0].Type)
+}
+
+func TestConvertClaudeRequest_StructuredToolNotPromotedWithServerToolUse(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"topic": map[string]any{"type": "string"},
+		},
+		"required":             []any{"topic"},
+		"additionalProperties": false,
+	}
+
+	req := &relaymodel.ClaudeRequest{
+		Model:     "claude-structured",
+		MaxTokens: 256,
+		Messages: []relaymodel.ClaudeMessage{
+			{
+				Role: "assistant",
+				Content: []any{
+					map[string]any{"type": "server_tool_use", "id": "srvtoolu_1", "name": "tool_search_tool_regex", "input": map[string]any{"query": "topic"}},
+				},
+			},
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Continue with the tool result."},
+				},
+			},
+		},
+		Tools: []relaymodel.ClaudeTool{
+			{
+				Name:        "topic_classifier",
+				Description: "Return structured topic and confidence data",
+				InputSchema: schema,
+			},
+		},
+		ToolChoice: map[string]any{"type": "tool", "name": "topic_classifier"},
+	}
+
+	convertedAny, err := ConvertClaudeRequest(c, req)
+	require.NoError(t, err)
+	converted, ok := convertedAny.(*relaymodel.GeneralOpenAIRequest)
+	require.True(t, ok)
+
+	assert.Nil(t, converted.ResponseFormat)
+	require.NotNil(t, converted.ToolChoice)
+	require.NotEmpty(t, converted.Tools)
+}
+
+func TestConvertClaudeBlocks_ThinkingMappedToReasoning(t *testing.T) {
+	t.Parallel()
+
+	blocks := []any{
+		map[string]any{
+			"type":      "thinking",
+			"thinking":  "Let me analyze this with <code> & logic",
+			"signature": "sigABC123==",
+		},
+		map[string]any{
+			"type": "text",
+			"text": "Here is my answer",
+		},
+	}
+
+	messages := convertClaudeBlocks("assistant", blocks)
+	require.Len(t, messages, 1)
+
+	msg := messages[0]
+	assert.Equal(t, "assistant", msg.Role)
+	// Thinking should be mapped to the Thinking field, not dumped as JSON text
+	require.NotNil(t, msg.Thinking)
+	assert.Equal(t, "Let me analyze this with <code> & logic", *msg.Thinking)
+
+	// Should have text content part
+	contentParts, ok := msg.Content.([]relaymodel.MessageContent)
+	require.True(t, ok)
+	require.Len(t, contentParts, 1)
+	assert.Equal(t, "text", string(contentParts[0].Type))
+	assert.Equal(t, "Here is my answer", *contentParts[0].Text)
+}
+
+func TestConvertClaudeBlocks_RedactedThinkingHandled(t *testing.T) {
+	t.Parallel()
+
+	blocks := []any{
+		map[string]any{
+			"type":      "redacted_thinking",
+			"thinking":  "",
+			"signature": "sigRedacted==",
+		},
+		map[string]any{
+			"type": "text",
+			"text": "response",
+		},
+	}
+
+	messages := convertClaudeBlocks("assistant", blocks)
+	require.Len(t, messages, 1)
+
+	msg := messages[0]
+	// Redacted thinking with empty content should not set Thinking
+	assert.Nil(t, msg.Thinking)
+}
+
+func TestConvertClaudeBlocks_ThinkingWithToolUse(t *testing.T) {
+	t.Parallel()
+
+	blocks := []any{
+		map[string]any{
+			"type":      "thinking",
+			"thinking":  "I need to use a tool",
+			"signature": "sigTool==",
+		},
+		map[string]any{
+			"type": "text",
+			"text": "Let me check",
+		},
+		map[string]any{
+			"type":  "tool_use",
+			"id":    "toolu_456",
+			"name":  "search",
+			"input": map[string]any{"query": "test"},
+		},
+	}
+
+	messages := convertClaudeBlocks("assistant", blocks)
+	require.Len(t, messages, 1)
+
+	msg := messages[0]
+	require.NotNil(t, msg.Thinking)
+	assert.Equal(t, "I need to use a tool", *msg.Thinking)
+	require.Len(t, msg.ToolCalls, 1)
+	assert.Equal(t, "toolu_456", msg.ToolCalls[0].Id)
+	assert.Equal(t, "search", msg.ToolCalls[0].Function.Name)
 }

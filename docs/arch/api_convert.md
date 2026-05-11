@@ -23,7 +23,9 @@ Regardless of the entrypoint a caller chooses, the platform delivers the reply u
   - [4. Entry Point Details](#4-entry-point-details)
     - [4.1 Chat Completions (`/v1/chat/completions`)](#41-chat-completions-v1chatcompletions)
     - [4.2 Responses (`/v1/responses`)](#42-responses-v1responses)
+    - [4.2.1 OpenAI Upstream WebSocket Transport (Default)](#421-openai-upstream-websocket-transport-default)
     - [4.3 Claude Messages (`/v1/messages`)](#43-claude-messages-v1messages)
+    - [4.3.1 Anthropic Tool Search Support](#431-anthropic-tool-search-support)
   - [5. Capability Detection \& Sanitisation](#5-capability-detection--sanitisation)
   - [6. Streaming Behaviour](#6-streaming-behaviour)
   - [7. Error Handling \& Billing](#7-error-handling--billing)
@@ -139,6 +141,24 @@ The middleware (`middleware.APIFormatAutoDetect`) runs early in the request chai
 5. The adaptor call proceeds. If a fallback was used, the upstream Chat Completion response is transformed back into a Responses envelope via `ResponseAPIHandler` (non-streaming) or `ResponseAPIStreamHandler` (streaming). The helper registered under `ctxkey.ResponseRewriteHandler` performs the final rewrite before bytes are flushed to the client.
 6. `normalizeResponseAPIRawBody` also deletes `temperature`/`top_p` keys from the raw payload when the sanitized struct dropped them, ensuring double coverage for channels that reject those parameters outright.
 
+### 4.2.1 OpenAI Upstream WebSocket Transport (Default)
+
+For official OpenAI upstream channels, `/v1/responses` requests now default to the Responses WebSocket mode for lower continuation overhead:
+
+- The adaptor sends a `response.create` event to the upstream `wss://.../v1/responses` endpoint.
+- For `stream=true`, upstream WebSocket events are bridged into SSE lines so existing stream handlers and billing remain unchanged.
+- For `stream=false`, events are aggregated until completion and materialized into a standard JSON response body.
+
+Fallback and guardrails:
+
+- Requests with `background=true` continue to use HTTP (WebSocket transport is skipped by design).
+- Non-JSON request bodies or unsupported payload shapes fall back to HTTP.
+- Upstream WebSocket `error` events are converted into normal HTTP error responses for existing controller handling.
+
+Operational observability:
+
+- The OpenAI adaptor logs explicit transport decisions (`websocket` vs fallback `http`) and WebSocket lifecycle events, so operators can verify path selection from server logs during rollout.
+
 ### 4.3 Claude Messages (`/v1/messages`)
 
 1. `RelayClaudeMessagesHelper` inspects the requested model to determine the target channel.
@@ -146,6 +166,18 @@ The middleware (`middleware.APIFormatAutoDetect`) runs early in the request chai
 3. OpenAI-compatible, Gemini, and other providers convert the Claude payload into their preferred format via adaptor-specific `ConvertClaudeRequest` implementations. Most OpenAI compatibles share `openai_compatible.ConvertClaudeRequest`.
 4. During response handling, adaptors check `ctxkey.ClaudeMessagesConversion`. When present, they transform the upstream response (or SSE stream) back into Claude Messages events using utilities such as `openai_compatible.HandleClaudeMessagesResponse` and `ConvertOpenAIStreamToClaudeSSE`.
 5. The controller always returns Claude-flavoured JSON/SSE to the caller, regardless of the intermediate protocols.
+
+### 4.3.1 Anthropic Tool Search Support
+
+The Claude Messages path now supports Anthropic Tool Search in both northbound and southbound flows.
+
+- Northbound Claude requests recognize Tool Search built-ins and aliases:
+  - `tool_search_tool_regex`
+  - `tool_search_tool_bm25`
+  - versioned forms such as `tool_search_tool_regex_20251119` and `tool_search_tool_bm25_20251119`
+- During Claude -> OpenAI-compatible conversion, Tool Search built-ins are normalized to canonical `web_search` tool type so policy validation and billing remain consistent across providers.
+- Structured-output promotion is explicitly blocked when Claude messages already contain tool activity blocks, including `server_tool_use` and `tool_search_tool_result`.
+- Southbound native Anthropic passthrough sets `ctxkey.ClaudeToolSearchEnabled` whenever Tool Search tools are present; `SetupRequestHeader` then adds `advanced-tool-use-2025-11-20` to `anthropic-beta` while preserving caller-provided beta tokens and model-specific beta headers.
 
 ## 5. Capability Detection & Sanitisation
 
@@ -171,6 +203,7 @@ These safeguards execute before every upstream call, so the same rules apply to 
 2. All adaptor errors are wrapped with `openai.ErrorWrapper` (or the channel equivalent) so HTTP status codes and machine-readable error bodies survive conversions.
 3. Token accounting prioritises upstream usage. When upstream omits it, the system estimates totals from streamed text, tool call arguments, and prompt size.
 4. Billing post-processing funnels through `billing.PostConsumeQuotaDetailed`, which now receives the original Responses model name even after a fallback path.
+5. Pricing adaptor resolution is API-first: we resolve by `APIType` before `ChannelType` so pricing defaults follow the protocol family (OpenAI, Claude, Gemini, etc.). This avoids mismatches when a channel type is a generic proxy or does not map 1:1 to a pricing table.
 
 ## 8. Context Keys & Runtime Flags
 

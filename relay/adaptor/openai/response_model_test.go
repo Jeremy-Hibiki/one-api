@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func TestConvertChatCompletionToResponseAPI(t *testing.T) {
@@ -356,6 +356,44 @@ func TestConvertResponseAPIToChatCompletionRequest_ToolHistoryRoundTrip(t *testi
 	followup := chatReq.Messages[4]
 	require.Equal(t, "user", followup.Role)
 	require.Contains(t, followup.StringContent(), "tomorrow morning")
+}
+
+func TestConvertChatCompletionToResponseAPI_ToolOutputAlwaysIncludesOutputField(t *testing.T) {
+	chatRequest := &model.GeneralOpenAIRequest{
+		Model: "gpt-5-nano",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				ToolCalls: []model.Tool{
+					{
+						Id:   "call_missing_output",
+						Type: "function",
+						Function: &model.Function{
+							Name:      "demo_tool",
+							Arguments: `{}`,
+						},
+					},
+				},
+			},
+			{
+				Role:       "tool",
+				ToolCallId: "call_missing_output",
+				Content:    "",
+			},
+		},
+	}
+
+	responseReq := ConvertChatCompletionToResponseAPI(chatRequest)
+	require.NotNil(t, responseReq)
+	require.Len(t, responseReq.Input, 2)
+
+	outputItem, ok := responseReq.Input[1].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "function_call_output", outputItem["type"])
+
+	output, exists := outputItem["output"]
+	require.True(t, exists, "output field must always exist for function_call_output items")
+	require.Equal(t, "", output)
 }
 
 func TestConvertResponseAPIToChatCompletion_RequiredActionToolCalls(t *testing.T) {

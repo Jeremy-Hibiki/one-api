@@ -4,13 +4,79 @@ import (
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/deepseek"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai/qwen"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relayModel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/geminiOpenaiCompatible"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/deepseek"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai/qwen"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	relayModel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
+
+func TestGetDefaultModelPricingIncludesGeminiEmbeddingPreview(t *testing.T) {
+	t.Parallel()
+
+	a := &Adaptor{}
+	pricing := a.GetDefaultModelPricing()
+
+	cfg, ok := pricing["gemini-embedding-2-preview"]
+	require.True(t, ok, "gemini-embedding-2-preview missing from Vertex AI pricing map")
+	require.InDelta(t, 0.20*ratio.MilliTokensUsd, cfg.Ratio, 1e-12)
+	require.InDelta(t, 1.0, cfg.CompletionRatio, 1e-12)
+	require.Equal(t, geminiOpenaiCompatible.ModelRatios["gemini-embedding-2-preview"], cfg)
+}
+
+func TestGetModelListIncludesGeminiEmbeddingPreviewOnce(t *testing.T) {
+	t.Parallel()
+
+	a := &Adaptor{}
+	models := a.GetModelList()
+
+	count := 0
+	for _, model := range models {
+		if model == "gemini-embedding-2-preview" {
+			count++
+		}
+	}
+
+	require.Equal(t, 1, count, "expected gemini-embedding-2-preview exactly once in Vertex AI model list")
+}
+
+func TestGetDefaultModelPricingIncludesLatestVertexMaaSModels(t *testing.T) {
+	t.Parallel()
+
+	a := &Adaptor{}
+	pricing := a.GetDefaultModelPricing()
+
+	deepseekCfg, ok := pricing["deepseek-ai/deepseek-v3.2-maas"]
+	require.True(t, ok, "deepseek-ai/deepseek-v3.2-maas missing from Vertex AI pricing map")
+	require.Equal(t, deepseek.ModelRatios["deepseek-ai/deepseek-v3.2-maas"], deepseekCfg)
+
+	qwenCfg, ok := pricing["qwen/qwen3-next-80b-a3b-thinking-maas"]
+	require.True(t, ok, "qwen/qwen3-next-80b-a3b-thinking-maas missing from Vertex AI pricing map")
+	require.Equal(t, qwen.ModelRatios["qwen/qwen3-next-80b-a3b-thinking-maas"], qwenCfg)
+}
+
+// TestBuildGeminiURLUsesBatchEmbedContents verifies Vertex AI Gemini embeddings use the batch embedding endpoint.
+// Parameters: t coordinates the test case execution. Returns: no values.
+func TestBuildGeminiURLUsesBatchEmbedContents(t *testing.T) {
+	t.Parallel()
+
+	adaptor := &Adaptor{}
+	url, err := adaptor.buildGeminiURL(&meta.Meta{
+		ActualModelName: "gemini-embedding-2-preview",
+		Mode:            relaymode.Embeddings,
+		Config: model.ChannelConfig{
+			Region:            "us-central1",
+			VertexAIProjectID: "test-project",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-embedding-2-preview:batchEmbedContents", url)
+}
 
 func TestAdaptor_GetRequestURL(t *testing.T) {
 	Convey("GetRequestURL", t, func() {
@@ -41,6 +107,35 @@ func TestAdaptor_GetRequestURL(t *testing.T) {
 					url, err := adaptor.GetRequestURL(meta)
 					So(err, ShouldBeNil)
 					expectedURL := "https://" + tc.region + "-aiplatform.googleapis.com/v1/projects/test-project/locations/" + tc.region + "/publishers/google/models/" + tc.model + ":predict"
+					So(url, ShouldEqual, expectedURL)
+				})
+			}
+		})
+
+		Convey("veo models should use predictLongRunning endpoint", func() {
+			veoTests := []struct {
+				model  string
+				region string
+			}{
+				{"veo-3.1-generate-001", "us-central1"},
+				{"veo-3.1-fast-generate-preview", "europe-west4"},
+				{"veo-2.0-generate-preview", "asia-southeast1"},
+			}
+
+			for _, tc := range veoTests {
+				Convey(tc.model+" predictLongRunning", func() {
+					meta := &meta.Meta{
+						ActualModelName: tc.model,
+						IsStream:        false,
+						Config: model.ChannelConfig{
+							Region:            tc.region,
+							VertexAIProjectID: "test-project",
+						},
+					}
+
+					url, err := adaptor.GetRequestURL(meta)
+					So(err, ShouldBeNil)
+					expectedURL := "https://" + tc.region + "-aiplatform.googleapis.com/v1/projects/test-project/locations/" + tc.region + "/publishers/google/models/" + tc.model + ":predictLongRunning"
 					So(url, ShouldEqual, expectedURL)
 				})
 			}
@@ -442,6 +537,27 @@ func TestIsOpenAIModel(t *testing.T) {
 		for _, c := range cases {
 			Convey("model "+c.model, func() {
 				So(isOpenAIModel(c.model), ShouldEqual, c.expected)
+			})
+		}
+	})
+}
+
+func TestIsVeoModel(t *testing.T) {
+	Convey("isVeoModel", t, func() {
+		cases := []struct {
+			model    string
+			expected bool
+		}{
+			{"veo-3.1-generate-001", true},
+			{"veo-3.0-fast-generate-preview", true},
+			{"veo-2.0-generate-exp", true},
+			{"imagen-4.0-generate-001", false},
+			{"gemini-2.5-pro", false},
+			{"", false},
+		}
+		for _, c := range cases {
+			Convey("model "+c.model, func() {
+				So(isVeoModel(c.model), ShouldEqual, c.expected)
 			})
 		}
 	})

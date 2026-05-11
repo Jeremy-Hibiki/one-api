@@ -15,25 +15,24 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/metrics"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/common/structuredjson"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/billing"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/relaymode"
-	"github.com/songquanpeng/one-api/relay/streaming"
-	"github.com/songquanpeng/one-api/relay/tooling"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/metrics"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/common/structuredjson"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/apitype"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/relay/streaming"
+	"github.com/Laisky/one-api/relay/tooling"
 )
 
 func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
@@ -67,12 +66,14 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// get channel-specific pricing if available
 	var channelRecord *model.Channel
 	var channelModelRatio map[string]float64
+	var channelModelConfigs map[string]model.ModelConfigLocal
 	var channelCompletionRatio map[string]float64
 	if channelModel, ok := c.Get(ctxkey.ChannelModel); ok {
 		if channel, ok := channelModel.(*model.Channel); ok {
 			channelRecord = channel
 			// Get from unified ModelConfigs only (after migration)
 			channelModelRatio = channel.GetModelRatioFromConfigs()
+			channelModelConfigs = channel.GetModelPriceConfigs()
 			channelCompletionRatio = channel.GetCompletionRatioFromConfigs()
 		}
 	}
@@ -96,7 +97,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 
 	// get model ratio using three-layer pricing system
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	modelRatio := pricing.GetModelRatioWithThreeLayers(textRequest.Model, channelModelRatio, pricingAdaptor)
 	completionRatio := pricing.GetCompletionRatioWithThreeLayers(textRequest.Model, channelCompletionRatio, pricingAdaptor)
 	// groupRatio := billingratio.GetGroupRatio(meta.Group)
@@ -108,9 +109,17 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	}
 
 	// pre-consume quota
-	promptTokens := getPromptTokens(gmw.Ctx(c), textRequest, meta.Mode)
+	promptUsage, bizErr := estimatePromptUsage(c, meta, textRequest)
+	if bizErr != nil {
+		lg.Warn("estimatePromptUsage failed",
+			zap.Error(bizErr.RawError),
+			zap.Int("status_code", bizErr.StatusCode),
+			zap.String("err_msg", bizErr.Message))
+		return bizErr
+	}
+	promptTokens := promptUsage.PromptTokens
 	meta.PromptTokens = promptTokens
-	preConsumedQuota, bizErr := preConsumeQuota(c, textRequest, promptTokens, ratio, completionRatio, meta)
+	preConsumedQuota, bizErr := preConsumeQuota(c, textRequest, promptUsage, modelRatio, completionRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, meta)
 	if bizErr != nil {
 		lg.Warn("preConsumeQuota failed",
 			zap.Error(bizErr.RawError),
@@ -118,6 +127,11 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			zap.String("err_msg", bizErr.Message))
 		return bizErr
 	}
+	markPreConsumed(c, preConsumedQuota)
+	defer billingAuditSafetyNet(c)
+
+	provisionalLogId := recordProvisionalLog(c, meta, textRequest.Model, preConsumedQuota)
+	c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
 
 	var tracker *streaming.QuotaTracker
 	if textRequest.Stream {
@@ -128,8 +142,10 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			ModelName:              textRequest.Model,
 			PromptTokens:           promptTokens,
 			ModelRatio:             modelRatio,
+			ChannelModelRatio:      channelModelRatio,
 			GroupRatio:             groupRatio,
 			PreConsumedQuota:       preConsumedQuota,
+			ChannelModelConfigs:    channelModelConfigs,
 			ChannelCompletionRatio: channelCompletionRatio,
 			PricingAdaptor:         pricingAdaptor,
 			FlushInterval:          time.Duration(config.StreamingBillingIntervalSec) * time.Second,
@@ -142,7 +158,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	if registry != nil {
 		response, usage, mcpSummary, incrementalCharged, execErr := executeChatMCPToolLoop(c, meta, textRequest, registry, preConsumedQuota)
 		if execErr != nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "mcp_tool_loop_failed")
 			return execErr
 		}
 		applyOutputImageCharges(c, &usage, meta)
@@ -163,7 +179,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		c.JSON(http.StatusOK, response)
 
 		// refund pre-consumed quota immediately
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "pre_billing_reconcile_mcp")
 		if usage != nil {
 			userId := strconv.Itoa(meta.UserId)
 			username := c.GetString(ctxkey.Username)
@@ -198,7 +214,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 				0,
 			)
 
-			userBalance := float64(c.GetInt64(ctxkey.UserQuota))
+			userBalance := float64(getUserQuotaFromContext(c))
 			metrics.GlobalRecorder.RecordUserMetrics(
 				userId,
 				username,
@@ -214,6 +230,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 
 		quotaId := c.GetInt(ctxkey.Id)
 		requestId := c.GetString(ctxkey.RequestId)
+		markBillingReconciled(c)
 		graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(ctx context.Context) {
 			baseBillingTimeout := time.Duration(config.BillingTimeoutSec) * time.Second
 			billingTimeout := baseBillingTimeout
@@ -225,7 +242,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			var quota int64
 
 			go func() {
-				quota = postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, groupRatio, systemPromptReset, channelCompletionRatio)
+				quota = postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, channelModelRatio, groupRatio, systemPromptReset, channelModelConfigs, channelCompletionRatio)
 				if requestId != "" {
 					if err := model.UpdateUserRequestCostQuotaByRequestID(quotaId, requestId, quota); err != nil {
 						lg.Error("update user request cost failed", zap.Error(err), zap.String("request_id", requestId))
@@ -237,7 +254,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			select {
 			case <-done:
 			case <-ctx.Done():
-				if ctx.Err() == context.DeadlineExceeded && usage != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) && usage != nil {
 					estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
 					elapsedTime := time.Since(meta.StartTime)
 					lg.Error("CRITICAL BILLING TIMEOUT",
@@ -263,17 +280,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// get request body
 	requestBody, err := getRequestBody(c, meta, textRequest, requestAdaptor, systemPromptReset)
 	if err != nil {
-		// Check if this is a validation error and preserve the correct HTTP status code
-		//
-		// This is for AWS, which must be different from other providers that are
-		// based on proprietary systems such as OpenAI, etc.
-		switch {
-		case strings.Contains(err.Error(), "validation failed"),
-			strings.Contains(err.Error(), "does not support embedding"):
-			return openai.ErrorWrapper(err, "invalid_request_error", http.StatusBadRequest)
-		default:
-			return openai.ErrorWrapper(err, "convert_request_failed", http.StatusInternalServerError)
-		}
+		return wrapConvertRequestError(err)
 	}
 
 	// for debug
@@ -293,7 +300,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	{
 		quotaId := c.GetInt(ctxkey.Id)
 		requestId := c.GetString(ctxkey.RequestId)
-		estimated := getPreConsumedQuota(textRequest, promptTokens, ratio, completionRatio)
+		estimated := estimatePreConsumedQuota(textRequest, promptUsage, modelRatio, completionRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, meta)
 		if requestId == "" {
 			lg.Warn("request id missing when recording provisional user request cost",
 				zap.Int("user_id", quotaId))
@@ -304,7 +311,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	if isErrorHappened(meta, resp) {
 		// refund pre-consumed quota under lifecycle management so shutdown waits for it
 		graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-			billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, meta.TokenId, "upstream_http_error")
 		})
 		// Reconcile provisional record to 0 since upstream returned error
 		quotaId := c.GetInt(ctxkey.Id)
@@ -328,7 +335,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		// proceed to billing to ensure forwarded requests are charged; do not refund pre-consumed quota.
 		// Otherwise, refund pre-consumed quota and return error.
 		if usage == nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "do_response_failed_without_usage")
 			return respErr
 		}
 		// Fall through to billing with available usage
@@ -340,10 +347,10 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		usage, incrementalCharged, trackerErr = tracker.Finalize(usage)
 		if trackerErr != nil {
 			if errors.Is(trackerErr, streaming.ErrQuotaExceeded) {
-				billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+				_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "streaming_quota_exceeded")
 				return openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 			}
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "streaming_billing_finalize_failed")
 			return openai.ErrorWrapper(trackerErr, "streaming_billing_failed", http.StatusInternalServerError)
 		}
 	}
@@ -356,7 +363,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// post-consume quota
 	quotaId := c.GetInt(ctxkey.Id)
 	// refund pre-consumed quota immediately
-	billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+	_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "pre_billing_reconcile")
 	if usage != nil {
 		// Get user information for metrics
 		userId := strconv.Itoa(meta.UserId)
@@ -394,7 +401,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		)
 
 		// Record user metrics
-		userBalance := float64(c.GetInt64(ctxkey.UserQuota))
+		userBalance := float64(getUserQuotaFromContext(c))
 		metrics.GlobalRecorder.RecordUserMetrics(
 			userId,
 			username,
@@ -409,6 +416,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		metrics.GlobalRecorder.RecordModelUsage(meta.ActualModelName, channeltype.IdToName(meta.ChannelType), time.Since(meta.StartTime))
 	}
 
+	markBillingReconciled(c)
 	graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(ctx context.Context) {
 		// Use configurable billing timeout with model-specific adjustments
 		baseBillingTimeout := time.Duration(config.BillingTimeoutSec) * time.Second
@@ -423,7 +431,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 
 		requestId := c.GetString(ctxkey.RequestId)
 		go func() {
-			quota = postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, groupRatio, systemPromptReset, channelCompletionRatio)
+			quota = postConsumeQuota(ctx, usage, meta, textRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, channelModelRatio, groupRatio, systemPromptReset, channelModelConfigs, channelCompletionRatio)
 
 			// Reconcile request cost with final quota (override provisional pre-consumed value)
 			if requestId == "" {
@@ -439,7 +447,7 @@ func RelayTextHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		case <-done:
 			// Billing completed successfully
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
 				elapsedTime := time.Since(meta.StartTime)
 
@@ -473,7 +481,28 @@ func getRequestBody(c *gin.Context, meta *metalib.Meta, textRequest *relaymodel.
 		meta.ChannelType != channeltype.Baichuan &&
 		meta.ForcedSystemPrompt == "" {
 		c.Set(ctxkey.ConvertedRequest, textRequest)
-		return bytes.NewBuffer(originalBody), nil
+		if (c.Request == nil || c.Request.URL == nil || !c.Request.URL.Query().Has("thinking")) && !bytes.Contains(originalBody, []byte(`"extra_body"`)) {
+			return bytes.NewBuffer(originalBody), nil
+		}
+		jsonData, err := json.Marshal(textRequest)
+		if err != nil {
+			return nil, errors.Wrap(err, "marshal chat request for passthrough normalization")
+		}
+		merged, stats, changed, mergeErr := mergeControlledPassthroughJSON(originalBody, jsonData, true)
+		if mergeErr != nil {
+			return nil, errors.Wrap(mergeErr, "normalize passthrough request fields")
+		}
+		if config.DebugEnabled && changed && hasPassthroughDiagnostics(stats) {
+			lg := gmw.GetLogger(c)
+			lg.Debug("normalized chat passthrough request payload",
+				zap.Int("unknown_preserved", stats.UnknownPreserved),
+				zap.Int("allowed_root_preserved", stats.AllowedRootPreserved),
+				zap.Int("extra_body_merged", stats.ExtraBodyMerged),
+				zap.Int("extra_body_skipped", stats.ExtraBodySkipped),
+				zap.Int("extra_body_rejected", stats.ExtraBodyRejected),
+			)
+		}
+		return bytes.NewBuffer(merged), nil
 	}
 
 	convertedRequest, err := adaptor.ConvertRequest(c, meta.Mode, textRequest)
@@ -490,13 +519,21 @@ func getRequestBody(c *gin.Context, meta *metalib.Meta, textRequest *relaymodel.
 	// When upstream expects the native OpenAI chat payload and we didn't rewrite the
 	// system prompt, merge unknown user fields (e.g. encrypted extensions) back into
 	// the converted JSON so we can preserve pass-through semantics.
-	if _, isChatPayload := convertedRequest.(*relaymodel.GeneralOpenAIRequest); isChatPayload &&
-		meta.APIType == apitype.OpenAI &&
-		meta.ChannelType == channeltype.OpenAI &&
-		!config.EnforceIncludeUsage &&
-		!systemPromptReset {
-		if merged, mergeErr := mergeJSONPreservingUnknown(originalBody, jsonData); mergeErr == nil {
+	if _, isChatPayload := convertedRequest.(*relaymodel.GeneralOpenAIRequest); isChatPayload && meta.APIType == apitype.OpenAI {
+		allowUnknown := meta.ChannelType == channeltype.OpenAI && !config.EnforceIncludeUsage && !systemPromptReset
+		if merged, stats, changed, mergeErr := mergeControlledPassthroughJSON(originalBody, jsonData, allowUnknown); mergeErr == nil {
 			jsonData = merged
+			if config.DebugEnabled && changed && hasPassthroughDiagnostics(stats) {
+				lg := gmw.GetLogger(c)
+				lg.Debug("merged chat request passthrough fields",
+					zap.Bool("allow_unknown", allowUnknown),
+					zap.Int("unknown_preserved", stats.UnknownPreserved),
+					zap.Int("allowed_root_preserved", stats.AllowedRootPreserved),
+					zap.Int("extra_body_merged", stats.ExtraBodyMerged),
+					zap.Int("extra_body_skipped", stats.ExtraBodySkipped),
+					zap.Int("extra_body_rejected", stats.ExtraBodyRejected),
+				)
+			}
 		} else {
 			return nil, errors.Wrap(mergeErr, "merge original request fields")
 		}
@@ -530,32 +567,4 @@ func requiresJSONSchemaDowngrade(meta *metalib.Meta, request *relaymodel.General
 	}
 
 	return false
-}
-
-func mergeJSONPreservingUnknown(original, updated []byte) ([]byte, error) {
-	if len(original) == 0 {
-		return updated, nil
-	}
-
-	var originalMap map[string]json.RawMessage
-	if err := json.Unmarshal(original, &originalMap); err != nil {
-		return nil, err
-	}
-
-	var updatedMap map[string]json.RawMessage
-	if err := json.Unmarshal(updated, &updatedMap); err != nil {
-		return nil, err
-	}
-
-	for key, value := range originalMap {
-		if _, exists := updatedMap[key]; !exists {
-			updatedMap[key] = value
-		}
-	}
-
-	merged, err := json.Marshal(updatedMap)
-	if err != nil {
-		return nil, err
-	}
-	return merged, nil
 }

@@ -1,9 +1,10 @@
 package zhipu
 
 import (
+	"encoding/json"
 	"time"
 
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 type Message struct {
@@ -68,4 +69,27 @@ type ImageRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
 	UserId string `json:"user_id,omitempty"`
+}
+
+type OCRRequest struct {
+	Model                   string `json:"model"`
+	File                    string `json:"file"`
+	RequestID               string `json:"request_id,omitempty"`
+	UserID                  string `json:"user_id,omitempty"`
+	ReturnCropImages        *bool  `json:"return_crop_images,omitempty"`
+	NeedLayoutVisualization *bool  `json:"need_layout_visualization,omitempty"`
+	StartPageID             *int   `json:"start_page_id,omitempty"`
+	EndPageID               *int   `json:"end_page_id,omitempty"`
+}
+
+type OCRResponse struct {
+	ID                  string          `json:"id"`
+	Created             int64           `json:"created"`
+	Model               string          `json:"model"`
+	MdResults           string          `json:"md_results"`
+	LayoutDetails       json.RawMessage `json:"layout_details,omitempty"`
+	LayoutVisualization json.RawMessage `json:"layout_visualization,omitempty"`
+	DataInfo            json.RawMessage `json:"data_info,omitempty"`
+	RequestID           string          `json:"request_id"`
+	Usage               model.Usage     `json:"usage"`
 }

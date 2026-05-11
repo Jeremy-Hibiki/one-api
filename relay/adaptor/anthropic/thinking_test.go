@@ -11,9 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func setupTestContext() *gin.Context {
@@ -46,7 +46,8 @@ func TestConvertRequest_DefaultMaxTokensWithThinking(t *testing.T) {
 	require.NotNil(t, claudeRequest.Thinking, "Expected thinking to be enabled when query parameter is present")
 
 	expectedBudget := int(math.Min(1024, float64(config.DefaultMaxToken/2)))
-	require.Equal(t, expectedBudget, claudeRequest.Thinking.BudgetTokens, "Expected budget tokens to match")
+	require.NotNil(t, claudeRequest.Thinking.BudgetTokens, "Expected budget tokens to be set")
+	require.Equal(t, expectedBudget, *claudeRequest.Thinking.BudgetTokens, "Expected budget tokens to match")
 }
 
 func TestStreamResponseClaude2OpenAI_ThinkingDelta(t *testing.T) {
@@ -685,7 +686,7 @@ func TestSignatureFallbackDisablesThinking(t *testing.T) {
 		MaxTokens: 2048,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 512,
+			BudgetTokens: model.IntPtr(512),
 		},
 		Messages: []model.Message{
 			{Role: "user", Content: "What is the solution?"},
@@ -740,7 +741,7 @@ func TestSignatureFallbackKeepsThinkingWhenSignatureRestored(t *testing.T) {
 		MaxTokens: 2048,
 		Thinking: &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: 512,
+			BudgetTokens: model.IntPtr(512),
 		},
 		Messages: []model.Message{
 			{Role: "user", Content: "What is the solution?"},
@@ -758,7 +759,7 @@ func TestSignatureFallbackKeepsThinkingWhenSignatureRestored(t *testing.T) {
 	// Check that thinking parameter is preserved when signature is restored
 	require.NotNil(t, claudeRequest.Thinking, "Expected thinking parameter to be preserved when signature is restored")
 	require.Equal(t, "enabled", claudeRequest.Thinking.Type, "Expected thinking type 'enabled'")
-	require.Equal(t, 512, claudeRequest.Thinking.BudgetTokens, "Expected thinking budget tokens 512")
+	require.Equal(t, 512, *claudeRequest.Thinking.BudgetTokens, "Expected thinking budget tokens 512")
 
 	// Check that the assistant message uses proper thinking block
 	assistantMessage := claudeRequest.Messages[1]

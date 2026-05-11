@@ -5,13 +5,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay/adaptor/ali"
-	"github.com/songquanpeng/one-api/relay/adaptor/gemini"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/vertexai"
-	"github.com/songquanpeng/one-api/relay/adaptor/xai"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/adaptor/ali"
+	"github.com/Laisky/one-api/relay/adaptor/gemini"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/adaptor/vertexai"
+	"github.com/Laisky/one-api/relay/adaptor/xai"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
 )
 
 // Sanity check: usd_per_image * QuotaPerUsd with $0.04 -> 0.04 * 500000 = 20000
@@ -61,6 +61,10 @@ func TestImageTierTablesParity(t *testing.T) {
 		{"gpt-image-1.5", "1024x1024", "high", 133.0 / 9.0},
 		{"gpt-image-1.5-2025-12-16", "1024x1536", "high", 200.0 / 9.0},
 		{"gpt-image-1.5-2025-12-16", "1024x1024", "medium", 34.0 / 9.0},
+		{"gpt-image-2", "1024x1024", "low", 1},
+		{"gpt-image-2", "1024x1024", "auto", 211.0 / 6.0},
+		{"gpt-image-2", "1024x1536", "medium", 41.0 / 6.0},
+		{"gpt-image-2-2026-04-21", "1536x1024", "high", 165.0 / 6.0},
 	}
 
 	for _, tc := range cases {

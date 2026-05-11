@@ -13,18 +13,17 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/metrics"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/tooling"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/metrics"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/tooling"
 )
 
 // RelayResponseAPIHelper handles Response API requests with direct pass-through
@@ -32,6 +31,11 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	lg := gmw.GetLogger(c)
 	ctx := gmw.Ctx(c)
 	meta := metalib.GetByContext(c)
+	if handled, wsErr := maybeHandleResponseAPIWebSocket(c, meta); wsErr != nil {
+		return wsErr
+	} else if handled {
+		return nil
+	}
 	if err := logClientRequestPayload(c, "response_api"); err != nil {
 		return openai.ErrorWrapper(err, "invalid_response_api_request", http.StatusBadRequest)
 	}
@@ -115,9 +119,10 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 
 	// get channel model ratio
 	channelModelRatio, channelCompletionRatio := getChannelRatios(c)
+	channelModelConfigs := getChannelModelConfigs(c)
 
 	// get model ratio using three-layer pricing system
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	modelRatio := pricing.GetModelRatioWithThreeLayers(responseAPIRequest.Model, channelModelRatio, pricingAdaptor)
 	completionRatio := pricing.GetCompletionRatioWithThreeLayers(responseAPIRequest.Model, channelCompletionRatio, pricingAdaptor)
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
@@ -137,6 +142,13 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 			zap.Int("status_code", bizErr.StatusCode))
 		return bizErr
 	}
+	markPreConsumed(c, preConsumedQuota)
+	defer billingAuditSafetyNet(c)
+
+	// Record provisional consume log immediately so that every pre-consume has an
+	// audit trail, even if post-billing never runs (e.g., handler blocks, panics).
+	provisionalLogId := recordProvisionalLog(c, meta, responseAPIRequest.Model, preConsumedQuota)
+	c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
 
 	requestAdaptor.Init(meta)
 
@@ -164,7 +176,10 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// do request
 	resp, err := requestAdaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
-		// ErrorWrapper will log the error, so we don't need to log it here
+		// Refund pre-consumed quota since the upstream request failed before any tokens were consumed
+		graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
+			_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "do_request_failed")
+		})
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	upstreamCapture := wrapUpstreamResponse(resp)
@@ -193,7 +208,7 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// Check for HTTP errors
 	if resp.StatusCode != http.StatusOK {
 		graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-			billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+			_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "upstream_http_error")
 		})
 		// Reconcile provisional record to 0 since upstream returned error
 		quotaId := c.GetInt(ctxkey.Id)
@@ -207,6 +222,14 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// do response
 	c.Set(ctxkey.SkipAdaptorResponseBodyLog, true)
 	usage, respErr := requestAdaptor.DoResponse(c, resp, meta)
+	lg.Debug("response api DoResponse returned",
+		zap.Bool("has_usage", usage != nil),
+		zap.Bool("has_error", respErr != nil),
+		zap.Any("error_detail", respErr),
+		zap.Int("user_id", meta.UserId),
+		zap.String("model", meta.ActualModelName),
+		zap.String("request_id", c.GetString(ctxkey.RequestId)),
+	)
 	if upstreamCapture != nil {
 		logUpstreamResponseFromCapture(lg, resp, upstreamCapture, "response_api")
 	} else {
@@ -217,11 +240,22 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		// proceed to billing to ensure forwarded requests are charged; do not refund pre-consumed quota.
 		// Otherwise, refund pre-consumed quota and return error.
 		if usage == nil {
+			lg.Warn("response api DoResponse failed without usage, refunding pre-consumed quota",
+				zap.Int64("pre_consumed_quota", preConsumedQuota),
+				zap.Int("user_id", meta.UserId),
+				zap.String("request_id", c.GetString(ctxkey.RequestId)),
+			)
 			graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-				billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, c.GetInt(ctxkey.TokenId))
+				_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, c.GetInt(ctxkey.TokenId), "do_response_failed_without_usage")
 			})
 			return respErr
 		}
+		lg.Debug("response api DoResponse failed but usage available, proceeding to billing",
+			zap.Int("prompt_tokens", usage.PromptTokens),
+			zap.Int("completion_tokens", usage.CompletionTokens),
+			zap.Int("user_id", meta.UserId),
+			zap.String("request_id", c.GetString(ctxkey.RequestId)),
+		)
 		// Fall through to billing with available usage
 	}
 
@@ -233,6 +267,10 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 	// post-consume quota
 	quotaId := c.GetInt(ctxkey.Id)
 	requestId := c.GetString(ctxkey.RequestId)
+
+	// Mark billing as reconciled since we are guaranteed to run post-billing.
+	// This prevents the deferred billingAuditSafetyNet from firing a false alarm.
+	markBillingReconciled(c)
 
 	graceful.GoCritical(gmw.BackgroundCtx(c), "postBilling", func(ctx context.Context) {
 		// Use configurable billing timeout with model-specific adjustments
@@ -249,7 +287,7 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		go func() {
 			// Attach IDs into context using a lightweight wrapper struct in meta if needed; for now,
 			// we keep postConsumeResponseAPIQuota signature and rely on it to read IDs from outer scope.
-			quota = postConsumeResponseAPIQuota(ctx, usage, meta, responseAPIRequest, preConsumedQuota, modelRatio, groupRatio, channelCompletionRatio)
+			quota = postConsumeResponseAPIQuota(ctx, usage, meta, responseAPIRequest, preConsumedQuota, modelRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio)
 
 			// Reconcile request cost with final quota (override provisional pre-consumed value)
 			if requestId == "" {
@@ -265,7 +303,7 @@ func RelayResponseAPIHelper(c *gin.Context) *relaymodel.ErrorWithStatusCode {
 		case <-done:
 			// Billing completed successfully
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
 				elapsedTime := time.Since(meta.StartTime)
 

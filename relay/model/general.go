@@ -51,9 +51,12 @@ type GeneralOpenAIRequest struct {
 	// https://platform.openai.com/docs/api-reference/chat/create
 	Messages []Message `json:"messages,omitempty"`
 	Model    string    `json:"model,omitempty"`
-	Arn      string    `json:"arn,omitempty"` // for aws arn
-	Store    *bool     `json:"store,omitempty"`
-	Metadata any       `json:"metadata,omitempty"`
+	// ExtraBody stores allowlisted provider-specific parameters that should be
+	// merged into the upstream root payload without overriding explicit fields.
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
+	Arn       string         `json:"arn,omitempty"` // for aws arn
+	Store     *bool          `json:"store,omitempty"`
+	Metadata  any            `json:"metadata,omitempty"`
 	// FrequencyPenalty is a number between -2.0 and 2.0 that penalizes
 	// new tokens based on their existing frequency in the text so far,
 	// default is 0.
@@ -209,7 +212,12 @@ type UserLocationApproximate struct {
 // https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#implementing-extended-thinking
 type Thinking struct {
 	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens" binding:"omitempty,min=1024"`
+	BudgetTokens *int   `json:"budget_tokens,omitempty" binding:"omitempty,min=1024"`
+}
+
+// IntPtr is a helper to create a pointer to an int value.
+func IntPtr(v int) *int {
+	return &v
 }
 
 func (r GeneralOpenAIRequest) ParseInput() []string {
@@ -250,7 +258,10 @@ type OpenaiImageEditRequest struct {
 // ClaudeRequest represents a Claude Messages API request
 // This is a flexible structure that can handle both simple and complex content
 type ClaudeRequest struct {
-	Model         string          `json:"model" binding:"required"`
+	Model string `json:"model" binding:"required"`
+	// ExtraBody stores allowlisted provider-specific parameters that should be
+	// merged into the upstream root payload after Claude-to-OpenAI conversion.
+	ExtraBody     map[string]any  `json:"extra_body,omitempty"`
 	MaxTokens     int             `json:"max_tokens" binding:"required"`
 	Messages      []ClaudeMessage `json:"messages" binding:"required"`
 	System        any             `json:"system,omitempty"`
@@ -273,10 +284,11 @@ type ClaudeMessage struct {
 
 // ClaudeTool represents a tool definition in the Claude Messages API
 type ClaudeTool struct {
-	Type        string `json:"type,omitempty"`
-	Name        string `json:"name" binding:"required"`
-	Description string `json:"description,omitempty"`
-	InputSchema any    `json:"input_schema,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Name         string `json:"name" binding:"required"`
+	Description  string `json:"description,omitempty"`
+	InputSchema  any    `json:"input_schema,omitempty"`
+	DeferLoading *bool  `json:"defer_loading,omitempty"`
 }
 
 // Claude Messages API Response Types
@@ -301,6 +313,15 @@ type ClaudeContent struct {
 }
 
 type ClaudeUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int                  `json:"input_tokens"`
+	OutputTokens             int                  `json:"output_tokens"`
+	CacheReadInputTokens     int                  `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                  `json:"cache_creation_input_tokens,omitempty"`
+	CacheCreation            *ClaudeCacheCreation `json:"cache_creation,omitempty"`
+}
+
+// ClaudeCacheCreation stores Claude cache creation token buckets for different TTL windows.
+type ClaudeCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }

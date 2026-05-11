@@ -13,22 +13,21 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/graceful"
-	"github.com/songquanpeng/one-api/common/metrics"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/apitype"
-	"github.com/songquanpeng/one-api/relay/billing"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/relaymode"
-	"github.com/songquanpeng/one-api/relay/tooling"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/graceful"
+	"github.com/Laisky/one-api/common/metrics"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/adaptor/openai_compatible"
+	"github.com/Laisky/one-api/relay/apitype"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/relay/tooling"
 )
 
 // relayResponseAPIThroughChat routes Response API requests through the Chat Completion fallback
@@ -142,15 +141,24 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 	}
 
 	channelModelRatio, channelCompletionRatio := getChannelRatios(c)
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	channelModelConfigs := getChannelModelConfigs(c)
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	modelRatio := pricing.GetModelRatioWithThreeLayers(chatRequest.Model, channelModelRatio, pricingAdaptor)
 	completionRatio := pricing.GetCompletionRatioWithThreeLayers(chatRequest.Model, channelCompletionRatio, pricingAdaptor)
 	groupRatio := c.GetFloat64(ctxkey.ChannelRatio)
 	ratio := modelRatio * groupRatio
 
-	promptTokens := getPromptTokens(gmw.Ctx(c), chatRequest, meta.Mode)
+	promptUsage, bizErr := estimatePromptUsage(c, meta, chatRequest)
+	if bizErr != nil {
+		lg.Warn("estimatePromptUsage failed",
+			zap.Error(bizErr.RawError),
+			zap.String("err_msg", bizErr.Message),
+			zap.Int("status_code", bizErr.StatusCode))
+		return bizErr
+	}
+	promptTokens := promptUsage.PromptTokens
 	meta.PromptTokens = promptTokens
-	preConsumedQuota, bizErr := preConsumeQuota(c, chatRequest, promptTokens, ratio, completionRatio, meta)
+	preConsumedQuota, bizErr := preConsumeQuota(c, chatRequest, promptUsage, modelRatio, completionRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, meta)
 	if bizErr != nil {
 		lg.Warn("preConsumeQuota failed",
 			zap.Error(bizErr.RawError),
@@ -165,7 +173,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 		c.Set(ctxkey.ResponseStreamRewriteHandler, nil)
 		response, usage, mcpSummary, incrementalCharged, execErr := executeChatMCPToolLoop(c, meta, chatRequest, registry, preConsumedQuota)
 		if execErr != nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "mcp_tool_loop_failed")
 			return execErr
 		}
 		applyOutputImageCharges(c, &usage, meta)
@@ -199,12 +207,12 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 			}()
 		}
 		if err := renderChatResponseAsResponseAPI(c, http.StatusOK, &openai_compatible.SlimTextResponse{Choices: choices, Usage: response.Usage}, responseAPIRequest, meta); err != nil {
-			billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "response_rewrite_failed_mcp")
 			return openai.ErrorWrapper(err, "response_rewrite_failed", http.StatusInternalServerError)
 		}
 
 		// refund pre-consumed quota immediately before final billing reconciliation
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "pre_billing_reconcile_mcp")
 
 		if usage != nil {
 			userId := strconv.Itoa(meta.UserId)
@@ -240,7 +248,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 				0,
 			)
 
-			userBalance := float64(c.GetInt64(ctxkey.UserQuota))
+			userBalance := float64(getUserQuotaFromContext(c))
 			metrics.GlobalRecorder.RecordUserMetrics(
 				userId,
 				username,
@@ -267,7 +275,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 			var quota int64
 
 			go func() {
-				quota = postConsumeQuota(ctx, usage, meta, chatRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, groupRatio, false, channelCompletionRatio)
+				quota = postConsumeQuota(ctx, usage, meta, chatRequest, ratio, preConsumedQuota, incrementalCharged, modelRatio, channelModelRatio, groupRatio, false, channelModelConfigs, channelCompletionRatio)
 				if requestId != "" {
 					if err := model.UpdateUserRequestCostQuotaByRequestID(quotaId, requestId, quota); err != nil {
 						lg.Error("update user request cost failed", zap.Error(err), zap.String("request_id", requestId))
@@ -279,7 +287,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 			select {
 			case <-done:
 			case <-ctx.Done():
-				if ctx.Err() == context.DeadlineExceeded && usage != nil {
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) && usage != nil {
 					estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
 					elapsedTime := time.Since(meta.StartTime)
 					lg.Error("CRITICAL BILLING TIMEOUT",
@@ -297,21 +305,21 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 
 	convertedRequest, err := requestAdaptor.ConvertRequest(c, relaymode.ChatCompletions, chatRequest)
 	if err != nil {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
-		return openai.ErrorWrapper(err, "convert_request_failed", http.StatusInternalServerError)
+		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "convert_request_failed")
+		return wrapConvertRequestError(err)
 	}
 	c.Set(ctxkey.ConvertedRequest, convertedRequest)
 
 	jsonData, err := json.Marshal(convertedRequest)
 	if err != nil {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "marshal_converted_request_failed")
 		return openai.ErrorWrapper(err, "marshal_converted_request_failed", http.StatusInternalServerError)
 	}
 	requestBody := bytes.NewBuffer(jsonData)
 
 	resp, err := requestAdaptor.DoRequest(c, meta, requestBody)
 	if err != nil {
-		billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+		_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "do_request_failed")
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	upstreamCapture := wrapUpstreamResponse(resp)
@@ -319,7 +327,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 	// Record provisional quota usage for reconciliation
 	if requestId := c.GetString(ctxkey.RequestId); requestId != "" {
 		quotaId := c.GetInt(ctxkey.Id)
-		estimated := getPreConsumedQuota(chatRequest, promptTokens, ratio, completionRatio)
+		estimated := estimatePreConsumedQuota(chatRequest, promptUsage, modelRatio, completionRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, meta)
 		if err := model.UpdateUserRequestCostQuotaByRequestID(quotaId, requestId, estimated); err != nil {
 			lg.Warn("record provisional user request cost failed", zap.Error(err), zap.String("request_id", requestId))
 		}
@@ -327,7 +335,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 
 	if isErrorHappened(meta, resp) {
 		graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-			billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, meta.TokenId)
+			_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, meta.TokenId, "upstream_http_error")
 		})
 		return RelayErrorHandlerWithContext(c, resp)
 	}
@@ -341,7 +349,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 	if respErr != nil {
 		if usage == nil {
 			graceful.GoCritical(ctx, "returnPreConsumedQuota", func(cctx context.Context) {
-				billing.ReturnPreConsumedQuota(cctx, preConsumedQuota, meta.TokenId)
+				_ = returnPreConsumedQuotaConservative(cctx, c, preConsumedQuota, meta.TokenId, "do_response_failed_without_usage")
 			})
 			return respErr
 		}
@@ -361,7 +369,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 				var slim openai_compatible.SlimTextResponse
 				if err := json.Unmarshal(body, &slim); err == nil && len(slim.Choices) > 0 {
 					if err := renderChatResponseAsResponseAPI(c, statusCode, &slim, responseAPIRequest, meta); err != nil {
-						billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+						_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "response_rewrite_failed")
 						return openai.ErrorWrapper(err, "response_rewrite_failed", http.StatusInternalServerError)
 					}
 				} else {
@@ -370,7 +378,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 					}
 					if len(body) > 0 {
 						if _, err := c.Writer.Write(body); err != nil {
-							billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+							_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "write_response_failed")
 							return openai.ErrorWrapper(err, "write_response_body_failed", http.StatusInternalServerError)
 						}
 					}
@@ -386,7 +394,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 	}
 
 	// Refund pre-consumed quota immediately before final billing reconciliation
-	billing.ReturnPreConsumedQuota(ctx, preConsumedQuota, meta.TokenId)
+	_ = returnPreConsumedQuotaConservative(ctx, c, preConsumedQuota, meta.TokenId, "pre_billing_reconcile")
 
 	if usage != nil {
 		userId := strconv.Itoa(meta.UserId)
@@ -422,7 +430,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 			0,
 		)
 
-		userBalance := float64(c.GetInt64(ctxkey.UserQuota))
+		userBalance := float64(getUserQuotaFromContext(c))
 		metrics.GlobalRecorder.RecordUserMetrics(
 			userId,
 			username,
@@ -450,7 +458,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 		var quota int64
 
 		go func() {
-			quota = postConsumeQuota(ctx, usage, meta, chatRequest, ratio, preConsumedQuota, 0, modelRatio, groupRatio, false, channelCompletionRatio)
+			quota = postConsumeQuota(ctx, usage, meta, chatRequest, ratio, preConsumedQuota, 0, modelRatio, channelModelRatio, groupRatio, false, channelModelConfigs, channelCompletionRatio)
 			if requestId != "" {
 				if err := model.UpdateUserRequestCostQuotaByRequestID(quotaId, requestId, quota); err != nil {
 					lg.Error("update user request cost failed", zap.Error(err), zap.String("request_id", requestId))
@@ -462,7 +470,7 @@ func relayResponseAPIThroughChat(c *gin.Context, meta *metalib.Meta, responseAPI
 		select {
 		case <-done:
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded && usage != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && usage != nil {
 				estimatedQuota := float64(usage.PromptTokens+usage.CompletionTokens) * ratio
 				elapsedTime := time.Since(meta.StartTime)
 				lg.Error("CRITICAL BILLING TIMEOUT",

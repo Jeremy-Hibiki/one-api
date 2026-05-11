@@ -11,13 +11,13 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // getChannelRatios gets channel model and completion ratios from unified ModelConfigs
@@ -29,6 +29,11 @@ func getChannelRatios(c *gin.Context) (map[string]float64, map[string]float64) {
 	completionRatios := channel.GetCompletionRatioFromConfigs()
 
 	return modelRatios, completionRatios
+}
+
+func getChannelModelConfigs(c *gin.Context) map[string]model.ModelConfigLocal {
+	channel := c.MustGet(ctxkey.ChannelModel).(*model.Channel)
+	return channel.GetModelPriceConfigs()
 }
 
 // getAndValidateResponseAPIRequest gets and validates Response API request

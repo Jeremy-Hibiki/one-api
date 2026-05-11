@@ -1,51 +1,29 @@
-import { LogDetailsModal } from "@/components/LogDetailsModal";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { EnhancedDataTable } from "@/components/ui/enhanced-data-table";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  SearchableDropdown,
-  type SearchOption,
-} from "@/components/ui/searchable-dropdown";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { TimestampDisplay } from "@/components/ui/timestamp";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { STORAGE_KEYS, usePageSize } from "@/hooks/usePersistentState";
-import { api } from "@/lib/api";
-import { LOG_TYPES, LOG_TYPE_OPTIONS } from "@/lib/constants/logs";
-import { useAuthStore } from "@/lib/stores/auth";
-import {
-  cn,
-  formatTimestamp,
-  fromDateTimeLocal,
-  renderQuota,
-  toDateTimeLocal,
-} from "@/lib/utils";
-import type { LogEntry, LogMetadata } from "@/types/log";
-import type { ColumnDef } from "@tanstack/react-table";
-import { Copy, Eye, EyeOff, FileDown, Filter, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { useSearchParams } from "react-router-dom";
+import { LogDetailsModal } from '@/components/LogDetailsModal';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { EnhancedDataTable } from '@/components/ui/enhanced-data-table';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { ResponsivePageContainer } from '@/components/ui/responsive-container';
+import { SearchableDropdown, type SearchOption } from '@/components/ui/searchable-dropdown';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { TimestampDisplay } from '@/components/ui/timestamp';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { STORAGE_KEYS, usePageSize } from '@/hooks/usePersistentState';
+import { api } from '@/lib/api';
+import { LOG_TYPES, LOG_TYPE_OPTIONS } from '@/lib/constants/logs';
+import { buildCsv, fetchAllPaginatedResults, mapWithConcurrency } from '@/lib/export';
+import { useAuthStore } from '@/lib/stores/auth';
+import { cn, formatTimestamp, fromDateTimeLocal, renderQuota, toDateTimeLocal } from '@/lib/utils';
+import type { LogEntry, LogMetadata } from '@/types/log';
+import type { ColumnDef } from '@tanstack/react-table';
+import { Copy, Eye, EyeOff, FileDown, Filter, RefreshCw } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
+
+import { LogModelCell } from './components/LogModelCell';
 
 type LogRow = LogEntry;
 
@@ -56,29 +34,30 @@ interface LogStatistics {
 }
 
 const LOG_TYPE_TRANSLATION_KEYS: Record<number, string> = {
-  [LOG_TYPES.ALL]: "all",
-  [LOG_TYPES.TOPUP]: "topup",
-  [LOG_TYPES.CONSUME]: "consume",
-  [LOG_TYPES.MANAGE]: "manage",
-  [LOG_TYPES.SYSTEM]: "system",
-  [LOG_TYPES.TEST]: "test",
+  [LOG_TYPES.ALL]: 'all',
+  [LOG_TYPES.TOPUP]: 'topup',
+  [LOG_TYPES.CONSUME]: 'consume',
+  [LOG_TYPES.MANAGE]: 'manage',
+  [LOG_TYPES.SYSTEM]: 'system',
+  [LOG_TYPES.TEST]: 'test',
+  [LOG_TYPES.TOOL]: 'tool',
 };
 
-const formatLatency = (ms?: number, fallback: string = "-") => {
+const formatLatency = (ms?: number, fallback: string = '-') => {
   if (!ms) return fallback;
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 };
 
 const getLatencyColor = (ms?: number) => {
-  if (!ms) return "";
-  if (ms < 1000) return "text-green-600";
-  if (ms < 3000) return "text-yellow-600";
-  return "text-red-600";
+  if (!ms) return '';
+  if (ms < 1000) return 'text-success';
+  if (ms < 3000) return 'text-warning';
+  return 'text-destructive';
 };
 
 const coerceTokenCount = (value: unknown) => {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
   return Math.trunc(value);
 };
 
@@ -94,15 +73,28 @@ const getCacheWriteSummaries = (metadata?: LogMetadata) => {
   };
 };
 
+interface ExportTracePayload {
+  id: number;
+  trace_id: string;
+  url: string;
+  method: string;
+  body_size: number;
+  status: number;
+  created_at: number;
+  updated_at: number;
+  timestamps?: Record<string, unknown>;
+  durations?: Record<string, unknown>;
+  log?: Record<string, unknown>;
+}
+
 export function LogsPage() {
   const { t } = useTranslation();
   const { user } = useAuthStore();
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<LogRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [pageIndex, setPageIndex] = useState(
-    Math.max(0, parseInt(searchParams.get("p") || "1") - 1)
-  );
+  const [exporting, setExporting] = useState(false);
+  const [pageIndex, setPageIndex] = useState(Math.max(0, parseInt(searchParams.get('p') || '1') - 1));
   const [pageSize, setPageSize] = usePageSize(STORAGE_KEYS.PAGE_SIZE);
   const [total, setTotal] = useState(0);
   const mounted = useRef(false);
@@ -115,20 +107,13 @@ export function LogsPage() {
 
   // Filters: for admin/root, username is '', for others, username is self
   const [filters, setFilters] = useState(() => ({
-    type: "0",
-    model_name: "",
-    token_name: "",
-    username:
-      user && (user.role === 10 || user.role === 100)
-        ? ""
-        : user?.username || "",
-    channel: "",
-    start_timestamp: toDateTimeLocal(
-      Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000)
-    ),
-    end_timestamp: toDateTimeLocal(
-      Math.floor((Date.now() + 3600 * 1000) / 1000)
-    ),
+    type: '0',
+    model_name: '',
+    token_name: '',
+    username: user && (user.role === 10 || user.role === 100) ? '' : user?.username || '',
+    channel: '',
+    start_timestamp: toDateTimeLocal(Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000)),
+    end_timestamp: toDateTimeLocal(Math.floor((Date.now() + 3600 * 1000) / 1000)),
   }));
 
   // Statistics
@@ -137,34 +122,40 @@ export function LogsPage() {
   const [statLoading, setStatLoading] = useState(false);
 
   // Search
-  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searchKeyword, setSearchKeyword] = useState('');
   const [searchOptions, setSearchOptions] = useState<SearchOption[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
 
   // Sorting
-  const [sortBy, setSortBy] = useState("created_at");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [sortBy, setSortBy] = useState('created_at');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  // Tracing modal
-  const [detailsModalOpen, setDetailsModalOpen] = useState(false);
-  const [selectedLog, setSelectedLog] = useState<LogRow | null>(null);
+  // Tracing modal — driven by URL ?id=xxx
+  const selectedLog = useMemo(() => {
+    const idStr = searchParams.get('id');
+    if (!idStr) return null;
+    const id = parseInt(idStr);
+    return data.find((row) => row.id === id) ?? null;
+  }, [searchParams, data]);
+  const detailsModalOpen = selectedLog !== null;
 
-  const getLogTypeLabelText = (typeValue: number) =>
-    t(`logs.types.${LOG_TYPE_TRANSLATION_KEYS[typeValue] ?? "unknown"}`);
+  const getLogTypeLabelText = (typeValue: number) => t(`logs.types.${LOG_TYPE_TRANSLATION_KEYS[typeValue] ?? 'unknown'}`);
 
   const renderLogTypeBadge = (typeValue: number) => {
     const label = getLogTypeLabelText(typeValue);
     switch (typeValue) {
       case LOG_TYPES.TOPUP:
-        return <Badge className="bg-green-100 text-green-800">{label}</Badge>;
+        return <Badge className="bg-success-muted text-success-foreground">{label}</Badge>;
       case LOG_TYPES.CONSUME:
-        return <Badge className="bg-blue-100 text-blue-800">{label}</Badge>;
+        return <Badge className="bg-info-muted text-info-foreground">{label}</Badge>;
       case LOG_TYPES.MANAGE:
-        return <Badge className="bg-purple-100 text-purple-800">{label}</Badge>;
+        return <Badge className="bg-accent text-accent-foreground">{label}</Badge>;
       case LOG_TYPES.SYSTEM:
-        return <Badge className="bg-gray-100 text-gray-800">{label}</Badge>;
+        return <Badge className="bg-muted text-muted-foreground">{label}</Badge>;
       case LOG_TYPES.TEST:
-        return <Badge className="bg-yellow-100 text-yellow-800">{label}</Badge>;
+        return <Badge className="bg-warning-muted text-warning-foreground">{label}</Badge>;
+      case LOG_TYPES.TOOL:
+        return <Badge className="bg-secondary text-secondary-foreground">{label}</Badge>;
       default:
         return <Badge variant="outline">{label}</Badge>;
     }
@@ -176,35 +167,23 @@ export function LogsPage() {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      params.set("p", String(p));
-      params.set("size", String(size));
+      params.set('p', String(p));
+      params.set('size', String(size));
 
-      if (filters.type !== "0") params.set("type", filters.type);
-      if (filters.model_name) params.set("model_name", filters.model_name);
-      if (filters.token_name) params.set("token_name", filters.token_name);
-      if (isAdminOrRoot && filters.username)
-        params.set("username", filters.username);
-      if (filters.channel && isAdminOrRoot)
-        params.set("channel", filters.channel);
-      if (filters.start_timestamp)
-        params.set(
-          "start_timestamp",
-          String(fromDateTimeLocal(filters.start_timestamp))
-        );
-      if (filters.end_timestamp)
-        params.set(
-          "end_timestamp",
-          String(fromDateTimeLocal(filters.end_timestamp))
-        );
+      if (filters.type !== '0') params.set('type', filters.type);
+      if (filters.model_name) params.set('model_name', filters.model_name);
+      if (filters.token_name) params.set('token_name', filters.token_name);
+      if (isAdminOrRoot && filters.username) params.set('username', filters.username);
+      if (filters.channel && isAdminOrRoot) params.set('channel', filters.channel);
+      if (filters.start_timestamp) params.set('start_timestamp', String(fromDateTimeLocal(filters.start_timestamp)));
+      if (filters.end_timestamp) params.set('end_timestamp', String(fromDateTimeLocal(filters.end_timestamp)));
       if (sortBy) {
-        params.set("sort", sortBy);
-        params.set("order", sortOrder);
+        params.set('sort', sortBy);
+        params.set('order', sortOrder);
       }
 
       // Unified API call - complete URL with /api prefix
-      const path = isAdminOrRoot
-        ? `/api/log/?${params}`
-        : `/api/log/self?${params}`;
+      const path = isAdminOrRoot ? `/api/log/?${params}` : `/api/log/self?${params}`;
       const res = await api.get(path);
       const { success, data: responseData, total: responseTotal } = res.data;
 
@@ -215,7 +194,7 @@ export function LogsPage() {
         setPageSize(size);
       }
     } catch (error) {
-      console.error("Failed to load logs:", error);
+      console.error('Failed to load logs:', error);
       setData([]);
       setTotal(0);
     } finally {
@@ -227,33 +206,23 @@ export function LogsPage() {
     setStatLoading(true);
     try {
       const params = new URLSearchParams();
-      if (filters.type !== "0") params.set("type", filters.type);
-      if (filters.model_name) params.set("model_name", filters.model_name);
-      if (filters.token_name) params.set("token_name", filters.token_name);
-      if (isAdminOrRoot && filters.username)
-        params.set("username", filters.username);
-      if (filters.channel && isAdminOrRoot)
-        params.set("channel", filters.channel);
-      if (filters.start_timestamp)
-        params.set(
-          "start_timestamp",
-          String(fromDateTimeLocal(filters.start_timestamp))
-        );
-      if (filters.end_timestamp)
-        params.set(
-          "end_timestamp",
-          String(fromDateTimeLocal(filters.end_timestamp))
-        );
+      if (filters.type !== '0') params.set('type', filters.type);
+      if (filters.model_name) params.set('model_name', filters.model_name);
+      if (filters.token_name) params.set('token_name', filters.token_name);
+      if (isAdminOrRoot && filters.username) params.set('username', filters.username);
+      if (filters.channel && isAdminOrRoot) params.set('channel', filters.channel);
+      if (filters.start_timestamp) params.set('start_timestamp', String(fromDateTimeLocal(filters.start_timestamp)));
+      if (filters.end_timestamp) params.set('end_timestamp', String(fromDateTimeLocal(filters.end_timestamp)));
 
       // Unified API call - complete URL with /api prefix
-      const statPath = isAdminOrRoot ? "/api/log/stat" : "/api/log/self/stat";
-      const res = await api.get(statPath + "?" + params.toString());
+      const statPath = isAdminOrRoot ? '/api/log/stat' : '/api/log/self/stat';
+      const res = await api.get(statPath + '?' + params.toString());
 
       if (res.data?.success) {
         setStat(res.data.data || { quota: 0 });
       }
     } catch (error) {
-      console.error("Failed to load statistics:", error);
+      console.error('Failed to load statistics:', error);
     } finally {
       setStatLoading(false);
     }
@@ -269,39 +238,32 @@ export function LogsPage() {
     setSearchLoading(true);
     try {
       // Unified API call - complete URL with /api prefix
-      const url = isAdminOrRoot ? "/api/log/search" : "/api/log/self/search";
-      const res = await api.get(url + "?keyword=" + encodeURIComponent(query));
+      const url = isAdminOrRoot ? '/api/log/search' : '/api/log/self/search';
+      const res = await api.get(url + '?keyword=' + encodeURIComponent(query));
       const { success, data: responseData } = res.data;
 
       if (success && Array.isArray(responseData)) {
-        const options: SearchOption[] = responseData
-          .slice(0, 10)
-          .map((log: LogRow) => ({
-            key: log.id.toString(),
-            value: log.content || log.model_name || t("logs.search.log_entry"),
-            text: log.content || log.model_name || t("logs.search.log_entry"),
-            content: (
-              <div className="flex flex-col">
-                <div className="font-medium">{log.model_name}</div>
-                <div className="text-sm text-muted-foreground flex flex-wrap items-center gap-2">
-                  <TimestampDisplay
-                    timestamp={log.created_at}
-                    className="font-mono text-xs"
-                  />
-                  <span>•</span>
-                  {renderLogTypeBadge(log.type)}
-                  <span>•</span>
-                  <span>
-                    {t("logs.search.quota", { value: renderQuota(log.quota) })}
-                  </span>
-                </div>
+        const options: SearchOption[] = responseData.slice(0, 10).map((log: LogRow) => ({
+          key: log.id.toString(),
+          value: log.content || log.model_name || t('logs.search.log_entry'),
+          text: log.content || log.model_name || t('logs.search.log_entry'),
+          content: (
+            <div className="flex flex-col">
+              <div className="font-medium">{log.model_name}</div>
+              <div className="text-sm text-muted-foreground flex flex-wrap items-center gap-2">
+                <TimestampDisplay timestamp={log.created_at} className="font-mono text-xs" />
+                <span>•</span>
+                {renderLogTypeBadge(log.type)}
+                <span>•</span>
+                <span>{t('logs.search.quota', { value: renderQuota(log.quota) })}</span>
               </div>
-            ),
-          }));
+            </div>
+          ),
+        }));
         setSearchOptions(options);
       }
     } catch (error) {
-      console.error("Search failed:", error);
+      console.error('Search failed:', error);
       setSearchOptions([]);
     } finally {
       setSearchLoading(false);
@@ -316,10 +278,8 @@ export function LogsPage() {
     setLoading(true);
     try {
       // Unified API call - complete URL with /api prefix
-      const url = isAdminOrRoot ? "/api/log/search" : "/api/log/self/search";
-      const res = await api.get(
-        url + "?keyword=" + encodeURIComponent(searchKeyword)
-      );
+      const url = isAdminOrRoot ? '/api/log/search' : '/api/log/self/search';
+      const res = await api.get(url + '?keyword=' + encodeURIComponent(searchKeyword));
       const { success, data: responseData } = res.data;
 
       if (success) {
@@ -328,7 +288,7 @@ export function LogsPage() {
         setTotal(responseData?.length || 0);
       }
     } catch (error) {
-      console.error("Search failed:", error);
+      console.error('Search failed:', error);
     } finally {
       setLoading(false);
     }
@@ -359,83 +319,145 @@ export function LogsPage() {
 
   const handleClearLogs = async () => {
     const ts = fromDateTimeLocal(filters.end_timestamp);
-    const confirmed = window.confirm(
-      t("logs.confirm.delete_before", { timestamp: filters.end_timestamp })
-    );
+    const confirmed = window.confirm(t('logs.confirm.delete_before', { timestamp: filters.end_timestamp }));
     if (!confirmed) return;
 
     try {
       // Unified API call - complete URL with /api prefix
-      await api.delete("/api/log?target_timestamp=" + ts);
+      await api.delete('/api/log?target_timestamp=' + ts);
       load(0, pageSize);
     } catch (error) {
-      console.error("Failed to clear logs:", error);
+      console.error('Failed to clear logs:', error);
     }
   };
 
-  const handleExportLogs = () => {
-    // Implementation for exporting logs to CSV
-    const csvHeaders = [
-      t("logs.export.headers.time"),
-      t("logs.export.headers.type"),
-      t("logs.export.headers.model"),
-      t("logs.export.headers.token"),
-      t("logs.export.headers.username"),
-      t("logs.export.headers.quota"),
-      t("logs.export.headers.prompt_tokens"),
-      t("logs.export.headers.completion_tokens"),
-      t("logs.export.headers.cached_prompt_tokens"),
-      t("logs.export.headers.cached_completion_tokens"),
-      t("logs.export.headers.cache_write_5m"),
-      t("logs.export.headers.cache_write_1h"),
-      t("logs.export.headers.latency"),
-      t("logs.export.headers.content"),
-    ];
-    const csvData = data.map((log) => {
-      const { fiveMinute, oneHour } = getCacheWriteSummaries(log.metadata);
-      return [
-        formatTimestamp(log.created_at),
-        log.type,
-        log.model_name,
-        log.token_name || "",
-        log.username || "",
-        log.quota,
-        log.prompt_tokens || 0,
-        log.completion_tokens || 0,
-        log.cached_prompt_tokens || 0,
-        log.cached_completion_tokens || 0,
-        fiveMinute,
-        oneHour,
-        log.elapsed_time || 0,
-        (log.content || "").replace(/,/g, ";").replace(/\n/g, " "),
-      ];
-    });
+  const handleExportLogs = async () => {
+    setExporting(true);
+    try {
+      const params = new URLSearchParams();
+      if (filters.type !== '0') params.set('type', filters.type);
+      if (filters.model_name) params.set('model_name', filters.model_name);
+      if (filters.token_name) params.set('token_name', filters.token_name);
+      if (isAdminOrRoot && filters.username) params.set('username', filters.username);
+      if (filters.channel && isAdminOrRoot) params.set('channel', filters.channel);
+      if (filters.start_timestamp) params.set('start_timestamp', String(fromDateTimeLocal(filters.start_timestamp)));
+      if (filters.end_timestamp) params.set('end_timestamp', String(fromDateTimeLocal(filters.end_timestamp)));
+      if (sortBy) {
+        params.set('sort', sortBy);
+        params.set('order', sortOrder);
+      }
 
-    const csv = [csvHeaders, ...csvData].map((row) => row.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `logs_${new Date().toISOString().split("T")[0]}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+      const exportPath = isAdminOrRoot ? '/api/log/' : '/api/log/self';
+      const exportData = await fetchAllPaginatedResults<LogRow>((url) => api.get(url), exportPath, params);
+      const logsWithTrace = exportData.filter((log) => log.trace_id?.trim());
+      const traceEntries = await mapWithConcurrency(logsWithTrace, async (log) => {
+        try {
+          const traceResponse = await api.get(`/api/trace/log/${log.id}`);
+          if (traceResponse.data?.success === false) {
+            return {
+              logId: log.id,
+              trace: { error: traceResponse.data?.message || t('logs.details.load_failed') } as ExportTracePayload | { error: string },
+            };
+          }
+
+          return {
+            logId: log.id,
+            trace: (traceResponse.data?.data as ExportTracePayload | undefined) ?? null,
+          };
+        } catch (_error) {
+          return {
+            logId: log.id,
+            trace: { error: t('logs.details.load_failed') } as ExportTracePayload | { error: string },
+          };
+        }
+      });
+      const tracesByLogId = new Map<number, ExportTracePayload | { error: string } | null>(
+        traceEntries.map((entry) => [entry.logId, entry.trace])
+      );
+
+      const csvHeaders = [
+        t('logs.details.recorded_at'),
+        t('logs.details.type'),
+        t('logs.details.log_id'),
+        t('logs.details.model'),
+        t('logs.details.origin_model'),
+        t('logs.details.token'),
+        t('logs.details.user'),
+        t('logs.details.channel'),
+        t('logs.details.quota'),
+        t('logs.details.quota_raw'),
+        t('logs.details.prompt_tokens_input'),
+        t('logs.details.completion_tokens_output'),
+        t('logs.details.prompt_tokens_cached'),
+        t('logs.details.cache_write_5m'),
+        t('logs.details.cache_write_1h'),
+        t('logs.details.total_tokens'),
+        t('logs.details.latency'),
+        t('logs.details.request_id'),
+        t('logs.details.trace_id'),
+        t('logs.details.stream'),
+        t('logs.details.system_reset'),
+        t('logs.details.content'),
+        t('logs.details.metadata'),
+        t('logs.details.tracing'),
+      ];
+      const csvData = exportData.map((log) => {
+        const { fiveMinute, oneHour } = getCacheWriteSummaries(log.metadata);
+        const totalTokens = (log.prompt_tokens ?? 0) + (log.completion_tokens ?? 0);
+        const tracePayload = tracesByLogId.get(log.id) ?? null;
+        return [
+          formatTimestamp(log.created_at),
+          `${getLogTypeLabelText(log.type)} (${log.type})`,
+          log.id,
+          log.model_name,
+          log.origin_model_name || '',
+          log.token_name || '',
+          log.username || '',
+          log.channel ?? '',
+          renderQuota(log.quota),
+          log.quota,
+          log.prompt_tokens || 0,
+          log.completion_tokens || 0,
+          log.cached_prompt_tokens || 0,
+          fiveMinute,
+          oneHour,
+          totalTokens,
+          formatLatency(log.elapsed_time, t('logs.labels.not_available')),
+          log.request_id || '',
+          log.trace_id || '',
+          Boolean(log.is_stream),
+          Boolean(log.system_prompt_reset),
+          log.content || '',
+          log.metadata ?? null,
+          tracePayload,
+        ];
+      });
+
+      const csv = buildCsv([csvHeaders, ...csvData]);
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `logs_${new Date().toISOString().split('T')[0]}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to export logs:', error);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const CopyButton = ({ text }: { text: string }) => (
-    <Button
-      size="sm"
-      variant="ghost"
-      className="h-6 w-6 p-0"
-      onClick={() => navigator.clipboard.writeText(text)}
-    >
+    <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => navigator.clipboard.writeText(text)}>
       <Copy className="h-3 w-3" />
     </Button>
   );
 
   const columns: ColumnDef<LogRow>[] = [
     {
-      accessorKey: "created_at",
-      header: t("logs.table.time"),
+      accessorKey: 'created_at',
+      header: t('logs.table.time'),
       cell: ({ row }) => (
         <div className="flex items-center gap-2">
           <TimestampDisplay
@@ -443,80 +465,69 @@ export function LogsPage() {
             className="font-mono text-xs"
             title={row.original.request_id || undefined}
           />
-          {row.original.request_id && (
-            <CopyButton text={row.original.request_id} />
-          )}
+          {row.original.request_id && <CopyButton text={row.original.request_id} />}
         </div>
       ),
     },
     ...(isAdminOrRoot
       ? [
           {
-            accessorKey: "channel",
-            header: t("logs.table.channel"),
-            cell: ({ row }: { row: any }) => (
-              <span className="font-mono text-sm">
-                {row.original.channel || t("logs.labels.missing")}
-              </span>
-            ),
+            accessorKey: 'channel',
+            header: t('logs.table.channel'),
+            cell: ({ row }: { row: any }) => <span className="font-mono text-sm">{row.original.channel || t('logs.labels.missing')}</span>,
           } as ColumnDef<LogRow>,
         ]
       : []),
     {
-      accessorKey: "type",
-      header: t("logs.table.type"),
+      accessorKey: 'type',
+      header: t('logs.table.type'),
       cell: ({ row }) => renderLogTypeBadge(row.original.type),
     },
     {
-      accessorKey: "model_name",
-      header: t("logs.table.model"),
+      accessorKey: 'model_name',
+      header: t('logs.table.model'),
       cell: ({ row }) => (
-        <span className="font-medium">{row.original.model_name}</span>
+        <LogModelCell
+          modelName={row.original.model_name}
+          originModelName={row.original.origin_model_name}
+          targetLabel={t('logs.table.model')}
+          originLabel={t('logs.details.origin_model')}
+        />
       ),
     },
     ...(Number(filters.type) !== LOG_TYPES.TEST
       ? [
           // Always show user column; for non-admins fall back to current user if username missing
           {
-            accessorKey: "username",
-            header: t("logs.table.user"),
-            cell: ({ row }) => (
-              <span className="text-sm">
-                {row.original.username ||
-                  user?.username ||
-                  t("logs.labels.missing")}
-              </span>
+            accessorKey: 'username',
+            header: t('logs.table.user'),
+            cell: ({ row }: { row: any }) => (
+              <span className="text-sm">{row.original.username || user?.username || t('logs.labels.missing')}</span>
             ),
           } as ColumnDef<LogRow>,
           {
-            accessorKey: "token_name",
-            header: t("logs.table.token"),
-            cell: ({ row }) => (
-              <span className="text-sm">
-                {row.original.token_name || t("logs.labels.missing")}
-              </span>
-            ),
+            accessorKey: 'token_name',
+            header: t('logs.table.token'),
+            cell: ({ row }: { row: any }) => <span className="text-sm">{row.original.token_name || t('logs.labels.missing')}</span>,
           },
           {
-            accessorKey: "prompt_tokens",
-            header: t("logs.table.prompt"),
-            cell: ({ row }) => (
+            accessorKey: 'prompt_tokens',
+            header: t('logs.table.prompt'),
+            cell: ({ row }: { row: any }) => (
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="font-mono text-sm cursor-help">
-                      {row.original.prompt_tokens || 0}
-                    </span>
+                    <span className="font-mono text-sm cursor-help">{row.original.prompt_tokens || 0}</span>
                   </TooltipTrigger>
                   <TooltipContent>
                     <div className="flex flex-col gap-1">
                       <div>
-                        {t("logs.tooltip.input_tokens", {
+                        {t('logs.tooltip.input_tokens', {
                           value: row.original.prompt_tokens ?? 0,
                         })}
                       </div>
                       <div>
-                        {t("logs.tooltip.cached_tokens", {
+                        {t('logs.tooltip.cached_tokens', {
                           value: row.original.cached_prompt_tokens ?? 0,
                         })}
                       </div>
@@ -527,40 +538,29 @@ export function LogsPage() {
             ),
           },
           {
-            accessorKey: "completion_tokens",
-            header: t("logs.table.completion"),
-            cell: ({ row }) => {
-              const { fiveMinute, oneHour } = getCacheWriteSummaries(
-                row.original.metadata
-              );
+            accessorKey: 'completion_tokens',
+            header: t('logs.table.completion'),
+            cell: ({ row }: { row: any }) => {
+              const { fiveMinute, oneHour } = getCacheWriteSummaries(row.original.metadata);
               return (
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <span className="font-mono text-sm cursor-help">
-                        {row.original.completion_tokens || 0}
-                      </span>
+                      <span className="font-mono text-sm cursor-help">{row.original.completion_tokens || 0}</span>
                     </TooltipTrigger>
                     <TooltipContent>
                       <div className="flex flex-col gap-1">
                         <div>
-                          {t("logs.tooltip.output_tokens", {
+                          {t('logs.tooltip.output_tokens', {
                             value: row.original.completion_tokens ?? 0,
                           })}
                         </div>
                         <div>
-                          {t("logs.tooltip.cached_tokens", {
-                            value: row.original.cached_completion_tokens ?? 0,
-                          })}
-                        </div>
-                        <div>
-                          {t("logs.tooltip.cache_write_5m", {
+                          {t('logs.tooltip.cache_write_5m', {
                             value: fiveMinute,
                           })}
                         </div>
-                        <div>
-                          {t("logs.tooltip.cache_write_1h", { value: oneHour })}
-                        </div>
+                        <div>{t('logs.tooltip.cache_write_1h', { value: oneHour })}</div>
                       </div>
                     </TooltipContent>
                   </Tooltip>
@@ -569,31 +569,20 @@ export function LogsPage() {
             },
           },
           {
-            accessorKey: "quota",
-            header: t("logs.table.cost"),
-            cell: ({ row }) => (
-              <span
-                className="font-mono text-sm"
-                title={row.original.content || ""}
-              >
+            accessorKey: 'quota',
+            header: t('logs.table.cost'),
+            cell: ({ row }: { row: any }) => (
+              <span className="font-mono text-sm" title={row.original.content || ''}>
                 {renderQuota(row.original.quota)}
               </span>
             ),
           },
           {
-            accessorKey: "elapsed_time",
-            header: t("logs.table.latency"),
-            cell: ({ row }) => (
-              <span
-                className={cn(
-                  "font-mono text-sm",
-                  getLatencyColor(row.original.elapsed_time)
-                )}
-              >
-                {formatLatency(
-                  row.original.elapsed_time,
-                  t("logs.labels.not_available")
-                )}
+            accessorKey: 'elapsed_time',
+            header: t('logs.table.latency'),
+            cell: ({ row }: { row: any }) => (
+              <span className={cn('font-mono text-sm', getLatencyColor(row.original.elapsed_time))}>
+                {formatLatency(row.original.elapsed_time, t('logs.labels.not_available'))}
               </span>
             ),
           },
@@ -603,7 +592,7 @@ export function LogsPage() {
 
   const handlePageChange = (newPageIndex: number, newPageSize: number) => {
     setSearchParams((prev) => {
-      prev.set("p", (newPageIndex + 1).toString());
+      prev.set('p', (newPageIndex + 1).toString());
       return prev;
     });
     if (searchKeyword.trim()) {
@@ -622,24 +611,25 @@ export function LogsPage() {
     }
   };
 
-  const handleSortChange = (
-    newSortBy: string,
-    newSortOrder: "asc" | "desc"
-  ) => {
+  const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc') => {
     setSortBy(newSortBy);
     setSortOrder(newSortOrder);
     load(0, pageSize);
   };
 
   const handleRowClick = (log: LogRow) => {
-    setSelectedLog(log);
-    setDetailsModalOpen(true);
+    setSearchParams((prev) => {
+      prev.set('id', log.id.toString());
+      return prev;
+    });
   };
 
   const handleDetailsModalChange = (open: boolean) => {
-    setDetailsModalOpen(open);
     if (!open) {
-      setSelectedLog(null);
+      setSearchParams((prev) => {
+        prev.delete('id');
+        return prev;
+      });
     }
   };
 
@@ -652,90 +642,60 @@ export function LogsPage() {
   };
 
   return (
-    <div className="container mx-auto px-2 md:px-4 py-4 md:py-8">
-      <Card className="border-0 md:border shadow-none md:shadow-sm">
-        <CardHeader className="px-2 md:px-6">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div>
-              <CardTitle className="flex items-center gap-2 text-xl md:text-2xl">
-                {t("logs.title")}
-                {showStat && (
-                  <div className="text-sm font-normal text-muted-foreground">
-                    (
-                    {t("logs.stats.total_quota", {
-                      value: renderQuota(stat.quota),
-                    })}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={loadStatistics}
-                      disabled={statLoading}
-                      className="ml-2 h-6 w-6 p-0"
-                    >
-                      <RefreshCw
-                        className={cn("h-3 w-3", statLoading && "animate-spin")}
-                      />
-                    </Button>
-                    )
-                  </div>
-                )}
-              </CardTitle>
-              <CardDescription>{t("logs.description")}</CardDescription>
-            </div>
-            <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0">
-              <Button
-                variant="outline"
-                onClick={toggleStatVisibility}
-                className="gap-2 whitespace-nowrap"
-                size="sm"
-              >
-                {showStat ? (
-                  <EyeOff className="h-4 w-4" />
-                ) : (
-                  <Eye className="h-4 w-4" />
-                )}
-                {showStat
-                  ? t("logs.actions.hide_stats")
-                  : t("logs.actions.show_stats")}
+    <ResponsivePageContainer
+      title={t('logs.title')}
+      description={t('logs.description')}
+      actions={
+        <div className="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+          {showStat && (
+            <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+              <span>
+                {t('logs.stats.total_quota', {
+                  value: renderQuota(stat.quota),
+                })}
+              </span>
+              <Button size="sm" variant="ghost" onClick={loadStatistics} disabled={statLoading} className="h-7 w-7 p-0">
+                <RefreshCw className={cn('h-3 w-3', statLoading && 'animate-spin')} />
               </Button>
-              <Button
-                variant="outline"
-                onClick={handleExportLogs}
-                className="gap-2 whitespace-nowrap"
-                size="sm"
-              >
-                <FileDown className="h-4 w-4" />
-                {t("logs.actions.export")}
-              </Button>
-              {isAdmin && (
-                <Button variant="destructive" onClick={handleClearLogs} size="sm" className="whitespace-nowrap">
-                  {t("logs.actions.clear")}
-                </Button>
-              )}
             </div>
+          )}
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+            <Button variant="outline" onClick={toggleStatVisibility} className="gap-2 whitespace-nowrap w-full sm:w-auto" size="sm">
+              {showStat ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              {showStat ? t('logs.actions.hide_stats') : t('logs.actions.show_stats')}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={handleExportLogs}
+              className="gap-2 whitespace-nowrap w-full sm:w-auto"
+              size="sm"
+              disabled={exporting}
+            >
+              {exporting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <FileDown className="h-4 w-4" />}
+              {t('logs.actions.export')}
+            </Button>
+            {isAdmin && (
+              <Button variant="destructive" onClick={handleClearLogs} size="sm" className="w-full sm:w-auto">
+                {t('logs.actions.clear')}
+              </Button>
+            )}
           </div>
-        </CardHeader>
-        <CardContent className="px-2 md:px-6">
+        </div>
+      }
+    >
+      <Card className="border-0 md:border shadow-none md:shadow-sm">
+        <CardContent className="px-2 pt-3 md:px-6 md:pt-6">
           {/* Filters */}
           <div className="grid grid-cols-1 md:grid-cols-7 gap-3 md:gap-4 mb-6 p-3 md:p-4 border-x-0 md:border border-y md:rounded-lg bg-muted/5 md:bg-muted/10">
             <div className="md:col-span-7 flex items-center gap-2 mb-1">
               <Filter className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm font-medium">
-                {t("logs.filters.title")}
-              </span>
+              <span className="text-sm font-medium">{t('logs.filters.title')}</span>
             </div>
             <div>
-              <Label className="text-xs">{t("logs.filters.type")}</Label>
-              <Select
-                value={filters.type}
-                onValueChange={(value) =>
-                  setFilters({ ...filters, type: value })
-                }
-              >
+              <Label className="text-xs">{t('logs.filters.type')}</Label>
+              <Select value={filters.type} onValueChange={(value) => setFilters({ ...filters, type: value })}>
                 <SelectTrigger className="h-9">
-                  <SelectValue
-                    placeholder={t("logs.filters.type_placeholder")}
-                  />
+                  <SelectValue placeholder={t('logs.filters.type_placeholder')} />
                 </SelectTrigger>
                 <SelectContent>
                   {LOG_TYPE_OPTIONS.map((option) => (
@@ -747,45 +707,41 @@ export function LogsPage() {
               </Select>
             </div>
             <div>
-              <Label className="text-xs">{t("logs.filters.model")}</Label>
+              <Label className="text-xs">{t('logs.filters.model')}</Label>
               <SearchableDropdown
                 value={filters.model_name}
-                placeholder={t("logs.filters.model_placeholder")}
-                searchPlaceholder={t("logs.filters.model_placeholder")}
+                placeholder={t('logs.filters.model_placeholder')}
+                searchPlaceholder={t('logs.filters.model_placeholder')}
                 options={[]}
                 searchEndpoint="/api/models/display" // SearchableDropdown uses fetch() directly, needs /api prefix
                 transformResponse={(data) => {
                   // /api/models/display returns a map; flatten to model names
                   const options: SearchOption[] = [];
-                  if (data && typeof data === "object") {
+                  if (data && typeof data === 'object') {
                     Object.values<any>(data).forEach((entry: any) => {
-                      if (entry?.models && typeof entry.models === "object") {
-                        Object.keys(entry.models).forEach(
-                          (modelName: string) => {
-                            options.push({
-                              key: modelName,
-                              value: modelName,
-                              text: modelName,
-                            });
-                          }
-                        );
+                      if (entry?.models && typeof entry.models === 'object') {
+                        Object.keys(entry.models).forEach((modelName: string) => {
+                          options.push({
+                            key: modelName,
+                            value: modelName,
+                            text: modelName,
+                          });
+                        });
                       }
                     });
                   }
                   return options;
                 }}
-                onChange={(value) =>
-                  setFilters({ ...filters, model_name: value })
-                }
+                onChange={(value) => setFilters({ ...filters, model_name: value })}
                 clearable
               />
             </div>
             <div>
-              <Label className="text-xs">{t("logs.filters.token")}</Label>
+              <Label className="text-xs">{t('logs.filters.token')}</Label>
               <SearchableDropdown
                 value={filters.token_name}
-                placeholder={t("logs.filters.token_placeholder")}
-                searchPlaceholder={t("logs.filters.token_placeholder")}
+                placeholder={t('logs.filters.token_placeholder')}
+                searchPlaceholder={t('logs.filters.token_placeholder')}
                 options={[]}
                 searchEndpoint="/api/token/search" // SearchableDropdown uses fetch() directly, needs /api prefix
                 transformResponse={(data) =>
@@ -797,18 +753,16 @@ export function LogsPage() {
                       }))
                     : []
                 }
-                onChange={(value) =>
-                  setFilters({ ...filters, token_name: value })
-                }
+                onChange={(value) => setFilters({ ...filters, token_name: value })}
                 clearable
               />
             </div>
             <div>
-              <Label className="text-xs">{t("logs.filters.username")}</Label>
+              <Label className="text-xs">{t('logs.filters.username')}</Label>
               <SearchableDropdown
                 value={filters.username}
-                placeholder={t("logs.filters.username_placeholder")}
-                searchPlaceholder={t("logs.filters.username_placeholder")}
+                placeholder={t('logs.filters.username_placeholder')}
+                searchPlaceholder={t('logs.filters.username_placeholder')}
                 options={[]}
                 searchEndpoint="/api/user/search" // SearchableDropdown uses fetch() directly, needs /api prefix
                 transformResponse={(data) =>
@@ -820,22 +774,18 @@ export function LogsPage() {
                       }))
                     : []
                 }
-                onChange={(value) =>
-                  setFilters({ ...filters, username: value })
-                }
+                onChange={(value) => setFilters({ ...filters, username: value })}
                 clearable
               />
             </div>
             {isAdmin && (
               <>
                 <div>
-                  <Label className="text-xs">{t("logs.filters.channel")}</Label>
+                  <Label className="text-xs">{t('logs.filters.channel')}</Label>
                   <Input
                     value={filters.channel}
-                    onChange={(e) =>
-                      setFilters({ ...filters, channel: e.target.value })
-                    }
-                    placeholder={t("logs.filters.channel_placeholder")}
+                    onChange={(e) => setFilters({ ...filters, channel: e.target.value })}
+                    placeholder={t('logs.filters.channel_placeholder')}
                     className="h-9"
                   />
                 </div>
@@ -843,36 +793,28 @@ export function LogsPage() {
             )}
             <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <Label className="text-xs">{t("logs.filters.start")}</Label>
+                <Label className="text-xs">{t('logs.filters.start')}</Label>
                 <Input
                   type="datetime-local"
                   value={filters.start_timestamp}
-                  onChange={(e) =>
-                    setFilters({ ...filters, start_timestamp: e.target.value })
-                  }
+                  onChange={(e) => setFilters({ ...filters, start_timestamp: e.target.value })}
                   className="h-9"
                 />
               </div>
               <div>
-                <Label className="text-xs">{t("logs.filters.end")}</Label>
+                <Label className="text-xs">{t('logs.filters.end')}</Label>
                 <Input
                   type="datetime-local"
                   value={filters.end_timestamp}
-                  onChange={(e) =>
-                    setFilters({ ...filters, end_timestamp: e.target.value })
-                  }
+                  onChange={(e) => setFilters({ ...filters, end_timestamp: e.target.value })}
                   className="h-9"
                 />
               </div>
             </div>
             <div className="flex items-end md:justify-end md:col-span-1">
-              <Button
-                onClick={handleFilterSubmit}
-                disabled={loading}
-                className="w-full md:w-auto gap-2 px-4"
-              >
+              <Button onClick={handleFilterSubmit} disabled={loading} className="w-full md:w-auto gap-2 px-4">
                 <Filter className="h-4 w-4" />
-                {t("logs.filters.apply")}
+                {t('logs.filters.apply')}
               </Button>
             </div>
           </div>
@@ -891,16 +833,12 @@ export function LogsPage() {
             onRowClick={handleRowClick}
             onRefresh={refresh}
             loading={loading}
-            emptyMessage={t("logs.table.empty")}
+            emptyMessage={t('logs.table.empty')}
           />
         </CardContent>
       </Card>
 
-      <LogDetailsModal
-        open={detailsModalOpen}
-        onOpenChange={handleDetailsModalChange}
-        log={selectedLog}
-      />
-    </div>
+      <LogDetailsModal open={detailsModalOpen} onOpenChange={handleDetailsModalChange} log={selectedLog} />
+    </ResponsivePageContainer>
   );
 }

@@ -1,7 +1,6 @@
 package anthropic
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,16 +14,17 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/image"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/image"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/adaptor/openai_compatible"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func stopReasonClaude2OpenAI(reason *string) string {
@@ -118,6 +118,42 @@ func ConvertClaudeRequest(c *gin.Context, claudeRequest model.ClaudeRequest) (*R
 							contentBlock.Text = textStr
 						}
 					}
+					// Handle thinking blocks (extended thinking feature)
+					if thinking, exists := blockMap["thinking"]; exists {
+						if thinkingStr, ok := thinking.(string); ok {
+							contentBlock.Thinking = &thinkingStr
+						}
+					}
+					if signature, exists := blockMap["signature"]; exists {
+						if sigStr, ok := signature.(string); ok {
+							contentBlock.Signature = &sigStr
+						}
+					}
+					// Handle tool_use blocks
+					if id, exists := blockMap["id"]; exists {
+						if idStr, ok := id.(string); ok {
+							contentBlock.Id = idStr
+						}
+					}
+					if name, exists := blockMap["name"]; exists {
+						if nameStr, ok := name.(string); ok {
+							contentBlock.Name = nameStr
+						}
+					}
+					if input, exists := blockMap["input"]; exists {
+						contentBlock.Input = input
+					}
+					// Handle tool_result blocks
+					if contentVal, exists := blockMap["content"]; exists {
+						if contentStr, ok := contentVal.(string); ok {
+							contentBlock.Content = contentStr
+						}
+					}
+					if toolUseId, exists := blockMap["tool_use_id"]; exists {
+						if toolUseIdStr, ok := toolUseId.(string); ok {
+							contentBlock.ToolUseId = toolUseIdStr
+						}
+					}
 					// Handle image content
 					if source, exists := blockMap["source"]; exists {
 						if sourceMap, ok := source.(map[string]any); ok {
@@ -200,14 +236,14 @@ func ConvertClaudeRequest(c *gin.Context, claudeRequest model.ClaudeRequest) (*R
 		request.TopK = claudeRequest.TopK
 	}
 
-	if request.Temperature != nil && request.TopP != nil {
-		request.TopP = nil
-	}
+	NormalizeModelCompatibility(request.Model, &request.Temperature, &request.TopP, &request.TopK, &request.Thinking)
 
 	return request, nil
 }
 
 func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Request, error) {
+	logger := gmw.GetLogger(c)
+
 	claudeTools := make([]Tool, 0, len(textRequest.Tools))
 
 	for _, tool := range textRequest.Tools {
@@ -266,15 +302,24 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 
 	if isModelSupportThinking(textRequest.Model) &&
 		c.Request.URL.Query().Has("thinking") && claudeRequest.Thinking == nil {
+		budgetTokens := int(math.Min(1024, float64(claudeRequest.MaxTokens/2)))
 		claudeRequest.Thinking = &model.Thinking{
 			Type:         "enabled",
-			BudgetTokens: int(math.Min(1024, float64(claudeRequest.MaxTokens/2))),
+			BudgetTokens: &budgetTokens,
 		}
 	}
 
+	NormalizeModelCompatibility(claudeRequest.Model, &claudeRequest.Temperature, &claudeRequest.TopP, &claudeRequest.TopK, &claudeRequest.Thinking)
+
 	if isModelSupportThinking(textRequest.Model) &&
 		claudeRequest.Thinking != nil {
-		if claudeRequest.MaxTokens <= 1024 {
+		// For adaptive thinking, budget_tokens must not be present
+		if claudeRequest.Thinking.Type == "adaptive" {
+			claudeRequest.Thinking.BudgetTokens = nil
+			logger.Debug("using adaptive thinking mode, stripped budget_tokens")
+		}
+
+		if claudeRequest.Thinking.Type != "adaptive" && claudeRequest.MaxTokens <= 1024 {
 			return nil, errors.New("max_tokens must be greater than 1024 when using extended thinking")
 		}
 
@@ -311,11 +356,60 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 		claudeRequest.TopP = nil
 	}
 
+	systemMessageCount := 0
+	emptySystemMessageCount := 0
+	systemPrompts := make([]string, 0)
+
 	for _, message := range textRequest.Messages {
-		if message.Role == "system" && claudeRequest.System == "" {
-			claudeRequest.System = message.StringContent()
+		if message.Role == "system" {
+			systemMessageCount++
+
+			systemContent := strings.TrimSpace(message.StringContent())
+			if systemContent == "" {
+				emptySystemMessageCount++
+				logger.Debug("skip empty system message during Anthropic conversion",
+					zap.Int("system_message_index", systemMessageCount-1),
+				)
+				continue
+			}
+
+			systemPrompts = append(systemPrompts, systemContent)
 			continue
 		}
+
+		if message.Role == "tool" {
+			toolResultContent := message.StringContent()
+			if toolResultContent == "" {
+				for _, part := range message.ParseContent() {
+					if part.Type == model.ContentTypeText && part.Text != nil {
+						toolResultContent += *part.Text
+					}
+				}
+			}
+
+			logger.Debug("convert OpenAI tool role to Anthropic tool_result",
+				zap.Int("message_index", len(claudeRequest.Messages)),
+				zap.Bool("has_tool_call_id", message.ToolCallId != ""),
+				zap.Bool("string_content", message.IsStringContent()),
+				zap.Int("tool_calls_count", len(message.ToolCalls)),
+			)
+			if message.ToolCallId == "" {
+				logger.Debug("tool role message missing tool_call_id during Anthropic conversion",
+					zap.Int("message_index", len(claudeRequest.Messages)),
+				)
+			}
+
+			claudeRequest.Messages = append(claudeRequest.Messages, Message{
+				Role: "user",
+				Content: []Content{{
+					Type:      "tool_result",
+					Content:   toolResultContent,
+					ToolUseId: message.ToolCallId,
+				}},
+			})
+			continue
+		}
+
 		claudeMessage := Message{
 			Role: message.Role,
 		}
@@ -323,13 +417,7 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 		if message.IsStringContent() {
 			stringContent := message.StringContent()
 
-			if message.Role == "tool" {
-				claudeMessage.Role = "user"
-				content.Type = "tool_result"
-				content.Content = stringContent
-				content.ToolUseId = message.ToolCallId
-				claudeMessage.Content = append(claudeMessage.Content, content)
-			} else if stringContent != "" {
+			if stringContent != "" {
 				// For assistant messages with thinking enabled, check if we need to add thinking block
 				if message.Role == "assistant" && claudeRequest.Thinking != nil {
 					// Check if this message has reasoning content that should be converted to thinking block
@@ -564,6 +652,18 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 		claudeRequest.Messages = append(claudeRequest.Messages, claudeMessage)
 	}
 
+	if len(systemPrompts) > 0 {
+		claudeRequest.System = strings.Join(systemPrompts, "\n\n")
+	}
+
+	if systemMessageCount > 0 {
+		logger.Debug("processed system messages for Anthropic conversion",
+			zap.Int("system_messages_total", systemMessageCount),
+			zap.Int("system_messages_merged", len(systemPrompts)),
+			zap.Int("system_messages_empty", emptySystemMessageCount),
+		)
+	}
+
 	// If fallback mode was used, disable thinking to avoid Claude validation errors
 	if useFallbackMode && claudeRequest.Thinking != nil {
 		claudeRequest.Thinking = nil
@@ -794,92 +894,169 @@ func ResponseClaude2OpenAI(c *gin.Context, claudeResponse *Response) *openai.Tex
 func ClaudeNativeStreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	logger := gmw.GetLogger(c)
 
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-		if i := strings.Index(string(data), "\n"); i >= 0 {
-			return i + 1, data[0:i], nil
-		}
-		if atEOF {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 	common.SetEventStreamHeaders(c)
 
-	var usage model.Usage
+	// Wrap the reader with heartbeats to prevent reverse-proxy timeouts (e.g. Cloudflare 524).
+	hbr := render.NewHeartbeatLineReader(c, lineReader, render.DefaultHeartbeatInterval)
+	defer hbr.Close()
 
-	for scanner.Scan() {
-		data := scanner.Text()
-		if len(data) < 6 || !strings.HasPrefix(data, "data:") {
+	var usage model.Usage
+	var streamErr error
+
+	flushWriter := func() {
+		if f, ok := c.Writer.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+
+	// writeSSEEvent writes a properly formatted SSE event to the client.
+	// If eventType is non-empty, it emits an "event:" line for Anthropic SDK compatibility.
+	writeSSEEvent := func(eventType, data string) error {
+		var err error
+		if eventType != "" {
+			_, err = c.Writer.Write([]byte("event: " + eventType + "\ndata: " + data + "\n\n"))
+		} else {
+			_, err = c.Writer.Write([]byte("data: " + data + "\n\n"))
+		}
+		flushWriter()
+		if err != nil {
+			return errors.Wrap(err, "write SSE event")
+		}
+		return nil
+	}
+
+	// forwardOversizedData streams an oversized data line with an optional event type prefix.
+	forwardOversizedData := func(eventType string, payload io.Reader) error {
+		if eventType != "" {
+			if _, err := c.Writer.Write([]byte("event: " + eventType + "\n")); err != nil {
+				return errors.Wrap(err, "write oversized event type prefix")
+			}
+		}
+
+		if _, err := c.Writer.Write([]byte("data: ")); err != nil {
+			return errors.Wrap(err, "write stream data prefix")
+		}
+
+		if _, err := io.Copy(c.Writer, payload); err != nil {
+			return errors.Wrap(err, "copy oversized stream payload")
+		}
+
+		if _, err := c.Writer.Write([]byte("\n\n")); err != nil {
+			return errors.Wrap(err, "write stream data suffix")
+		}
+
+		flushWriter()
+		return nil
+	}
+
+	// lastEventType tracks the most recently seen SSE "event:" line value,
+	// so we can attach it to the following data line (including oversized ones).
+	var lastEventType string
+
+	for {
+		line, err := hbr.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			if err := forwardOversizedData(lastEventType, line.Large); err != nil {
+				streamErr = err
+				break
+			}
+			lastEventType = ""
+			continue
+		}
+
+		// Capture event type from SSE "event:" lines for the next data line
+		if line.Kind == commonsse.LineKindEvent {
+			lastEventType = strings.TrimSpace(strings.TrimPrefix(line.Text(), "event:"))
+			continue
+		}
+
+		data := line.Text()
+		if !strings.HasPrefix(data, "data:") {
 			continue
 		}
 		data = strings.TrimPrefix(data, "data:")
 		data = strings.TrimSpace(data)
 
-		logger.Debug("stream received", zap.String("data", data))
-
+		// Skip [DONE] marker (OpenAI convention, not part of Anthropic protocol)
 		if data == "[DONE]" {
-			// Send final data: [DONE] to close the stream
-			c.Writer.Write([]byte("data: [DONE]\n\n"))
-			c.Writer.(http.Flusher).Flush()
-
-			err := resp.Body.Close()
-			if err != nil {
-				return openai.ErrorWrapper(err, "close_response_body_failed", http.StatusInternalServerError), nil
-			}
-			return nil, &usage
-		}
-
-		// For Claude native streaming, we pass through the events directly
-		c.Writer.Write([]byte("data: " + data + "\n\n"))
-		c.Writer.(http.Flusher).Flush()
-
-		// Parse the response to extract usage and model info
-		var claudeResponse StreamResponse
-		err := json.Unmarshal([]byte(data), &claudeResponse)
-		if err != nil {
-			logger.Error("error unmarshalling stream response", zap.Error(err))
+			lastEventType = ""
 			continue
 		}
 
-		// Extract usage info from message_delta and message_start
-		if claudeResponse.Usage != nil {
+		logger.Debug("stream received", zap.String("data", data))
+
+		// Parse the response to extract event type and usage info
+		var claudeResponse StreamResponse
+		err = json.Unmarshal([]byte(data), &claudeResponse)
+		if err != nil {
+			logger.Error("error unmarshalling stream response", zap.Error(err))
+			// Still forward unparseable events as-is, using the SSE event type if available
+			if writeErr := writeSSEEvent(lastEventType, data); writeErr != nil {
+				streamErr = writeErr
+				break
+			}
+			lastEventType = ""
+			continue
+		}
+
+		// Determine event type: prefer SSE event: line, fall back to JSON type field
+		eventType := lastEventType
+		if eventType == "" {
+			eventType = claudeResponse.Type
+		}
+		if writeErr := writeSSEEvent(eventType, data); writeErr != nil {
+			streamErr = writeErr
+			break
+		}
+		lastEventType = ""
+
+		// Extract usage info from message_delta and message_start events.
+		// For message_start, the Anthropic API nests usage inside "message.usage",
+		// so we check both top-level Usage and Message.Usage.
+		eventUsage := claudeResponse.Usage
+		if eventUsage == nil && claudeResponse.Type == "message_start" && claudeResponse.Message != nil {
+			eventUsage = &claudeResponse.Message.Usage
+		}
+
+		if eventUsage != nil {
 			if claudeResponse.Type == "message_delta" {
-				usage.PromptTokens += claudeResponse.Usage.InputTokens
-				usage.CompletionTokens += claudeResponse.Usage.OutputTokens
+				usage.PromptTokens += eventUsage.InputTokens
+				usage.CompletionTokens += eventUsage.OutputTokens
 			}
 
 			// Accumulate cache tokens from both message_start and message_delta events
 			if claudeResponse.Type == "message_start" || claudeResponse.Type == "message_delta" {
-				if claudeResponse.Usage.CacheReadInputTokens > 0 {
+				if eventUsage.CacheReadInputTokens > 0 {
 					if usage.PromptTokensDetails == nil {
 						usage.PromptTokensDetails = &model.UsagePromptTokensDetails{}
 					}
-					usage.PromptTokensDetails.CachedTokens += claudeResponse.Usage.CacheReadInputTokens
+					usage.PromptTokensDetails.CachedTokens += eventUsage.CacheReadInputTokens
 				}
 
 				// Accumulate cache creation tokens
-				if claudeResponse.Usage.CacheCreation != nil {
-					usage.CacheWrite5mTokens += claudeResponse.Usage.CacheCreation.Ephemeral5mInputTokens
-					usage.CacheWrite1hTokens += claudeResponse.Usage.CacheCreation.Ephemeral1hInputTokens
-				} else if claudeResponse.Usage.CacheCreationInputTokens > 0 {
-					usage.CacheWrite5mTokens += claudeResponse.Usage.CacheCreationInputTokens
+				if eventUsage.CacheCreation != nil {
+					usage.CacheWrite5mTokens += eventUsage.CacheCreation.Ephemeral5mInputTokens
+					usage.CacheWrite1hTokens += eventUsage.CacheCreation.Ephemeral1hInputTokens
+				} else if eventUsage.CacheCreationInputTokens > 0 {
+					usage.CacheWrite5mTokens += eventUsage.CacheCreationInputTokens
 				}
 			}
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		logger.Error("error reading stream", zap.Error(err), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		render.LogHeartbeatLineReaderError(c, logger, streamErr, hbr)
 	}
-
-	// Send final data: [DONE] to close the stream
-	c.Writer.Write([]byte("data: [DONE]\n\n"))
-	c.Writer.(http.Flusher).Flush()
 
 	err := resp.Body.Close()
 	if err != nil {
@@ -890,22 +1067,13 @@ func ClaudeNativeStreamHandler(c *gin.Context, resp *http.Response) (*model.Erro
 
 func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
 	logger := gmw.GetLogger(c)
-	createdTime := helper.GetTimestamp()
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
-		}
-		if i := strings.Index(string(data), "\n"); i >= 0 {
-			return i + 1, data[0:i], nil
-		}
-		if atEOF {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 	common.SetEventStreamHeaders(c)
+
+	// Wrap the reader with heartbeats to prevent reverse-proxy timeouts (e.g. Cloudflare 524).
+	hbr := render.NewHeartbeatLineReader(c, lineReader, render.DefaultHeartbeatInterval)
+	defer hbr.Close()
+	createdAt := helper.GetTimestamp()
 
 	var usage model.Usage
 	var modelName string
@@ -918,9 +1086,130 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		}
 	}
 	doneRendered := false
+	var streamErr error
 
-	for scanner.Scan() {
-		data := scanner.Text()
+	for {
+		line, err := hbr.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			var claudeResponse StreamResponse
+			if err := json.NewDecoder(line.Large).Decode(&claudeResponse); err != nil {
+				logger.Error("error unmarshalling oversized stream response", zap.Error(err))
+				continue
+			}
+
+			if claudeResponse.Type == "error" && claudeResponse.Error.Type != "" {
+				openaiErr := struct {
+					Error struct {
+						Message string `json:"message"`
+						Type    string `json:"type"`
+						Code    string `json:"code"`
+					} `json:"error"`
+				}{}
+				openaiErr.Error.Message = claudeResponse.Error.Message
+				openaiErr.Error.Type = claudeResponse.Error.Type
+				openaiErr.Error.Code = claudeResponse.Error.Type
+				if e := render.ObjectData(c, openaiErr); e != nil {
+					logger.Error("error rendering stream error response", zap.Error(e))
+				}
+				render.Done(c)
+				doneRendered = true
+				_ = resp.Body.Close()
+				return nil, &usage
+			}
+
+			response, meta := StreamResponseClaude2OpenAI(c, &claudeResponse)
+			if meta != nil {
+				usage.PromptTokens += meta.Usage.InputTokens
+				usage.CompletionTokens += meta.Usage.OutputTokens
+				if meta.Usage.CacheReadInputTokens > 0 {
+					if usage.PromptTokensDetails == nil {
+						usage.PromptTokensDetails = &model.UsagePromptTokensDetails{}
+					}
+					usage.PromptTokensDetails.CachedTokens += meta.Usage.CacheReadInputTokens
+				}
+				if meta.Usage.CacheCreation != nil {
+					usage.CacheWrite5mTokens += meta.Usage.CacheCreation.Ephemeral5mInputTokens
+					usage.CacheWrite1hTokens += meta.Usage.CacheCreation.Ephemeral1hInputTokens
+				} else if meta.Usage.CacheCreationInputTokens > 0 {
+					usage.CacheWrite5mTokens += meta.Usage.CacheCreationInputTokens
+				}
+
+				if len(meta.Id) > 0 {
+					modelName = meta.Model
+					id = tracing.GenerateChatCompletionID(c)
+					continue
+				}
+
+				if len(lastToolCallChoice.Delta.ToolCalls) > 0 {
+					lastArgs := lastToolCallChoice.Delta.ToolCalls[len(lastToolCallChoice.Delta.ToolCalls)-1].Function
+					if argsStr, ok := lastArgs.Arguments.(string); ok && len(argsStr) == 0 {
+						lastArgs.Arguments = "{}"
+						response.Choices[len(response.Choices)-1].Delta.Content = nil
+						response.Choices[len(response.Choices)-1].Delta.ToolCalls = lastToolCallChoice.Delta.ToolCalls
+					}
+				}
+				if usage.PromptTokens > 0 || usage.CompletionTokens > 0 {
+					usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+					if response != nil {
+						response.Usage = &usage
+					}
+				}
+			}
+			if response == nil {
+				continue
+			}
+
+			response.Id = id
+			response.Model = modelName
+			response.Created = createdAt
+
+			for _, choice := range response.Choices {
+				if len(choice.Delta.ToolCalls) > 0 {
+					lastToolCallChoice = choice
+				}
+			}
+
+			if streamRewriter != nil {
+				compatChunk := openai_compatible.ChatCompletionsStreamResponse{
+					Id:      response.Id,
+					Object:  response.Object,
+					Created: response.Created,
+					Model:   response.Model,
+					Usage:   response.Usage,
+					Choices: make([]openai_compatible.ChatCompletionsStreamResponseChoice, len(response.Choices)),
+				}
+				for i, choice := range response.Choices {
+					compatChunk.Choices[i] = openai_compatible.ChatCompletionsStreamResponseChoice{
+						Index:        choice.Index,
+						Delta:        choice.Delta,
+						FinishReason: choice.FinishReason,
+					}
+				}
+				handled, handledDone := streamRewriter.HandleChunk(c, &compatChunk)
+				if handled {
+					if handledDone {
+						doneRendered = true
+					}
+					continue
+				}
+			}
+			if err := render.ObjectData(c, response); err != nil {
+				logger.Error("error rendering stream response", zap.Error(err))
+			}
+
+			continue
+		}
+
+		data := line.Text()
 		if len(data) < 6 || !strings.HasPrefix(data, "data:") {
 			continue
 		}
@@ -930,7 +1219,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		logger.Debug("stream received", zap.String("data", data))
 
 		var claudeResponse StreamResponse
-		err := json.Unmarshal([]byte(data), &claudeResponse)
+		err = json.Unmarshal([]byte(data), &claudeResponse)
 		if err != nil {
 			logger.Error("error unmarshalling stream response", zap.Error(err))
 			continue
@@ -1008,7 +1297,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 
 		response.Id = id
 		response.Model = modelName
-		response.Created = createdTime
+		response.Created = createdAt
 
 		for _, choice := range response.Choices {
 			if len(choice.Delta.ToolCalls) > 0 {
@@ -1046,8 +1335,8 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		logger.Error("error reading stream", zap.Error(err), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		render.LogHeartbeatLineReaderError(c, logger, streamErr, hbr)
 	}
 
 	if streamRewriter != nil {
@@ -1115,20 +1404,28 @@ func ClaudeNativeHandler(c *gin.Context, resp *http.Response, promptTokens int, 
 		TotalTokens:      claudeResponse.Usage.InputTokens + claudeResponse.Usage.OutputTokens,
 	}
 
-	// Map Anthropic cache tokens to UsagePromptTokensDetails
-	if claudeResponse.Usage.CacheReadInputTokens > 0 || claudeResponse.Usage.CacheCreationInputTokens > 0 {
+	if claudeResponse.Usage.CacheReadInputTokens > 0 {
 		usage.PromptTokensDetails = &model.UsagePromptTokensDetails{
 			CachedTokens: claudeResponse.Usage.CacheReadInputTokens,
 		}
-		// Map cache creation tokens to CacheWrite fields
-		if claudeResponse.Usage.CacheCreation != nil {
-			usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreation.Ephemeral5mInputTokens
-			usage.CacheWrite1hTokens = claudeResponse.Usage.CacheCreation.Ephemeral1hInputTokens
-		} else if claudeResponse.Usage.CacheCreationInputTokens > 0 {
-			// Fallback: if CacheCreation object not present but CacheCreationInputTokens is set
-			usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreationInputTokens
-		}
 	}
+
+	// Map cache creation tokens to CacheWrite fields.
+	if claudeResponse.Usage.CacheCreation != nil {
+		usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreation.Ephemeral5mInputTokens
+		usage.CacheWrite1hTokens = claudeResponse.Usage.CacheCreation.Ephemeral1hInputTokens
+	} else if claudeResponse.Usage.CacheCreationInputTokens > 0 {
+		// Backward compatibility: legacy field carries total cache-write tokens.
+		usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreationInputTokens
+	}
+
+	logger.Debug("mapped Claude native usage for billing",
+		zap.Int("input_tokens", usage.PromptTokens),
+		zap.Int("output_tokens", usage.CompletionTokens),
+		zap.Int("cache_read_input_tokens", claudeResponse.Usage.CacheReadInputTokens),
+		zap.Int("cache_write_5m_tokens", usage.CacheWrite5mTokens),
+		zap.Int("cache_write_1h_tokens", usage.CacheWrite1hTokens),
+	)
 
 	jsonResponse, err := json.Marshal(claudeResponse)
 	if err != nil {
@@ -1182,23 +1479,13 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		ServiceTier:      claudeResponse.Usage.ServiceTier,
 	}
 
-	// Map Anthropic cache tokens to UsagePromptTokensDetails
-	if claudeResponse.Usage.CacheReadInputTokens > 0 || claudeResponse.Usage.CacheCreationInputTokens > 0 {
+	if claudeResponse.Usage.CacheReadInputTokens > 0 {
 		usage.PromptTokensDetails = &model.UsagePromptTokensDetails{
 			CachedTokens: claudeResponse.Usage.CacheReadInputTokens,
 		}
-
-		// Map cache creation tokens to CacheWrite fields
-		if claudeResponse.Usage.CacheCreation != nil {
-			usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreation.Ephemeral5mInputTokens
-			usage.CacheWrite1hTokens = claudeResponse.Usage.CacheCreation.Ephemeral1hInputTokens
-		} else if claudeResponse.Usage.CacheCreationInputTokens > 0 {
-			// Fallback: if CacheCreation object not present but CacheCreationInputTokens is set
-			usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreationInputTokens
-		}
 	}
 
-	// Map cache-write tokens for precise billing
+	// Map cache-write tokens for precise billing.
 	if claudeResponse.Usage.CacheCreation != nil {
 		usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreation.Ephemeral5mInputTokens
 		usage.CacheWrite1hTokens = claudeResponse.Usage.CacheCreation.Ephemeral1hInputTokens
@@ -1206,6 +1493,14 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 		// Backward compatibility: treat all as 5m cache write if duration unspecified
 		usage.CacheWrite5mTokens = claudeResponse.Usage.CacheCreationInputTokens
 	}
+
+	logger.Debug("mapped Claude converted usage for billing",
+		zap.Int("input_tokens", usage.PromptTokens),
+		zap.Int("output_tokens", usage.CompletionTokens),
+		zap.Int("cache_read_input_tokens", claudeResponse.Usage.CacheReadInputTokens),
+		zap.Int("cache_write_5m_tokens", usage.CacheWrite5mTokens),
+		zap.Int("cache_write_1h_tokens", usage.CacheWrite1hTokens),
+	)
 
 	fullTextResponse.Usage = usage
 	jsonResponse, err := json.Marshal(fullTextResponse)

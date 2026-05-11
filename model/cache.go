@@ -14,19 +14,20 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/Laisky/zap"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/random"
-	"github.com/songquanpeng/one-api/dto"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/random"
+	"github.com/Laisky/one-api/dto"
 )
 
 var (
-	TokenCacheSeconds         = config.SyncFrequency
-	UserId2GroupCacheSeconds  = config.SyncFrequency
-	UserId2QuotaCacheSeconds  = config.SyncFrequency
-	UserId2StatusCacheSeconds = config.SyncFrequency
-	GroupModelsCacheSeconds   = config.SyncFrequency
+	TokenCacheSeconds           = config.SyncFrequency
+	UserId2GroupCacheSeconds    = config.SyncFrequency
+	UserId2QuotaCacheSeconds    = config.SyncFrequency
+	UserId2StatusCacheSeconds   = config.SyncFrequency
+	UserId2UsernameCacheSeconds = config.SyncFrequency
+	GroupModelsCacheSeconds     = config.SyncFrequency
 )
 
 func CacheGetTokenByKey(ctx context.Context, key string) (*Token, error) {
@@ -75,6 +76,41 @@ func CacheGetTokenByKey(ctx context.Context, key string) (*Token, error) {
 	return &token, nil
 }
 
+// UserId2UserCacheSeconds controls the TTL for the full user object cache.
+var UserId2UserCacheSeconds = config.SyncFrequency
+
+// CacheGetUserById retrieves a full User (minus password/access_token) by ID,
+// using Redis when available. On cache miss it falls back to GetUserById and populates the cache.
+func CacheGetUserById(ctx context.Context, id int) (*User, error) {
+	lg := logger.FromContext(ctx)
+	if !common.IsRedisEnabled() {
+		return GetUserById(id, false)
+	}
+	cacheKey := fmt.Sprintf("user_obj:%d", id)
+	cached, err := common.RedisGet(ctx, cacheKey)
+	if err == nil {
+		var user User
+		if jsonErr := json.Unmarshal([]byte(cached), &user); jsonErr != nil {
+			lg.Warn("Redis cached user object corrupted, falling back to database", zap.Int("user_id", id), zap.Error(jsonErr))
+		} else {
+			return &user, nil
+		}
+	}
+	user, err := GetUserById(id, false)
+	if err != nil {
+		return nil, errors.Wrapf(err, "get user %d from database", id)
+	}
+	payload, err := json.Marshal(user)
+	if err != nil {
+		lg.Warn("failed to marshal user for cache", zap.Int("user_id", id), zap.Error(err))
+		return user, nil
+	}
+	if setErr := common.RedisSet(ctx, cacheKey, string(payload), time.Duration(UserId2UserCacheSeconds)*time.Second); setErr != nil {
+		lg.Warn("Redis set user object failed, continuing without cache", zap.Int("user_id", id), zap.Error(setErr))
+	}
+	return user, nil
+}
+
 func CacheGetUserGroup(ctx context.Context, id int) (group string, err error) {
 	lg := logger.FromContext(ctx)
 	if !common.IsRedisEnabled() {
@@ -97,11 +133,32 @@ func CacheGetUserGroup(ctx context.Context, id int) (group string, err error) {
 	return group, nil
 }
 
+// CacheGetUsername retrieves a username by user ID, using Redis cache when available.
+// On cache miss it falls back to GetUsernameById and populates the cache.
+// Empty usernames (non-existent users) are not cached to allow retry on the next request.
+func CacheGetUsername(ctx context.Context, id int) string {
+	lg := logger.FromContext(ctx)
+	if !common.IsRedisEnabled() {
+		return GetUsernameById(id)
+	}
+	username, err := common.RedisGet(ctx, fmt.Sprintf("user_username:%d", id))
+	if err != nil {
+		username = GetUsernameById(id)
+		if username == "" {
+			return username
+		}
+		if setErr := common.RedisSet(ctx, fmt.Sprintf("user_username:%d", id), username, time.Duration(UserId2UsernameCacheSeconds)*time.Second); setErr != nil {
+			lg.Warn("Redis set username failed, continuing without cache", zap.Int("user_id", id), zap.Error(setErr))
+		}
+	}
+	return username
+}
+
 func fetchAndUpdateUserQuota(ctx context.Context, id int) (quota int64, err error) {
 	lg := logger.FromContext(ctx)
 	quota, err = GetUserQuota(id)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrap(err, "get user quota")
 	}
 	err = common.RedisSet(ctx, fmt.Sprintf("user_quota:%d", id), fmt.Sprintf("%d", quota), time.Duration(UserId2QuotaCacheSeconds)*time.Second)
 	if err != nil {
@@ -134,9 +191,9 @@ func CacheUpdateUserQuota(ctx context.Context, id int) error {
 	if !common.IsRedisEnabled() {
 		return nil
 	}
-	quota, err := CacheGetUserQuota(ctx, id)
+	quota, err := GetUserQuota(id)
 	if err != nil {
-		return errors.Wrapf(err, "get cached quota for user %d", id)
+		return errors.Wrapf(err, "get database quota for user %d", id)
 	}
 	err = common.RedisSet(ctx, fmt.Sprintf("user_quota:%d", id), fmt.Sprintf("%d", quota), time.Duration(UserId2QuotaCacheSeconds)*time.Second)
 	if err != nil {
@@ -280,8 +337,8 @@ func InitChannelCache() {
 
 	// Iterate over channels that are confirmed to be enabled
 	for _, channel := range channels { // channels are already filtered by status = ChannelStatusEnabled
-		channelGroups := strings.Split(channel.Group, ",")
-		channelModels := strings.Split(channel.Models, ",")
+		channelGroups := channel.GetGroupNames()
+		channelModels := channel.GetSupportedModelNames()
 
 		for _, groupName := range channelGroups {
 			if _, ok := newGroup2model2channels[groupName]; !ok {
@@ -348,7 +405,7 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 		return GetRandomSatisfiedChannel(group, model, ignoreFirstPriority)
 	}
 	channelSyncLock.RLock()
-	// It's important to make a copy if we're going to modify or iterate outside lock,
+	// It is important to make a copy if we are going to modify or iterate outside lock,
 	// or ensure operations are safe. Here, we are just reading.
 	channelsFromCache := group2model2channels[group][model]
 
@@ -367,12 +424,8 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 	}
 
 	// Make a copy to safely work with outside the lock for selection logic
-	candidateChannels := make([]*Channel, 0, len(channelsFromCache))
-	for _, ch := range channelsFromCache {
-		if model == "" || ch.SupportsModel(model) {
-			candidateChannels = append(candidateChannels, ch)
-		}
-	}
+	candidateChannels := make([]*Channel, len(channelsFromCache))
+	copy(candidateChannels, channelsFromCache)
 	channelSyncLock.RUnlock()
 
 	if len(candidateChannels) == 0 {
@@ -423,11 +476,12 @@ func CacheGetRandomSatisfiedChannel(group string, model string, ignoreFirstPrior
 		}
 	}
 
-	idx := rand.Intn(endIdx)
-	if ignoreFirstPriority {
-		if endIdx < len(candidateChannels) { // which means there are more than one priority
-			idx = random.RandRange(endIdx, len(candidateChannels))
-		} else {
+	var idx int
+	if ignoreFirstPriority && endIdx < len(candidateChannels) {
+		idx = random.RandRange(endIdx, len(candidateChannels))
+	} else {
+		idx = rand.Intn(endIdx)
+		if ignoreFirstPriority {
 			// All channels have the same highest priority, or only one priority level exists.
 			// If ignoreFirstPriority is true, and we only have one priority level,
 			// it means we cannot satisfy "ignoreFirstPriority".
@@ -496,14 +550,6 @@ func CacheGetRandomSatisfiedChannelExcluding(group string, model string, ignoreF
 		candidateChannels = LargerMaxTokensSizeChannels
 	}
 	channelSyncLock.RUnlock()
-
-	filtered := make([]*Channel, 0, len(candidateChannels))
-	for _, ch := range candidateChannels {
-		if model == "" || ch.SupportsModel(model) {
-			filtered = append(filtered, ch)
-		}
-	}
-	candidateChannels = filtered
 
 	if len(candidateChannels) == 0 {
 		return nil, errors.Errorf("no available channels support model %s after exclusions", model)

@@ -10,12 +10,12 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/random"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai_compatible"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/random"
+	"github.com/Laisky/one-api/common/render"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/adaptor/openai_compatible"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 type chatToResponseStreamBridge struct {
@@ -287,7 +287,8 @@ func (h *chatToResponseStreamBridge) ensureInitialized(c *gin.Context, chunk *op
 		Object:             "response",
 		CreatedAt:          h.createdAt,
 		Status:             "in_progress",
-		Model:              h.model,
+		Model:              userVisibleModelName(h.meta, ""),
+		Output:             make([]openai.OutputItem, 0),
 		Instructions:       h.original.Instructions,
 		MaxOutputTokens:    h.original.MaxOutputTokens,
 		Metadata:           h.original.Metadata,
@@ -304,6 +305,9 @@ func (h *chatToResponseStreamBridge) ensureInitialized(c *gin.Context, chunk *op
 		User:               h.original.User,
 	}
 
+	if response.Model == "" {
+		response.Model = h.model
+	}
 	if response.Model == "" {
 		response.Model = h.original.Model
 	}
@@ -569,12 +573,15 @@ func (h *chatToResponseStreamBridge) currentToolCallSnapshots() []openai.Respons
 }
 
 func (h *chatToResponseStreamBridge) buildFinalResponse(status string, outputs []openai.OutputItem, requiredAction *openai.ResponseAPIRequiredAction) *openai.ResponseAPIResponse {
+	if outputs == nil {
+		outputs = make([]openai.OutputItem, 0)
+	}
 	response := &openai.ResponseAPIResponse{
 		Id:                 h.responseID,
 		Object:             "response",
 		CreatedAt:          h.createdAt,
 		Status:             status,
-		Model:              h.model,
+		Model:              userVisibleModelName(h.meta, ""),
 		Output:             outputs,
 		Usage:              h.usage,
 		Instructions:       h.original.Instructions,
@@ -594,6 +601,9 @@ func (h *chatToResponseStreamBridge) buildFinalResponse(status string, outputs [
 		RequiredAction:     requiredAction,
 	}
 
+	if response.Model == "" {
+		response.Model = h.model
+	}
 	if response.Model == "" {
 		response.Model = h.meta.ActualModelName
 	}

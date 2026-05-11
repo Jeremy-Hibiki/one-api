@@ -1,8 +1,8 @@
-import { api } from "@/lib/api";
-import { useAuthStore } from "@/lib/stores/auth";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { ModelRow, TokenRow, UserOption, UserRow } from "../types";
+import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/stores/auth';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { ModelRow, TokenRow, ToolRow, ToolTokenRow, ToolUserRow, UserOption, UserRow } from '../types';
 
 export const useDashboardData = () => {
   const { t } = useTranslation();
@@ -18,20 +18,23 @@ export const useDashboardData = () => {
 
   const [fromDate, setFromDate] = useState(fmt(last7));
   const [toDate, setToDate] = useState(fmt(today));
-  const [dashUser, setDashUser] = useState<string>("all");
+  const [dashUser, setDashUser] = useState<string>('all');
   const [userOptions, setUserOptions] = useState<UserOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
-  const [dateError, setDateError] = useState<string>("");
+  const [dateError, setDateError] = useState<string>('');
 
   const [rows, setRows] = useState<ModelRow[]>([]);
   const [userRows, setUserRows] = useState<UserRow[]>([]);
   const [tokenRows, setTokenRows] = useState<TokenRow[]>([]);
+  const [toolRows, setToolRows] = useState<ToolRow[]>([]);
+  const [toolUserRows, setToolUserRows] = useState<ToolUserRow[]>([]);
+  const [toolTokenRows, setToolTokenRows] = useState<ToolTokenRow[]>([]);
 
   // Date validation functions
   const getMaxDate = () => {
     const today = new Date();
-    return today.toISOString().split("T")[0];
+    return today.toISOString().split('T')[0];
   };
 
   const getMinDate = () => {
@@ -39,18 +42,18 @@ export const useDashboardData = () => {
       // Admin users can go back 1 year
       const oneYearAgo = new Date();
       oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-      return oneYearAgo.toISOString().split("T")[0];
+      return oneYearAgo.toISOString().split('T')[0];
     } else {
       // Regular users can only go back 7 days from today
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      return sevenDaysAgo.toISOString().split("T")[0];
+      return sevenDaysAgo.toISOString().split('T')[0];
     }
   };
 
   // Date validation
   const validateDateRange = (from: string, to: string): string => {
-    if (!from || !to) return "";
+    if (!from || !to) return '';
 
     const fromDate = new Date(from);
     const toDate = new Date(to);
@@ -58,36 +61,30 @@ export const useDashboardData = () => {
     const minDate = new Date(getMinDate());
 
     if (fromDate > toDate) {
-      return t("dashboard.errors.range_order");
+      return t('dashboard.errors.range_order');
     }
 
     if (toDate > today) {
-      return t("dashboard.errors.future");
+      return t('dashboard.errors.future');
     }
 
     if (fromDate < minDate) {
-      return isAdmin
-        ? t("dashboard.errors.too_old_admin")
-        : t("dashboard.errors.too_old_user");
+      return isAdmin ? t('dashboard.errors.too_old_admin') : t('dashboard.errors.too_old_user');
     }
 
-    const daysDiff = Math.ceil(
-      (toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60 * 24)
-    );
+    const daysDiff = Math.ceil((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60 * 24));
     const maxDays = isAdmin ? 365 : 7;
 
     if (daysDiff > maxDays) {
-      return isAdmin
-        ? t("dashboard.errors.range_limit_admin")
-        : t("dashboard.errors.range_limit_user");
+      return isAdmin ? t('dashboard.errors.range_limit_admin') : t('dashboard.errors.range_limit_user');
     }
 
-    return "";
+    return '';
   };
 
   const loadUsers = async () => {
     if (!isAdmin) return;
-    const res = await api.get("/api/user/dashboard/users");
+    const res = await api.get('/api/user/dashboard/users');
     if (res.data?.success) {
       setUserOptions(res.data.data || []);
     }
@@ -111,15 +108,15 @@ export const useDashboardData = () => {
     abortControllerRef.current = abortController;
 
     setLoading(true);
-    setDateError("");
+    setDateError('');
     try {
       const params = new URLSearchParams();
-      params.set("from_date", fromDate);
-      params.set("to_date", toDate);
+      params.set('from_date', fromDate);
+      params.set('to_date', toDate);
       if (isAdmin) {
-        params.set("user_id", dashUser || "all");
+        params.set('user_id', dashUser || 'all');
       }
-      const res = await api.get("/api/user/dashboard?" + params.toString(), {
+      const res = await api.get('/api/user/dashboard?' + params.toString(), {
         signal: abortController.signal,
       });
 
@@ -133,14 +130,20 @@ export const useDashboardData = () => {
         const logs = data?.logs || data || [];
         const userLogs = data?.user_logs || [];
         const tokenLogs = data?.token_logs || [];
+        const toolLogs = data?.tool_logs || [];
+        const toolUserLogs = data?.tool_user_logs || [];
+        const toolTokenLogs = data?.tool_token_logs || [];
         setRows(
           logs.map((row: any) => ({
             day: row.Day,
             model_name: row.ModelName,
-            request_count: row.RequestCount,
-            quota: row.Quota,
-            prompt_tokens: row.PromptTokens,
-            completion_tokens: row.CompletionTokens,
+            request_count: Number(row.RequestCount ?? 0),
+            quota: Number(row.Quota ?? 0),
+            prompt_tokens: Number(row.PromptTokens ?? 0),
+            completion_tokens: Number(row.CompletionTokens ?? 0),
+            cached_prompt_tokens: Number(row.CachedPromptTokens ?? 0),
+            cache_hit_count: Number(row.CacheHitCount ?? 0),
+            cache_hit_quota: Number(row.CacheHitQuota ?? 0),
           }))
         );
         setUserRows(
@@ -148,10 +151,13 @@ export const useDashboardData = () => {
             day: row.Day,
             username: row.Username,
             user_id: Number(row.UserId ?? 0),
-            request_count: row.RequestCount,
-            quota: row.Quota,
-            prompt_tokens: row.PromptTokens,
-            completion_tokens: row.CompletionTokens,
+            request_count: Number(row.RequestCount ?? 0),
+            quota: Number(row.Quota ?? 0),
+            prompt_tokens: Number(row.PromptTokens ?? 0),
+            completion_tokens: Number(row.CompletionTokens ?? 0),
+            cached_prompt_tokens: Number(row.CachedPromptTokens ?? 0),
+            cache_hit_count: Number(row.CacheHitCount ?? 0),
+            cache_hit_quota: Number(row.CacheHitQuota ?? 0),
           }))
         );
         setTokenRows(
@@ -160,31 +166,67 @@ export const useDashboardData = () => {
             username: row.Username,
             token_name: row.TokenName,
             user_id: Number(row.UserId ?? 0),
-            request_count: row.RequestCount,
-            quota: row.Quota,
-            prompt_tokens: row.PromptTokens,
-            completion_tokens: row.CompletionTokens,
+            request_count: Number(row.RequestCount ?? 0),
+            quota: Number(row.Quota ?? 0),
+            prompt_tokens: Number(row.PromptTokens ?? 0),
+            completion_tokens: Number(row.CompletionTokens ?? 0),
+            cached_prompt_tokens: Number(row.CachedPromptTokens ?? 0),
+            cache_hit_count: Number(row.CacheHitCount ?? 0),
+            cache_hit_quota: Number(row.CacheHitQuota ?? 0),
+          }))
+        );
+        setToolRows(
+          toolLogs.map((row: any) => ({
+            day: row.Day,
+            tool_name: row.ToolName,
+            request_count: Number(row.RequestCount ?? 0),
+            quota: Number(row.Quota ?? 0),
+          }))
+        );
+        setToolUserRows(
+          toolUserLogs.map((row: any) => ({
+            day: row.Day,
+            username: row.Username,
+            user_id: Number(row.UserId ?? 0),
+            request_count: Number(row.RequestCount ?? 0),
+            quota: Number(row.Quota ?? 0),
+          }))
+        );
+        setToolTokenRows(
+          toolTokenLogs.map((row: any) => ({
+            day: row.Day,
+            username: row.Username,
+            token_name: row.TokenName,
+            user_id: Number(row.UserId ?? 0),
+            request_count: Number(row.RequestCount ?? 0),
+            quota: Number(row.Quota ?? 0),
           }))
         );
 
         setLastUpdated(Math.floor(Date.now() / 1000));
-        setDateError("");
+        setDateError('');
       } else {
-        setDateError(message || t("dashboard.errors.fetch_failed"));
+        setDateError(message || t('dashboard.errors.fetch_failed'));
         setRows([]);
         setUserRows([]);
         setTokenRows([]);
+        setToolRows([]);
+        setToolUserRows([]);
+        setToolTokenRows([]);
       }
     } catch (error: any) {
       // Ignore abort errors
-      if (error.name === "AbortError" || error.name === "CanceledError") {
+      if (error.name === 'AbortError' || error.name === 'CanceledError') {
         return;
       }
-      console.error("Failed to fetch dashboard data:", error);
-      setDateError(t("dashboard.errors.fetch_failed"));
+      console.error('Failed to fetch dashboard data:', error);
+      setDateError(t('dashboard.errors.fetch_failed'));
       setRows([]);
       setUserRows([]);
       setTokenRows([]);
+      setToolRows([]);
+      setToolUserRows([]);
+      setToolTokenRows([]);
     } finally {
       // Only clear loading if this request wasn't aborted
       if (!abortController.signal.aborted) {
@@ -198,12 +240,12 @@ export const useDashboardData = () => {
     loadStats();
   }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const applyPreset = (preset: "today" | "7d" | "30d") => {
+  const applyPreset = (preset: 'today' | '7d' | '30d') => {
     const today = new Date();
     const start = new Date(today);
-    if (preset === "today") start.setDate(today.getDate());
-    if (preset === "7d") start.setDate(today.getDate() - 6);
-    if (preset === "30d") start.setDate(today.getDate() - 29);
+    if (preset === 'today') start.setDate(today.getDate());
+    if (preset === '7d') start.setDate(today.getDate() - 6);
+    if (preset === '30d') start.setDate(today.getDate() - 29);
 
     const newFromDate = fmt(start);
     const newToDate = fmt(today);
@@ -227,12 +269,12 @@ export const useDashboardData = () => {
   };
 
   // Refactored applyPreset to trigger fetch
-  const applyPresetAndFetch = async (preset: "today" | "7d" | "30d") => {
+  const applyPresetAndFetch = async (preset: 'today' | '7d' | '30d') => {
     const today = new Date();
     const start = new Date(today);
-    if (preset === "today") start.setDate(today.getDate());
-    if (preset === "7d") start.setDate(today.getDate() - 6);
-    if (preset === "30d") start.setDate(today.getDate() - 29);
+    if (preset === 'today') start.setDate(today.getDate());
+    if (preset === '7d') start.setDate(today.getDate() - 6);
+    if (preset === '30d') start.setDate(today.getDate() - 29);
 
     const newFromDate = fmt(start);
     const newToDate = fmt(today);
@@ -264,6 +306,9 @@ export const useDashboardData = () => {
     rows,
     userRows,
     tokenRows,
+    toolRows,
+    toolUserRows,
+    toolTokenRows,
     loadStats,
     applyPreset: applyPresetAndFetch,
     getMinDate,

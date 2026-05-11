@@ -16,21 +16,21 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	relayadaptor "github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/adaptor/replicate"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay"
+	relayadaptor "github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/adaptor/replicate"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 func getImageRequest(c *gin.Context, _ int) (*relaymodel.ImageRequest, error) {
@@ -323,8 +323,7 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		return openai.ErrorWrapper(errors.Errorf("invalid api type: %d", meta.APIType), "invalid_api_type", http.StatusBadRequest)
 	}
 
-	resolvedConfig, _ := pricing.ResolveModelConfig(imageRequest.Model, channelModelConfigs, adaptor)
-	imagePricingCfg := resolvedConfig.Image
+	imagePricingCfg, _ := pricing.ResolveImagePricing(imageRequest.Model, channelModelConfigs, adaptor)
 	applyImageDefaults(imageRequest, imagePricingCfg)
 
 	bizErr := validateImageRequest(imageRequest, meta, imagePricingCfg)
@@ -340,6 +339,7 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	imageModel := imageRequest.Model
 	// Convert the original image model
 	imageRequest.Model = metalib.GetMappedModelName(imageRequest.Model, billingratio.ImageOriginModelName)
+	visibleModelName := userVisibleModelName(meta, imageRequest.Model)
 	c.Set(ctxkey.ResponseFormat, imageRequest.ResponseFormat)
 
 	var requestBody io.Reader
@@ -413,13 +413,8 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 
 	// Determine if this model is billed per image (Image.PricePerImageUsd) or per token (Ratio)
 	imagePriceUsd := 0.0
-	if resolvedConfig.Image != nil {
-		imagePriceUsd = resolvedConfig.Image.PricePerImageUsd
-	}
-	if imagePriceUsd == 0 {
-		if pm, ok := pricing.GetGlobalModelPricing()[imageModel]; ok && pm.Image != nil {
-			imagePriceUsd = pm.Image.PricePerImageUsd
-		}
+	if imagePricingCfg != nil {
+		imagePriceUsd = imagePricingCfg.PricePerImageUsd
 	}
 
 	ratio := modelRatio * groupRatio
@@ -453,7 +448,17 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		if err := model.PreConsumeTokenQuota(ctx, meta.TokenId, preConsumedQuota); err != nil {
 			return openai.ErrorWrapper(err, "pre_consume_failed", http.StatusInternalServerError)
 		}
-		// Record provisional request cost so user-cancel before upstream usage still gets tracked
+
+		// Billing audit safety net: track pre-consumed quota for audit reconciliation
+		markPreConsumed(c, preConsumedQuota)
+		defer billingAuditSafetyNet(c)
+
+		// Record provisional consume log immediately so that every pre-consume
+		// has an audit trail in the logs table.
+		provisionalLogId := recordProvisionalLog(c, meta, visibleModelName, preConsumedQuota)
+		c.Set(ctxkey.ProvisionalLogId, provisionalLogId)
+
+		// Record provisional request cost
 		quotaId := c.GetInt(ctxkey.Id)
 		requestId := c.GetString(ctxkey.RequestId)
 		if err := model.UpdateUserRequestCostQuotaByRequestID(quotaId, requestId, preConsumedQuota); err != nil {
@@ -466,8 +471,17 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	if err != nil {
 		// ErrorWrapper will log the error, so we don't need to log it here
 		// Refund any pre-consumed quota if request failed
+		markBillingReconciled(c)
 		if preConsumedQuota > 0 {
-			_ = model.PostConsumeTokenQuota(ctx, meta.TokenId, -preConsumedQuota)
+			if shouldSkipPreConsumedRefund(c) {
+				lg.Warn("skip pre-consumed refund to prevent underbilling",
+					zap.Int64("pre_consumed_quota", preConsumedQuota),
+					zap.Int("token_id", meta.TokenId),
+					zap.String("reason", "do_request_failed"),
+				)
+			} else {
+				_ = model.PostConsumeTokenQuota(ctx, meta.TokenId, -preConsumedQuota)
+			}
 		}
 		return openai.ErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
@@ -476,6 +490,7 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 	// Capture IDs from gin context before switching to a background context in defer
 	requestId := c.GetString(ctxkey.RequestId)
 	traceId := tracing.GetTraceID(c)
+	provLogID := c.GetInt(ctxkey.ProvisionalLogId)
 	defer func() {
 		bgCtx, cancel := context.WithTimeout(gmw.BackgroundCtx(c), time.Minute)
 		defer cancel()
@@ -484,8 +499,25 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 			resp.StatusCode != http.StatusCreated && // replicate returns 201
 			resp.StatusCode != http.StatusOK {
 			// Refund pre-consumed quota when upstream not successful
+			markBillingReconciled(c)
 			if preConsumedQuota > 0 {
-				_ = model.PostConsumeTokenQuota(bgCtx, meta.TokenId, -preConsumedQuota)
+				if shouldSkipPreConsumedRefund(c) {
+					lg.Warn("skip pre-consumed refund to prevent underbilling",
+						zap.Int64("pre_consumed_quota", preConsumedQuota),
+						zap.Int("token_id", meta.TokenId),
+						zap.String("reason", "upstream_http_error"),
+					)
+				} else {
+					_ = model.PostConsumeTokenQuota(bgCtx, meta.TokenId, -preConsumedQuota)
+				}
+			}
+			// Reconcile provisional log to 0 on upstream error
+			if provLogID > 0 {
+				if err := model.ReconcileConsumeLog(bgCtx, provLogID, 0,
+					"upstream error, refunded", 0, 0, 0, nil); err != nil {
+					lg.Warn("failed to reconcile provisional log on upstream error",
+						zap.Error(err), zap.Int("provisional_log_id", provLogID))
+				}
 			}
 			// Reconcile provisional record to 0
 			if err := model.UpdateUserRequestCostQuotaByRequestID(
@@ -498,7 +530,8 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 			return
 		}
 
-		// Apply delta if we pre-consumed; otherwise apply full usage
+		// Post-billing: reconcile pre-consumed quota with actual usage
+		markBillingReconciled(c)
 		quotaDelta := usedQuota
 		if preConsumedQuota > 0 {
 			quotaDelta = usedQuota - preConsumedQuota
@@ -517,8 +550,8 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 		if usedQuota >= 0 {
 			tokenName := c.GetString(ctxkey.TokenName)
 			logContent := formatImageBillingLog(imageBillingLogParams{
-				OriginModel:     meta.OriginModelName,
-				Model:           imageModel,
+				OriginModel:     visibleModelName,
+				Model:           visibleModelName,
 				Size:            imageRequest.Size,
 				Quality:         imageRequest.Quality,
 				RequestCount:    requestedCount,
@@ -532,20 +565,43 @@ func RelayImageHelper(c *gin.Context, relayMode int) *relaymodel.ErrorWithStatus
 				GroupRatio:      groupRatio,
 				ModelRatio:      modelRatio,
 			})
-			// Record log with RequestId/TraceId set directly on the log
-			model.RecordConsumeLog(bgCtx, &model.Log{
-				UserId:           meta.UserId,
-				ChannelId:        meta.ChannelId,
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				ModelName:        imageRequest.Model,
-				TokenName:        tokenName,
-				Quota:            int(usedQuota),
-				Content:          logContent,
-				ElapsedTime:      helper.CalcElapsedTime(meta.StartTime),
-				RequestId:        requestId,
-				TraceId:          traceId,
-			})
+			// Reconcile provisional log if one exists, otherwise create a new log entry.
+			elapsedTime := helper.CalcElapsedTime(meta.StartTime)
+			if provLogID > 0 {
+				if err := model.ReconcileConsumeLog(bgCtx, provLogID, usedQuota,
+					logContent, promptTokens, completionTokens,
+					elapsedTime, nil); err != nil {
+					lg.Error("failed to reconcile provisional log, falling back to new log entry",
+						zap.Error(err), zap.Int("provisional_log_id", provLogID))
+					model.RecordConsumeLog(bgCtx, &model.Log{
+						UserId:           meta.UserId,
+						ChannelId:        meta.ChannelId,
+						PromptTokens:     promptTokens,
+						CompletionTokens: completionTokens,
+						ModelName:        visibleModelName,
+						TokenName:        tokenName,
+						Quota:            int(usedQuota),
+						Content:          logContent,
+						ElapsedTime:      elapsedTime,
+						RequestId:        requestId,
+						TraceId:          traceId,
+					})
+				}
+			} else {
+				model.RecordConsumeLog(bgCtx, &model.Log{
+					UserId:           meta.UserId,
+					ChannelId:        meta.ChannelId,
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					ModelName:        visibleModelName,
+					TokenName:        tokenName,
+					Quota:            int(usedQuota),
+					Content:          logContent,
+					ElapsedTime:      elapsedTime,
+					RequestId:        requestId,
+					TraceId:          traceId,
+				})
+			}
 			model.UpdateUserUsedQuotaAndRequestCount(meta.UserId, usedQuota)
 			channelId := c.GetInt(ctxkey.ChannelId)
 			model.UpdateChannelUsedQuota(channelId, usedQuota)
@@ -640,9 +696,24 @@ var gptImageTokenBucketPrices = map[string]gptImageTokenBucketPricing{
 		cachedInputImageUSD: 2.0,
 		outputImageUSD:      32.0,
 	},
+	// https://platform.openai.com/docs/models/gpt-image-2
+	"gpt-image-2": {
+		inputTextUSD:        5.0,
+		cachedInputTextUSD:  1.25,
+		inputImageUSD:       8.0,
+		cachedInputImageUSD: 2.0,
+		outputImageUSD:      30.0,
+	},
+	"gpt-image-2-2026-04-21": {
+		inputTextUSD:        5.0,
+		cachedInputTextUSD:  1.25,
+		inputImageUSD:       8.0,
+		cachedInputImageUSD: 2.0,
+		outputImageUSD:      30.0,
+	},
 }
 
-// computeGptImageTokenQuota calculates quota for gpt-image-1 family models using five billing buckets:
+// computeGptImageTokenQuota calculates quota for GPT image family models using five billing buckets:
 // input text, cached input text, input image, cached input image, and output image tokens.
 // Prices are expressed in USD per 1M tokens and multiplied by the groupRatio (quota multiplier) before returning quota units.
 func computeGptImageTokenQuota(modelName string, usage *relaymodel.Usage, groupRatio float64) float64 {
@@ -707,7 +778,7 @@ func computeImageUsageQuota(modelName string, usage *relaymodel.Usage, groupRati
 		return 0
 	}
 	switch modelName {
-	case "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest", "gpt-image-1.5", "gpt-image-1.5-2025-12-16":
+	case "gpt-image-1", "gpt-image-1-mini", "chatgpt-image-latest", "gpt-image-1.5", "gpt-image-1.5-2025-12-16", "gpt-image-2", "gpt-image-2-2026-04-21":
 		return computeGptImageTokenQuota(modelName, usage, groupRatio)
 	default:
 		// Add more models here as they publish token pricing for image buckets
@@ -815,7 +886,7 @@ func computeLegacyImageTokenQuota(modelName string, usage *relaymodel.Usage, gro
 			quota *= groupRatio
 		}
 		return quota
-	case "chatgpt-image-latest", "gpt-image-1.5", "gpt-image-1.5-2025-12-16":
+	case "chatgpt-image-latest", "gpt-image-1.5", "gpt-image-1.5-2025-12-16", "gpt-image-2", "gpt-image-2-2026-04-21":
 		textTokens := usage.PromptTokensDetails.TextTokens
 		if textTokens < 0 {
 			textTokens = 0

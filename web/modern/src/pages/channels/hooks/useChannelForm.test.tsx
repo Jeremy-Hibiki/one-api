@@ -1,14 +1,14 @@
-import { api } from "@/lib/api";
-import { renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useChannelForm } from "./useChannelForm";
+import { api } from '@/lib/api';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useChannelForm } from './useChannelForm';
 
 // Mocks
-vi.mock("@/components/ui/notifications", () => ({
+vi.mock('@/components/ui/notifications', () => ({
   useNotifications: () => ({ notify: vi.fn() }),
 }));
 
-vi.mock("@/lib/api", () => ({
+vi.mock('@/lib/api', () => ({
   api: {
     get: vi.fn(),
     post: vi.fn(),
@@ -16,70 +16,71 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-vi.mock("react-router-dom", () => ({
+vi.mock('react-router-dom', () => ({
   useNavigate: () => vi.fn(),
-  useParams: () => ({ id: "1" }), // Default to edit mode
+  useParams: () => ({ id: '1' }), // Default to edit mode
 }));
 
-vi.mock("react-i18next", () => ({
+vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
 const mockApiGet = vi.mocked(api.get);
+const mockApiPut = vi.mocked(api.put);
 
-describe("useChannelForm", () => {
+describe('useChannelForm', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("should not cause infinite loop when loading channel", async () => {
+  it('should not cause infinite loop when loading channel', async () => {
     // Mock responses
     mockApiGet.mockImplementation((url) => {
-      if (url.startsWith("/api/channel/1")) {
+      if (url.startsWith('/api/channel/1')) {
         return Promise.resolve({
           data: {
             success: true,
             data: {
               id: 1,
               type: 1,
-              name: "Test Channel",
-              models: "gpt-3.5-turbo",
-              group: "default",
-              config: "{}",
-              tooling: "{}",
+              name: 'Test Channel',
+              models: 'gpt-3.5-turbo',
+              group: 'default',
+              config: '{}',
+              tooling: '{}',
             },
           },
         });
       }
-      if (url.startsWith("/api/models")) {
+      if (url.startsWith('/api/models')) {
         return Promise.resolve({
           data: {
             success: true,
-            data: { 1: ["gpt-3.5-turbo"] },
+            data: { 1: ['gpt-3.5-turbo'] },
           },
         });
       }
-      if (url.startsWith("/api/option/")) {
+      if (url.startsWith('/api/option/')) {
         return Promise.resolve({
           data: {
             success: true,
-            data: [{ key: "AvailableGroups", value: "vip" }],
+            data: [{ key: 'AvailableGroups', value: 'vip' }],
           },
         });
       }
-      if (url.startsWith("/api/channel/default-pricing")) {
+      if (url.startsWith('/api/channel/default-pricing')) {
         return Promise.resolve({
           data: {
             success: true,
-            data: { model_configs: "{}", tooling: "{}" },
+            data: { model_configs: '{}', tooling: '{}' },
           },
         });
       }
-      if (url.startsWith("/api/channel/metadata")) {
+      if (url.startsWith('/api/channel/metadata')) {
         return Promise.resolve({
           data: {
             success: true,
-            data: { default_base_url: "https://api.openai.com" },
+            data: { default_base_url: 'https://api.openai.com' },
           },
         });
       }
@@ -98,28 +99,161 @@ describe("useChannelForm", () => {
 
     // Check call counts
     // loadChannel should be called once
-    const channelCalls = mockApiGet.mock.calls.filter((call) =>
-      call[0].startsWith("/api/channel/1")
-    ).length;
+    const channelCalls = mockApiGet.mock.calls.filter((call) => call[0].startsWith('/api/channel/1')).length;
     expect(channelCalls).toBe(1);
 
     // loadModelsCatalog should be called once
-    const modelsCalls = mockApiGet.mock.calls.filter((call) =>
-      call[0].startsWith("/api/models")
-    ).length;
+    const modelsCalls = mockApiGet.mock.calls.filter((call) => call[0].startsWith('/api/models')).length;
     expect(modelsCalls).toBe(1);
 
     // loadGroups should be called once
-    const groupsCalls = mockApiGet.mock.calls.filter((call) =>
-      call[0].startsWith("/api/option/")
-    ).length;
+    const groupsCalls = mockApiGet.mock.calls.filter((call) => call[0].startsWith('/api/option/')).length;
     expect(groupsCalls).toBe(1);
 
     // default pricing might be called multiple times but should settle
-    const pricingCalls = mockApiGet.mock.calls.filter((call) =>
-      call[0].startsWith("/api/channel/default-pricing")
-    ).length;
+    const pricingCalls = mockApiGet.mock.calls.filter((call) => call[0].startsWith('/api/channel/default-pricing')).length;
     expect(pricingCalls).toBeGreaterThanOrEqual(1);
     expect(pricingCalls).toBeLessThan(5); // Arbitrary limit, but definitely not infinite
+  });
+
+  it('should parse and submit hidden models', async () => {
+    mockApiGet.mockImplementation((url) => {
+      if (url.startsWith('/api/channel/1')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              id: 1,
+              type: 1,
+              name: 'Test Channel',
+              models: 'gpt-4o,public-alias',
+              hidden_models: '["gpt-4o"]',
+              group: 'default',
+              config: '{}',
+              tooling: '{}',
+            },
+          },
+        });
+      }
+      if (url.startsWith('/api/models')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: { 1: ['gpt-4o', 'public-alias'] },
+          },
+        });
+      }
+      if (url.startsWith('/api/option/')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: [{ key: 'AvailableGroups', value: 'vip' }],
+          },
+        });
+      }
+      if (url.startsWith('/api/channel/default-pricing')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: { model_configs: '{}', tooling: '{}' },
+          },
+        });
+      }
+      if (url.startsWith('/api/channel/metadata')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: { default_base_url: 'https://api.openai.com' },
+          },
+        });
+      }
+      return Promise.resolve({ data: { success: false } });
+    });
+    mockApiPut.mockResolvedValue({ data: { success: true, message: '' } });
+
+    const { result } = renderHook(() => useChannelForm());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.form.getValues('hidden_models')).toEqual(['gpt-4o']);
+
+    await act(async () => {
+      await result.current.onSubmit({
+        ...result.current.form.getValues(),
+        hidden_models: ['gpt-4o', 'hidden-b'],
+      });
+    });
+
+    expect(mockApiPut).toHaveBeenCalledWith(
+      '/api/channel/',
+      expect.objectContaining({
+        id: 1,
+        hidden_models: '["gpt-4o","hidden-b"]',
+      })
+    );
+  });
+
+  it('blocks save when Model Mapping keys are missing from Supported Models until confirmed', async () => {
+    mockApiGet.mockImplementation((url) => {
+      if (url.startsWith('/api/channel/1')) {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              id: 1,
+              type: 1,
+              name: 'Test Channel',
+              models: 'gpt-4o',
+              group: 'default',
+              config: '{}',
+              tooling: '{}',
+            },
+          },
+        });
+      }
+      if (url.startsWith('/api/models')) {
+        return Promise.resolve({ data: { success: true, data: { 1: ['gpt-4o'] } } });
+      }
+      if (url.startsWith('/api/option/')) {
+        return Promise.resolve({ data: { success: true, data: [] } });
+      }
+      if (url.startsWith('/api/channel/default-pricing')) {
+        return Promise.resolve({ data: { success: true, data: { model_configs: '{}', tooling: '{}' } } });
+      }
+      if (url.startsWith('/api/channel/metadata')) {
+        return Promise.resolve({ data: { success: true, data: { default_base_url: 'https://api.openai.com' } } });
+      }
+      return Promise.resolve({ data: { success: false } });
+    });
+    mockApiPut.mockResolvedValue({ data: { success: true, message: '' } });
+
+    const { result } = renderHook(() => useChannelForm());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    // First attempt: mapping has a source alias not in Supported Models AND an unknown target.
+    await act(async () => {
+      await result.current.onSubmit({
+        ...result.current.form.getValues(),
+        model_mapping: '{"ghost-alias":"gpt-4o","gpt-4o":"mystery-upstream"}',
+      });
+    });
+
+    expect(mockApiPut).not.toHaveBeenCalled();
+    expect(result.current.pendingSaveConfirmation).not.toBeNull();
+    expect(result.current.pendingSaveConfirmation?.unreachableMappingKeys).toEqual(['ghost-alias']);
+    expect(result.current.pendingSaveConfirmation?.unknownMappingTargets).toEqual([{ source: 'gpt-4o', target: 'mystery-upstream' }]);
+
+    // Confirming the dialog should perform the save.
+    await act(async () => {
+      await result.current.confirmSave();
+    });
+
+    expect(mockApiPut).toHaveBeenCalledTimes(1);
+    expect(result.current.pendingSaveConfirmation).toBeNull();
   });
 });

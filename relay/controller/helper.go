@@ -10,22 +10,24 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/constant/role"
-	"github.com/songquanpeng/one-api/relay/controller/validator"
-	"github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	quotautil "github.com/songquanpeng/one-api/relay/quota"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/gemini"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	vertexaiadaptor "github.com/Laisky/one-api/relay/adaptor/vertexai"
+	"github.com/Laisky/one-api/relay/apitype"
+	"github.com/Laisky/one-api/relay/billing"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/constant/role"
+	"github.com/Laisky/one-api/relay/controller/validator"
+	"github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	quotautil "github.com/Laisky/one-api/relay/quota"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 func getAndValidateTextRequest(c *gin.Context, relayMode int) (*relaymodel.GeneralOpenAIRequest, error) {
@@ -119,10 +121,106 @@ func getPreConsumedQuota(textRequest *relaymodel.GeneralOpenAIRequest, promptTok
 	return int64(promptQuota + completionQuota)
 }
 
-func preConsumeQuota(c *gin.Context, textRequest *relaymodel.GeneralOpenAIRequest, promptTokens int, ratio float64, completionRatio float64, meta *meta.Meta) (int64, *relaymodel.ErrorWithStatusCode) {
+// estimatePromptUsage computes the prompt-side usage snapshot used for quota reservation.
+// Parameters: c is the current request context, meta contains routing information, and textRequest is the validated upstream payload.
+// Returns: the prompt usage snapshot or an API error when a safe estimate cannot be produced.
+func estimatePromptUsage(c *gin.Context, meta *meta.Meta, textRequest *relaymodel.GeneralOpenAIRequest) (*relaymodel.Usage, *relaymodel.ErrorWithStatusCode) {
+	if meta.Mode == relaymode.Embeddings {
+		return estimateEmbeddingPromptUsage(c, meta, textRequest)
+	}
+
+	promptTokens := getPromptTokens(gmw.Ctx(c), textRequest, meta.Mode)
+	return &relaymodel.Usage{
+		PromptTokens: promptTokens,
+		TotalTokens:  promptTokens,
+	}, nil
+}
+
+// estimateEmbeddingPromptUsage computes preflight embedding usage, preferring Google countTokens for Gemini-backed channels.
+// Parameters: c is the current request context, meta contains routing information, and textRequest is the validated embeddings payload.
+// Returns: the prompt usage snapshot or an API error when a safe estimate cannot be produced.
+func estimateEmbeddingPromptUsage(c *gin.Context, meta *meta.Meta, textRequest *relaymodel.GeneralOpenAIRequest) (*relaymodel.Usage, *relaymodel.ErrorWithStatusCode) {
+	var (
+		usage  *relaymodel.Usage
+		bizErr *relaymodel.ErrorWithStatusCode
+	)
+
+	switch meta.APIType {
+	case apitype.Gemini:
+		usage, _, bizErr = gemini.EstimateEmbeddingPromptUsage(c, meta, textRequest)
+	case apitype.VertexAI:
+		usage, _, bizErr = vertexaiadaptor.EstimateGeminiEmbeddingPromptUsage(c, meta, textRequest)
+	default:
+		promptTokens := getPromptTokens(gmw.Ctx(c), textRequest, meta.Mode)
+		usage = &relaymodel.Usage{
+			PromptTokens: promptTokens,
+			TotalTokens:  promptTokens,
+		}
+	}
+	if bizErr != nil {
+		return nil, bizErr
+	}
+	if usage != nil && usage.PromptTokensDetails != nil {
+		c.Set(ctxkey.EmbeddingPromptTokensDetails, usage.PromptTokensDetails)
+	}
+	return usage, nil
+}
+
+// estimatePreConsumedQuota derives the quota reservation amount before dispatching the upstream request.
+// Parameters: textRequest is the validated payload, promptUsage is the preflight prompt usage, pricing arguments resolve effective rates, and meta identifies the request mode.
+// Returns: the quota amount to reserve before forwarding the request.
+func estimatePreConsumedQuota(
+	textRequest *relaymodel.GeneralOpenAIRequest,
+	promptUsage *relaymodel.Usage,
+	modelRatio float64,
+	completionRatio float64,
+	channelModelRatio map[string]float64,
+	groupRatio float64,
+	channelModelConfigs map[string]model.ModelConfigLocal,
+	channelCompletionRatio map[string]float64,
+	meta *meta.Meta,
+) int64 {
+	promptTokens := 0
+	if promptUsage != nil {
+		promptTokens = promptUsage.PromptTokens
+	}
+
+	if meta != nil && meta.Mode == relaymode.Embeddings && promptUsage != nil {
+		computeResult := quotautil.Compute(quotautil.ComputeInput{
+			Usage:                  promptUsage,
+			ModelName:              textRequest.Model,
+			ModelRatio:             modelRatio,
+			ChannelModelRatio:      channelModelRatio,
+			GroupRatio:             groupRatio,
+			ChannelModelConfigs:    channelModelConfigs,
+			ChannelCompletionRatio: channelCompletionRatio,
+			PricingAdaptor:         resolvePricingAdaptor(meta),
+		})
+		bufferQuota := int64(float64(config.PreConsumedQuota) * modelRatio * groupRatio)
+		return computeResult.TotalQuota + bufferQuota
+	}
+
+	return getPreConsumedQuota(textRequest, promptTokens, modelRatio*groupRatio, completionRatio)
+}
+
+// preConsumeQuota reserves quota before the upstream request is sent.
+// Parameters: c is the request context, textRequest is the validated payload, promptUsage is the prompt usage estimate, pricing arguments resolve reservation cost, and meta identifies the active channel.
+// Returns: the reserved quota amount and an API error when the user or token lacks sufficient balance.
+func preConsumeQuota(
+	c *gin.Context,
+	textRequest *relaymodel.GeneralOpenAIRequest,
+	promptUsage *relaymodel.Usage,
+	modelRatio float64,
+	completionRatio float64,
+	channelModelRatio map[string]float64,
+	groupRatio float64,
+	channelModelConfigs map[string]model.ModelConfigLocal,
+	channelCompletionRatio map[string]float64,
+	meta *meta.Meta,
+) (int64, *relaymodel.ErrorWithStatusCode) {
 	ctx := gmw.Ctx(c)
 	lg := gmw.GetLogger(c)
-	preConsumedQuota := getPreConsumedQuota(textRequest, promptTokens, ratio, completionRatio)
+	preConsumedQuota := estimatePreConsumedQuota(textRequest, promptUsage, modelRatio, completionRatio, channelModelRatio, groupRatio, channelModelConfigs, channelCompletionRatio, meta)
 
 	tokenQuota := c.GetInt64(ctxkey.TokenQuota)
 	tokenQuotaUnlimited := c.GetBool(ctxkey.TokenQuotaUnlimited)
@@ -132,10 +230,6 @@ func preConsumeQuota(c *gin.Context, textRequest *relaymodel.GeneralOpenAIReques
 	}
 	if userQuota-preConsumedQuota < 0 {
 		return preConsumedQuota, openai.ErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
-	}
-	err = model.CacheDecreaseUserQuota(ctx, meta.UserId, preConsumedQuota)
-	if err != nil {
-		return preConsumedQuota, openai.ErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
 	}
 	if userQuota > 100*preConsumedQuota &&
 		(tokenQuotaUnlimited || tokenQuota > 100*preConsumedQuota) {
@@ -149,6 +243,7 @@ func preConsumeQuota(c *gin.Context, textRequest *relaymodel.GeneralOpenAIReques
 		if err != nil {
 			return preConsumedQuota, openai.ErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
 		}
+		syncUserQuotaCacheAfterPreConsume(ctx, meta.UserId, preConsumedQuota, "chat_preconsume")
 	}
 	return preConsumedQuota, nil
 }
@@ -161,20 +256,41 @@ func postConsumeQuota(ctx context.Context,
 	preConsumedQuota int64,
 	incrementallyCharged int64,
 	modelRatio float64,
+	channelModelRatio map[string]float64,
 	groupRatio float64,
 	systemPromptReset bool,
+	channelModelConfigs map[string]model.ModelConfigLocal,
 	channelCompletionRatio map[string]float64) (quota int64) {
 	if usage == nil {
 		gmw.GetLogger(ctx).Error("usage is nil, which is unexpected")
 		return
 	}
 
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	// !! ZERO-USAGE GUARD !!
+	//
+	// Some upstream transports do not reliably return token usage. If we reconcile
+	// with zero usage, the result is quotaDelta = 0 - preConsumedQuota, which
+	// REFUNDS the pre-consumed amount and makes the request free. This is incorrect.
+	//
+	// When usage is zero and pre-consumed quota exists, we return the pre-consumed
+	// amount as the final charge.
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && preConsumedQuota > 0 {
+		gmw.GetLogger(ctx).Warn("postConsumeQuota: usage is zero but pre-consumed quota exists, keeping pre-consumed quota",
+			zap.Int64("pre_consumed_quota", preConsumedQuota),
+			zap.String("model", textRequest.Model),
+		)
+		quota = preConsumedQuota
+		return
+	}
+
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	computeResult := quotautil.Compute(quotautil.ComputeInput{
 		Usage:                  usage,
 		ModelName:              textRequest.Model,
 		ModelRatio:             modelRatio,
+		ChannelModelRatio:      channelModelRatio,
 		GroupRatio:             groupRatio,
+		ChannelModelConfigs:    channelModelConfigs,
 		ChannelCompletionRatio: channelCompletionRatio,
 		PricingAdaptor:         pricingAdaptor,
 	})
@@ -186,10 +302,12 @@ func postConsumeQuota(ctx context.Context,
 	}
 
 	quotaDelta := quota - preConsumedQuota - incrementallyCharged
-	// Derive RequestId/TraceId from std context if possible (gin ctx embedded by gmw.BackgroundCtx)
+	// Derive RequestId/TraceId/ProvisionalLogId from std context if possible (gin ctx embedded by gmw.BackgroundCtx)
 	var requestId string
+	var provisionalLogId int
 	if ginCtx, ok := gmw.GetGinCtxFromStdCtx(ctx); ok {
 		requestId = ginCtx.GetString(ctxkey.RequestId)
+		provisionalLogId = ginCtx.GetInt(ctxkey.ProvisionalLogId)
 	}
 	traceId := tracing.GetTraceIDFromContext(ctx)
 	if meta.TokenId > 0 && meta.UserId > 0 && meta.ChannelId > 0 {
@@ -201,34 +319,38 @@ func postConsumeQuota(ctx context.Context,
 				}
 			}
 		}
-		metadata := model.AppendToolUsageMetadata(nil, toolSummary)
-		metadata = model.AppendCacheWriteTokensMetadata(metadata, usage.CacheWrite5mTokens, usage.CacheWrite1hTokens)
+		metadata := model.AppendCacheWriteTokensMetadata(nil, usage.CacheWrite5mTokens, usage.CacheWrite1hTokens)
 
 		billing.PostConsumeQuotaDetailed(billing.QuotaConsumeDetail{
-			Ctx:                    ctx,
-			TokenId:                meta.TokenId,
-			QuotaDelta:             quotaDelta,
-			TotalQuota:             quota,
-			UserId:                 meta.UserId,
-			ChannelId:              meta.ChannelId,
-			PromptTokens:           computeResult.PromptTokens,
-			CompletionTokens:       computeResult.CompletionTokens,
-			ModelRatio:             computeResult.UsedModelRatio,
-			GroupRatio:             groupRatio,
-			ModelName:              textRequest.Model,
-			TokenName:              meta.TokenName,
-			IsStream:               meta.IsStream,
-			StartTime:              meta.StartTime,
-			SystemPromptReset:      systemPromptReset,
-			CompletionRatio:        computeResult.UsedCompletionRatio,
-			ToolsCost:              usage.ToolsCost,
-			CachedPromptTokens:     computeResult.CachedPromptTokens,
-			CachedCompletionTokens: 0,
-			CacheWrite5mTokens:     usage.CacheWrite5mTokens,
-			CacheWrite1hTokens:     usage.CacheWrite1hTokens,
-			Metadata:               metadata,
-			RequestId:              requestId,
-			TraceId:                traceId,
+			Ctx:                ctx,
+			TokenId:            meta.TokenId,
+			QuotaDelta:         quotaDelta,
+			TotalQuota:         quota,
+			UserId:             meta.UserId,
+			ChannelId:          meta.ChannelId,
+			PromptTokens:       computeResult.PromptTokens,
+			CompletionTokens:   computeResult.CompletionTokens,
+			ModelRatio:         computeResult.UsedModelRatio,
+			GroupRatio:         groupRatio,
+			OriginModelName:    meta.OriginModelName,
+			ModelName:          textRequest.Model,
+			TokenName:          meta.TokenName,
+			IsStream:           meta.IsStream,
+			StartTime:          meta.StartTime,
+			SystemPromptReset:  systemPromptReset,
+			CompletionRatio:    computeResult.UsedCompletionRatio,
+			ToolsCost:          usage.ToolsCost,
+			CachedPromptTokens: computeResult.CachedPromptTokens,
+			CacheWrite5mTokens: usage.CacheWrite5mTokens,
+			CacheWrite1hTokens: usage.CacheWrite1hTokens,
+			Metadata:           metadata,
+			RequestId:          requestId,
+			TraceId:            traceId,
+			ProvisionalLogId:   provisionalLogId,
+			UserAPIFormat:      resolveUserAPIFormat(meta.Mode),
+			UpstreamAPIFormat:  apitype.String(meta.APIType),
+			UpstreamEndpoint:   meta.UpstreamRequestURL,
+			ToolUsageSummary:   toolSummary,
 		})
 	} else {
 		gmw.GetLogger(ctx).Error("meta information incomplete, cannot post consume quota",
@@ -243,6 +365,15 @@ func postConsumeQuota(ctx context.Context,
 	return quota
 }
 
+// resolveUserAPIFormat returns the snake_case user-facing API format name for the given relay mode.
+// Returns an empty string when the mode is Unknown so callers can omit the metadata key.
+func resolveUserAPIFormat(mode int) string {
+	if mode == relaymode.Unknown {
+		return ""
+	}
+	return relaymode.String(mode)
+}
+
 // postConsumeQuotaWithTraceID is deprecated; callers should pass IDs via QuotaConsumeDetail
 func postConsumeQuotaWithTraceID(ctx context.Context, traceId string,
 	usage *relaymodel.Usage,
@@ -251,20 +382,41 @@ func postConsumeQuotaWithTraceID(ctx context.Context, traceId string,
 	ratio float64,
 	preConsumedQuota int64,
 	modelRatio float64,
+	channelModelRatio map[string]float64,
 	groupRatio float64,
 	systemPromptReset bool,
+	channelModelConfigs map[string]model.ModelConfigLocal,
 	channelCompletionRatio map[string]float64) (quota int64) {
 	if usage == nil {
 		gmw.GetLogger(ctx).Error("usage is nil, which is unexpected")
 		return
 	}
 
-	pricingAdaptor := relay.GetAdaptor(meta.ChannelType)
+	// !! ZERO-USAGE GUARD !!
+	//
+	// Some upstream transports do not reliably return token usage. If we reconcile
+	// with zero usage, the result is quotaDelta = 0 - preConsumedQuota, which
+	// REFUNDS the pre-consumed amount and makes the request free. This is incorrect.
+	//
+	// When usage is zero and pre-consumed quota exists, we return the pre-consumed
+	// amount as the final charge.
+	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && preConsumedQuota > 0 {
+		gmw.GetLogger(ctx).Warn("postConsumeQuota: usage is zero but pre-consumed quota exists, keeping pre-consumed quota",
+			zap.Int64("pre_consumed_quota", preConsumedQuota),
+			zap.String("model", textRequest.Model),
+		)
+		quota = preConsumedQuota
+		return
+	}
+
+	pricingAdaptor := resolvePricingAdaptor(meta)
 	computeResult := quotautil.Compute(quotautil.ComputeInput{
 		Usage:                  usage,
 		ModelName:              textRequest.Model,
 		ModelRatio:             modelRatio,
+		ChannelModelRatio:      channelModelRatio,
 		GroupRatio:             groupRatio,
+		ChannelModelConfigs:    channelModelConfigs,
 		ChannelCompletionRatio: channelCompletionRatio,
 		PricingAdaptor:         pricingAdaptor,
 	})
@@ -277,8 +429,10 @@ func postConsumeQuotaWithTraceID(ctx context.Context, traceId string,
 
 	quotaDelta := quota - preConsumedQuota
 	var requestId string
+	var provisionalLogId int
 	if ginCtx, ok := gmw.GetGinCtxFromStdCtx(ctx); ok {
 		requestId = ginCtx.GetString(ctxkey.RequestId)
+		provisionalLogId = ginCtx.GetInt(ctxkey.ProvisionalLogId)
 	}
 	if meta.TokenId > 0 && meta.UserId > 0 && meta.ChannelId > 0 {
 		var toolSummary *model.ToolUsageSummary
@@ -289,34 +443,38 @@ func postConsumeQuotaWithTraceID(ctx context.Context, traceId string,
 				}
 			}
 		}
-		metadata := model.AppendToolUsageMetadata(nil, toolSummary)
-		metadata = model.AppendCacheWriteTokensMetadata(metadata, usage.CacheWrite5mTokens, usage.CacheWrite1hTokens)
+		metadata := model.AppendCacheWriteTokensMetadata(nil, usage.CacheWrite5mTokens, usage.CacheWrite1hTokens)
 
 		billing.PostConsumeQuotaDetailed(billing.QuotaConsumeDetail{
-			Ctx:                    ctx,
-			TokenId:                meta.TokenId,
-			QuotaDelta:             quotaDelta,
-			TotalQuota:             quota,
-			UserId:                 meta.UserId,
-			ChannelId:              meta.ChannelId,
-			PromptTokens:           computeResult.PromptTokens,
-			CompletionTokens:       computeResult.CompletionTokens,
-			ModelRatio:             computeResult.UsedModelRatio,
-			GroupRatio:             groupRatio,
-			ModelName:              textRequest.Model,
-			TokenName:              meta.TokenName,
-			IsStream:               meta.IsStream,
-			StartTime:              meta.StartTime,
-			SystemPromptReset:      systemPromptReset,
-			CompletionRatio:        computeResult.UsedCompletionRatio,
-			ToolsCost:              usage.ToolsCost,
-			CachedPromptTokens:     computeResult.CachedPromptTokens,
-			CachedCompletionTokens: 0,
-			CacheWrite5mTokens:     usage.CacheWrite5mTokens,
-			CacheWrite1hTokens:     usage.CacheWrite1hTokens,
-			Metadata:               metadata,
-			RequestId:              requestId,
-			TraceId:                traceId,
+			Ctx:                ctx,
+			TokenId:            meta.TokenId,
+			QuotaDelta:         quotaDelta,
+			TotalQuota:         quota,
+			UserId:             meta.UserId,
+			ChannelId:          meta.ChannelId,
+			PromptTokens:       computeResult.PromptTokens,
+			CompletionTokens:   computeResult.CompletionTokens,
+			ModelRatio:         computeResult.UsedModelRatio,
+			GroupRatio:         groupRatio,
+			OriginModelName:    meta.OriginModelName,
+			ModelName:          textRequest.Model,
+			TokenName:          meta.TokenName,
+			IsStream:           meta.IsStream,
+			StartTime:          meta.StartTime,
+			SystemPromptReset:  systemPromptReset,
+			CompletionRatio:    computeResult.UsedCompletionRatio,
+			ToolsCost:          usage.ToolsCost,
+			CachedPromptTokens: computeResult.CachedPromptTokens,
+			CacheWrite5mTokens: usage.CacheWrite5mTokens,
+			CacheWrite1hTokens: usage.CacheWrite1hTokens,
+			Metadata:           metadata,
+			RequestId:          requestId,
+			TraceId:            traceId,
+			ProvisionalLogId:   provisionalLogId,
+			UserAPIFormat:      resolveUserAPIFormat(meta.Mode),
+			UpstreamAPIFormat:  apitype.String(meta.APIType),
+			UpstreamEndpoint:   meta.UpstreamRequestURL,
+			ToolUsageSummary:   toolSummary,
 		})
 	} else {
 		gmw.GetLogger(ctx).Error("meta information incomplete, cannot post consume quota",

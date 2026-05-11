@@ -154,10 +154,11 @@ const (
 	// Read in: controllers to bypass quota checks when true.
 	TokenQuotaUnlimited = "token_quota_unlimited"
 
-	// UserQuota optionally carries the user’s quota for metrics/UI labeling.
-	// Not set by default middleware; controllers typically fetch from cache directly.
-	// Used in: controller/text metrics recording (if present). Treat as optional.
-	UserQuota = "user_quota"
+	// UserObj stores the authenticated *model.User in context.
+	// Set in: middleware/auth (both session and token auth paths).
+	// Read in: downstream handlers to avoid redundant DB/cache lookups for user fields
+	// (username, group, quota, status, etc.).
+	UserObj = "user_obj"
 
 	// BaseURL is the provider base URL resolved from the selected channel.
 	// Set in: middleware/distributor from channel.GetBaseURL().
@@ -174,6 +175,11 @@ const (
 	// Read in: controllers (e.g., response/claude_messages) for debugging/logging.
 	KeyRequestBody = gin.BodyBytesKey
 
+	// ClientRequestPayloadLogged marks whether the inbound client payload has already been logged.
+	// Set in: common.LogClientRequestPayload.
+	// Read in: common.LogClientRequestPayload to avoid duplicate request-body logs in middleware/controllers.
+	ClientRequestPayloadLogged = "client_request_payload_logged"
+
 	// AsyncTaskRequestMetadata stores a sanitized snapshot of asynchronous task request parameters (e.g., /v1/videos POST payload).
 	// Set in: RelayVideoHelper after parsing the incoming request.
 	// Read in: async task persistence to capture request context for later diagnostics.
@@ -188,6 +194,11 @@ const (
 	// Set in: relay/meta after composing fields from context and request.
 	// Read widely anywhere Meta is needed (billing, adaptors, response handling).
 	Meta = "meta"
+
+	// EmbeddingPromptTokensDetails stores preflight embedding modality token details.
+	// Set in: text/response controllers after provider-side token counting.
+	// Read in: embedding adaptors and quota billing to preserve multimodal costs.
+	EmbeddingPromptTokensDetails = "embedding_prompt_tokens_details"
 
 	// RateLimit is the per-channel request-per-minute limit (integer).
 	// Set in: middleware/distributor based on channel.RateLimit (or 0 if disabled).
@@ -221,6 +232,12 @@ const (
 	// Set in: anthropic/aws adaptors.
 	// Read in: controller/claude_messages to choose passthrough paths.
 	ClaudeDirectPassthrough = "claude_direct_passthrough"
+
+	// ClaudeToolSearchEnabled marks that the current Claude request includes Anthropic
+	// Tool Search built-ins and should attach corresponding Anthropic beta headers.
+	// Set in: anthropic adaptor during Claude request conversion.
+	// Read in: anthropic adaptor SetupRequestHeader.
+	ClaudeToolSearchEnabled = "claude_tool_search_enabled"
 
 	// ConversationId is a deterministic id derived from messages for Claude "thinking"
 	// signature caching and response verification.
@@ -276,8 +293,30 @@ const (
 	// Read in: streaming adaptors to record completion progress and enforce quota limits mid-stream.
 	StreamingQuotaTracker = "streaming_quota_tracker"
 
+	// UpstreamRequestPossiblyForwarded indicates the request may already have been
+	// forwarded to upstream (or accepted by upstream transport). Controllers use this
+	// to apply conservative no-underbilling policy on ambiguous failures by avoiding
+	// automatic pre-consume refunds once forwarding has started.
+	UpstreamRequestPossiblyForwarded = "upstream_request_possibly_forwarded"
+
 	// APIFormat is the detected API format of the request (OpenAI, Claude, Response API).
 	// Set in: middleware/api_format_detect.
 	// Read in: metrics for labeling.
 	APIFormat = "api_format"
+
+	// BillingReconciled is set to true when post-billing or refund has been completed
+	// for pre-consumed quota. Used by the billing audit safety net to detect leaked quota.
+	// Set in: billing.PostConsumeQuotaDetailed, returnPreConsumedQuotaConservative.
+	// Read in: billing audit defer in relay handlers.
+	BillingReconciled = "billing_reconciled"
+
+	// PreConsumedQuotaAmount stores the pre-consumed quota amount for billing audit.
+	// Set in: preConsumeQuota, preConsumeResponseAPIQuota, preConsumeClaudeMessagesQuota.
+	// Read in: billing audit defer in relay handlers.
+	PreConsumedQuotaAmount = "pre_consumed_quota_amount"
+
+	// ProvisionalLogId stores the database ID of the provisional consume log entry
+	// created at pre-consume time. Post-billing uses this to reconcile the log
+	// with actual usage data.
+	ProvisionalLogId = "provisional_log_id"
 )

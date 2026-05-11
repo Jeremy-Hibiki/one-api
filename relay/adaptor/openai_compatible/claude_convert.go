@@ -1,7 +1,6 @@
 package openai_compatible
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -15,9 +14,10 @@ import (
 	gmw "github.com/Laisky/gin-middlewares/v7"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/helper"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // ConvertOpenAIResponseToClaudeResponse converts an OpenAI-compatible response
@@ -65,8 +65,18 @@ func responseAPIResponseToClaude(r *responseAPIResponse) relaymodel.ClaudeRespon
 
 	if r.Usage != nil {
 		out.Usage = relaymodel.ClaudeUsage{
-			InputTokens:  r.Usage.InputTokens,
-			OutputTokens: r.Usage.OutputTokens,
+			InputTokens:              r.Usage.InputTokens,
+			OutputTokens:             r.Usage.OutputTokens,
+			CacheCreationInputTokens: r.Usage.CacheWrite5mTokens + r.Usage.CacheWrite1hTokens,
+		}
+		if r.Usage.InputTokensDetails != nil && r.Usage.InputTokensDetails.CachedTokens > 0 {
+			out.Usage.CacheReadInputTokens = r.Usage.InputTokensDetails.CachedTokens
+		}
+		if r.Usage.CacheWrite5mTokens > 0 || r.Usage.CacheWrite1hTokens > 0 {
+			out.Usage.CacheCreation = &relaymodel.ClaudeCacheCreation{
+				Ephemeral5mInputTokens: r.Usage.CacheWrite5mTokens,
+				Ephemeral1hInputTokens: r.Usage.CacheWrite1hTokens,
+			}
 		}
 	}
 
@@ -125,9 +135,19 @@ func chatResponseToClaude(r *chatTextResponse) relaymodel.ClaudeResponse {
 		Content:    []relaymodel.ClaudeContent{},
 		StopReason: "end_turn",
 		Usage: relaymodel.ClaudeUsage{
-			InputTokens:  r.Usage.PromptTokens,
-			OutputTokens: r.Usage.CompletionTokens,
+			InputTokens:              r.Usage.PromptTokens,
+			OutputTokens:             r.Usage.CompletionTokens,
+			CacheCreationInputTokens: r.Usage.CacheWrite5mTokens + r.Usage.CacheWrite1hTokens,
 		},
+	}
+	if r.Usage.PromptTokensDetails != nil && r.Usage.PromptTokensDetails.CachedTokens > 0 {
+		out.Usage.CacheReadInputTokens = r.Usage.PromptTokensDetails.CachedTokens
+	}
+	if r.Usage.CacheWrite5mTokens > 0 || r.Usage.CacheWrite1hTokens > 0 {
+		out.Usage.CacheCreation = &relaymodel.ClaudeCacheCreation{
+			Ephemeral5mInputTokens: r.Usage.CacheWrite5mTokens,
+			Ephemeral1hInputTokens: r.Usage.CacheWrite1hTokens,
+		}
 	}
 
 	for _, choice := range r.Choices {
@@ -220,14 +240,16 @@ func marshalClaudeHTTPResponse(orig *http.Response, payload relaymodel.ClaudeRes
 // ConvertOpenAIStreamToClaudeSSE reads an OpenAI-compatible chat completion/response-api SSE stream
 // and writes Claude-native SSE events to the client, returning computed usage.
 func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptTokens int, modelName string) (*relaymodel.Usage, *relaymodel.ErrorWithStatusCode) {
-	_ = gmw.GetLogger(c)
+	lg := gmw.GetLogger(c)
 
 	// Prepare client for SSE
 	common.SetEventStreamHeaders(c)
 
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(bufio.ScanLines)
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
+
+	// Wrap the reader with heartbeats to prevent reverse-proxy timeouts (e.g. Cloudflare 524).
+	hbr := render.NewHeartbeatLineReader(c, lineReader, render.DefaultHeartbeatInterval)
+	defer hbr.Close()
 
 	accumText := ""
 	accumThinking := ""
@@ -240,8 +262,25 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 	textIndex := -1
 	toolStarted := map[string]int{} // tool_call_id -> index
 
+	// writeClaudeSSE writes a Claude-format SSE event: "event: <type>\ndata: <json>\n\n".
+	// The event type is extracted from the "type" field of the payload.
+	writeClaudeSSE := func(event map[string]any) {
+		b, err := json.Marshal(event)
+		if err != nil {
+			return
+		}
+		eventType, _ := event["type"].(string)
+		if eventType != "" {
+			c.Writer.Write([]byte("event: " + eventType + "\n")) //nolint:errcheck
+		}
+		c.Writer.Write([]byte("data: ")) //nolint:errcheck
+		c.Writer.Write(b)                //nolint:errcheck
+		c.Writer.Write([]byte("\n\n"))   //nolint:errcheck
+		c.Writer.(http.Flusher).Flush()
+	}
+
 	// Emit message_start
-	msgStart := map[string]any{
+	writeClaudeSSE(map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"type":    "message",
@@ -249,21 +288,181 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 			"model":   modelName,
 			"content": []any{},
 		},
-	}
-	if b, err := json.Marshal(msgStart); err == nil {
-		c.Writer.Write([]byte("data: "))
-		c.Writer.Write(b)
-		c.Writer.Write([]byte("\n\n"))
-		c.Writer.(http.Flusher).Flush()
-	}
+	})
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
+	upstreamDone := false
+	var streamErr error
+	for {
+		line, err := hbr.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		if line.Oversized {
+			payloadBytes, err := io.ReadAll(line.Large)
+			if err != nil {
+				streamErr = err
+				break
+			}
+
+			chunk, ok := parseStreamChunk(string(payloadBytes))
+			if !ok {
+				continue
+			}
+
+			for _, choice := range chunk.Choices {
+				var thinkingContent *string
+				if choice.Delta.Thinking != nil && *choice.Delta.Thinking != "" {
+					thinkingContent = choice.Delta.Thinking
+				} else if choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+					thinkingContent = choice.Delta.ReasoningContent
+				} else if choice.Delta.Reasoning != nil && *choice.Delta.Reasoning != "" {
+					thinkingContent = choice.Delta.Reasoning
+				}
+
+				if thinkingContent != nil && *thinkingContent != "" {
+					if thinkingIndex == -1 {
+						writeClaudeSSE(map[string]any{
+							"type":          "content_block_start",
+							"index":         nextIndex,
+							"content_block": map[string]any{"type": "thinking", "thinking": ""},
+						})
+						thinkingIndex = nextIndex
+						nextIndex++
+					}
+					thinkingDelta := *thinkingContent
+					accumThinking += thinkingDelta
+					writeClaudeSSE(map[string]any{
+						"type":  "content_block_delta",
+						"index": thinkingIndex,
+						"delta": map[string]any{"type": "thinking_delta", "thinking": thinkingDelta},
+					})
+				}
+
+				if choice.Delta.Signature != nil && *choice.Delta.Signature != "" {
+					if thinkingIndex == -1 {
+						writeClaudeSSE(map[string]any{
+							"type":          "content_block_start",
+							"index":         nextIndex,
+							"content_block": map[string]any{"type": "thinking", "thinking": ""},
+						})
+						thinkingIndex = nextIndex
+						nextIndex++
+					}
+					writeClaudeSSE(map[string]any{
+						"type":  "content_block_delta",
+						"index": thinkingIndex,
+						"delta": map[string]any{"type": "signature_delta", "signature": *choice.Delta.Signature},
+					})
+				}
+
+				deltaText := choice.Delta.StringContent()
+				if deltaText != "" {
+					if textIndex == -1 {
+						writeClaudeSSE(map[string]any{
+							"type":          "content_block_start",
+							"index":         nextIndex,
+							"content_block": map[string]any{"type": "text", "text": ""},
+						})
+						textIndex = nextIndex
+						nextIndex++
+					}
+					accumText += deltaText
+					writeClaudeSSE(map[string]any{
+						"type":  "content_block_delta",
+						"index": textIndex,
+						"delta": map[string]any{"type": "text_delta", "text": deltaText},
+					})
+				}
+
+				if len(choice.Delta.ToolCalls) > 0 {
+					for _, tc := range choice.Delta.ToolCalls {
+						id := tc.Id
+						if id == "" {
+							id = fmt.Sprintf("tool_%d", nextIndex)
+						}
+						idx, exists := toolStarted[id]
+						if !exists {
+							idx = nextIndex
+							toolStarted[id] = idx
+							nextIndex++
+							writeClaudeSSE(map[string]any{
+								"type":  "content_block_start",
+								"index": idx,
+								"content_block": map[string]any{
+									"type": "tool_use",
+									"id":   id,
+									"name": func() string {
+										if tc.Function != nil {
+											return tc.Function.Name
+										}
+										return ""
+									}(),
+									"input": map[string]any{},
+								},
+							})
+						}
+
+						var argStr string
+						if tc.Function != nil && tc.Function.Arguments != nil {
+							switch v := tc.Function.Arguments.(type) {
+							case string:
+								argStr = v
+							default:
+								if b, e := json.Marshal(v); e == nil {
+									argStr = string(b)
+								}
+							}
+						}
+						if argStr != "" {
+							accumToolArgs += argStr
+							writeClaudeSSE(map[string]any{
+								"type":  "content_block_delta",
+								"index": idx,
+								"delta": map[string]any{"type": "input_json_delta", "partial_json": argStr},
+							})
+						}
+					}
+				}
+			}
+
+			if chunk.Usage != nil {
+				usage = chunk.Usage
+				usageDelta := map[string]any{
+					"input_tokens":  usage.PromptTokens,
+					"output_tokens": usage.CompletionTokens,
+				}
+				if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+					usageDelta["cache_read_input_tokens"] = usage.PromptTokensDetails.CachedTokens
+				}
+				if usage.CacheWrite5mTokens > 0 || usage.CacheWrite1hTokens > 0 {
+					usageDelta["cache_creation_input_tokens"] = usage.CacheWrite5mTokens + usage.CacheWrite1hTokens
+					usageDelta["cache_creation"] = map[string]any{
+						"ephemeral_5m_input_tokens": usage.CacheWrite5mTokens,
+						"ephemeral_1h_input_tokens": usage.CacheWrite1hTokens,
+					}
+				}
+				writeClaudeSSE(map[string]any{
+					"type":  "message_delta",
+					"usage": usageDelta,
+				})
+			}
+
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+
+		lineText := line.Text()
+		if !strings.HasPrefix(lineText, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(lineText, "data:"))
 		if payload == "[DONE]" {
+			upstreamDone = true
 			break
 		}
 
@@ -287,99 +486,59 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 
 			if thinkingContent != nil && *thinkingContent != "" {
 				if thinkingIndex == -1 {
-					// Start thinking block at next index
-					start := map[string]any{
+					writeClaudeSSE(map[string]any{
 						"type":          "content_block_start",
 						"index":         nextIndex,
 						"content_block": map[string]any{"type": "thinking", "thinking": ""},
-					}
-					if b, e := json.Marshal(start); e == nil {
-						c.Writer.Write([]byte("data: "))
-						c.Writer.Write(b)
-						c.Writer.Write([]byte("\n\n"))
-						c.Writer.(http.Flusher).Flush()
-					}
+					})
 					thinkingIndex = nextIndex
 					nextIndex++
 				}
 				thinkingDelta := *thinkingContent
 				accumThinking += thinkingDelta
-				delta := map[string]any{
+				writeClaudeSSE(map[string]any{
 					"type":  "content_block_delta",
 					"index": thinkingIndex,
 					"delta": map[string]any{"type": "thinking_delta", "thinking": thinkingDelta},
-				}
-				if b, e := json.Marshal(delta); e == nil {
-					c.Writer.Write([]byte("data: "))
-					c.Writer.Write(b)
-					c.Writer.Write([]byte("\n\n"))
-					c.Writer.(http.Flusher).Flush()
-				}
+				})
 			}
 
 			// Signature delta (attached to thinking block)
 			if choice.Delta.Signature != nil && *choice.Delta.Signature != "" {
 				if thinkingIndex == -1 {
-					// Start thinking block to attach signature
-					start := map[string]any{
+					writeClaudeSSE(map[string]any{
 						"type":          "content_block_start",
 						"index":         nextIndex,
 						"content_block": map[string]any{"type": "thinking", "thinking": ""},
-					}
-					if b, e := json.Marshal(start); e == nil {
-						c.Writer.Write([]byte("data: "))
-						c.Writer.Write(b)
-						c.Writer.Write([]byte("\n\n"))
-						c.Writer.(http.Flusher).Flush()
-					}
+					})
 					thinkingIndex = nextIndex
 					nextIndex++
 				}
-				sig := *choice.Delta.Signature
-				delta := map[string]any{
+				writeClaudeSSE(map[string]any{
 					"type":  "content_block_delta",
 					"index": thinkingIndex,
-					"delta": map[string]any{"type": "signature_delta", "signature": sig},
-				}
-				if b, e := json.Marshal(delta); e == nil {
-					c.Writer.Write([]byte("data: "))
-					c.Writer.Write(b)
-					c.Writer.Write([]byte("\n\n"))
-					c.Writer.(http.Flusher).Flush()
-				}
+					"delta": map[string]any{"type": "signature_delta", "signature": *choice.Delta.Signature},
+				})
 			}
 
 			// Text delta
 			deltaText := choice.Delta.StringContent()
 			if deltaText != "" {
 				if textIndex == -1 {
-					// Start text content block at next index
-					start := map[string]any{
+					writeClaudeSSE(map[string]any{
 						"type":          "content_block_start",
 						"index":         nextIndex,
 						"content_block": map[string]any{"type": "text", "text": ""},
-					}
-					if b, e := json.Marshal(start); e == nil {
-						c.Writer.Write([]byte("data: "))
-						c.Writer.Write(b)
-						c.Writer.Write([]byte("\n\n"))
-						c.Writer.(http.Flusher).Flush()
-					}
+					})
 					textIndex = nextIndex
 					nextIndex++
 				}
 				accumText += deltaText
-				delta := map[string]any{
+				writeClaudeSSE(map[string]any{
 					"type":  "content_block_delta",
 					"index": textIndex,
 					"delta": map[string]any{"type": "text_delta", "text": deltaText},
-				}
-				if b, e := json.Marshal(delta); e == nil {
-					c.Writer.Write([]byte("data: "))
-					c.Writer.Write(b)
-					c.Writer.Write([]byte("\n\n"))
-					c.Writer.(http.Flusher).Flush()
-				}
+				})
 			}
 
 			// Tool call deltas
@@ -391,11 +550,10 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 					}
 					idx, exists := toolStarted[id]
 					if !exists {
-						// Start a new tool_use block
 						idx = nextIndex
 						toolStarted[id] = idx
 						nextIndex++
-						start := map[string]any{
+						writeClaudeSSE(map[string]any{
 							"type":  "content_block_start",
 							"index": idx,
 							"content_block": map[string]any{
@@ -409,16 +567,9 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 								}(),
 								"input": map[string]any{},
 							},
-						}
-						if b, e := json.Marshal(start); e == nil {
-							c.Writer.Write([]byte("data: "))
-							c.Writer.Write(b)
-							c.Writer.Write([]byte("\n\n"))
-							c.Writer.(http.Flusher).Flush()
-						}
+						})
 					}
 
-					// Delta arguments
 					var argStr string
 					if tc.Function != nil && tc.Function.Arguments != nil {
 						switch v := tc.Function.Arguments.(type) {
@@ -432,17 +583,11 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 					}
 					if argStr != "" {
 						accumToolArgs += argStr
-						delta := map[string]any{
+						writeClaudeSSE(map[string]any{
 							"type":  "content_block_delta",
 							"index": idx,
 							"delta": map[string]any{"type": "input_json_delta", "partial_json": argStr},
-						}
-						if b, e := json.Marshal(delta); e == nil {
-							c.Writer.Write([]byte("data: "))
-							c.Writer.Write(b)
-							c.Writer.Write([]byte("\n\n"))
-							c.Writer.(http.Flusher).Flush()
-						}
+						})
 					}
 				}
 			}
@@ -451,49 +596,40 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 		// Usage delta
 		if chunk.Usage != nil {
 			usage = chunk.Usage
-			msgDelta := map[string]any{
-				"type": "message_delta",
-				"usage": map[string]any{
-					"input_tokens":  usage.PromptTokens,
-					"output_tokens": usage.CompletionTokens,
-				},
+			usageDelta := map[string]any{
+				"input_tokens":  usage.PromptTokens,
+				"output_tokens": usage.CompletionTokens,
 			}
-			if b, e := json.Marshal(msgDelta); e == nil {
-				c.Writer.Write([]byte("data: "))
-				c.Writer.Write(b)
-				c.Writer.Write([]byte("\n\n"))
-				c.Writer.(http.Flusher).Flush()
+			if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+				usageDelta["cache_read_input_tokens"] = usage.PromptTokensDetails.CachedTokens
 			}
+			if usage.CacheWrite5mTokens > 0 || usage.CacheWrite1hTokens > 0 {
+				usageDelta["cache_creation_input_tokens"] = usage.CacheWrite5mTokens + usage.CacheWrite1hTokens
+				usageDelta["cache_creation"] = map[string]any{
+					"ephemeral_5m_input_tokens": usage.CacheWrite5mTokens,
+					"ephemeral_1h_input_tokens": usage.CacheWrite1hTokens,
+				}
+			}
+			writeClaudeSSE(map[string]any{
+				"type":  "message_delta",
+				"usage": usageDelta,
+			})
 		}
 	}
 
-	// Close any started blocks
+	if streamErr != nil {
+		render.LogHeartbeatLineReaderError(c, lg, streamErr, hbr)
+	}
+
+	// Close any started content blocks.
 	if thinkingIndex >= 0 {
-		stop := map[string]any{"type": "content_block_stop", "index": thinkingIndex}
-		if b, e := json.Marshal(stop); e == nil {
-			c.Writer.Write([]byte("data: "))
-			c.Writer.Write(b)
-			c.Writer.Write([]byte("\n\n"))
-			c.Writer.(http.Flusher).Flush()
-		}
+		writeClaudeSSE(map[string]any{"type": "content_block_stop", "index": thinkingIndex})
 	}
 	if textIndex >= 0 {
-		stop := map[string]any{"type": "content_block_stop", "index": textIndex}
-		if b, e := json.Marshal(stop); e == nil {
-			c.Writer.Write([]byte("data: "))
-			c.Writer.Write(b)
-			c.Writer.Write([]byte("\n\n"))
-			c.Writer.(http.Flusher).Flush()
-		}
+		writeClaudeSSE(map[string]any{"type": "content_block_stop", "index": textIndex})
 	}
 	for _, idx := range toolStarted {
-		stop := map[string]any{"type": "content_block_stop", "index": idx}
-		if b, e := json.Marshal(stop); e == nil {
-			c.Writer.Write([]byte("data: "))
-			c.Writer.Write(b)
-			c.Writer.Write([]byte("\n\n"))
-			c.Writer.(http.Flusher).Flush()
-		}
+		writeClaudeSSE(map[string]any{"type": "content_block_stop", "index": idx})
 	}
 
 	// Finalize usage if upstream omitted
@@ -504,16 +640,15 @@ func ConvertOpenAIStreamToClaudeSSE(c *gin.Context, resp *http.Response, promptT
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
 
-	// message_stop and [DONE]
-	msgStop := map[string]any{"type": "message_stop"}
-	if b, e := json.Marshal(msgStop); e == nil {
-		c.Writer.Write([]byte("data: "))
-		c.Writer.Write(b)
-		c.Writer.Write([]byte("\n\n"))
-		c.Writer.(http.Flusher).Flush()
+	// Only emit terminal message_stop when the upstream completed normally.
+	// The Claude Messages API does NOT use [DONE] — the stream simply closes
+	// after message_stop. If upstream dropped, do not fabricate message_stop;
+	// let the client observe the connection close without it (honest proxy).
+	if upstreamDone {
+		writeClaudeSSE(map[string]any{"type": "message_stop"})
+	} else {
+		lg.Warn("upstream stream ended without [DONE], not emitting message_stop for Claude SSE conversion")
 	}
-	c.Writer.Write([]byte("data: [DONE]\n\n"))
-	c.Writer.(http.Flusher).Flush()
 	_ = resp.Body.Close()
 	return usage, nil
 }
@@ -554,7 +689,7 @@ func parseResponseStreamPayload(data []byte) (*responseAPIResponse, *int, error)
 
 	var event responseAPIStreamEvent
 	if err := json.Unmarshal(data, &event); err != nil {
-		return nil, nil, err
+		return nil, nil, errors.Wrap(err, "unmarshal response API stream event")
 	}
 
 	converted := convertResponseAPIStreamEventToResponse(&event)
@@ -672,9 +807,17 @@ func responseAPIUsageToModel(usage *responseAPIUsage) *relaymodel.Usage {
 		total = usage.InputTokens + usage.OutputTokens
 	}
 	return &relaymodel.Usage{
-		PromptTokens:     usage.InputTokens,
-		CompletionTokens: usage.OutputTokens,
-		TotalTokens:      total,
+		PromptTokens:       usage.InputTokens,
+		CompletionTokens:   usage.OutputTokens,
+		TotalTokens:        total,
+		CacheWrite5mTokens: usage.CacheWrite5mTokens,
+		CacheWrite1hTokens: usage.CacheWrite1hTokens,
+		PromptTokensDetails: func() *relaymodel.UsagePromptTokensDetails {
+			if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens <= 0 {
+				return nil
+			}
+			return &relaymodel.UsagePromptTokensDetails{CachedTokens: usage.InputTokensDetails.CachedTokens}
+		}(),
 	}
 }
 
@@ -995,9 +1138,16 @@ type responseAPIResponse struct {
 }
 
 type responseAPIUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens        int                            `json:"input_tokens"`
+	OutputTokens       int                            `json:"output_tokens"`
+	TotalTokens        int                            `json:"total_tokens"`
+	InputTokensDetails *responseAPIInputTokensDetails `json:"input_tokens_details,omitempty"`
+	CacheWrite5mTokens int                            `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens int                            `json:"cache_write_1h_tokens,omitempty"`
+}
+
+type responseAPIInputTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
 }
 
 type responseAPIOutput struct {

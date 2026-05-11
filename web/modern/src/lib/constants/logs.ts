@@ -1,4 +1,6 @@
 // LOG_TYPES enumerates the numeric codes persisted for each log category.
+// Note: 6 is reserved for provisional pre-consume entries that are reconciled
+// before the user sees them, so it does not appear in the filter options.
 export const LOG_TYPES = {
   ALL: 0,
   TOPUP: 1,
@@ -6,25 +8,25 @@ export const LOG_TYPES = {
   MANAGE: 3,
   SYSTEM: 4,
   TEST: 5,
+  TOOL: 7,
 } as const;
 
 // LOG_TYPE_LABELS maps log type codes to human-readable labels used across the UI.
 export const LOG_TYPE_LABELS: Record<number, string> = {
-  [LOG_TYPES.ALL]: "All Types",
-  [LOG_TYPES.TOPUP]: "Topup",
-  [LOG_TYPES.CONSUME]: "Consume",
-  [LOG_TYPES.MANAGE]: "Management",
-  [LOG_TYPES.SYSTEM]: "System",
-  [LOG_TYPES.TEST]: "Test",
+  [LOG_TYPES.ALL]: 'All Types',
+  [LOG_TYPES.TOPUP]: 'Topup',
+  [LOG_TYPES.CONSUME]: 'Consume',
+  [LOG_TYPES.MANAGE]: 'Management',
+  [LOG_TYPES.SYSTEM]: 'System',
+  [LOG_TYPES.TEST]: 'Test',
+  [LOG_TYPES.TOOL]: 'Tool',
 };
 
 // LOG_TYPE_OPTIONS feeds select controls with value/label pairs derived from LOG_TYPE_LABELS.
-export const LOG_TYPE_OPTIONS: Array<{ value: string; label: string }> =
-  Object.entries(LOG_TYPE_LABELS).map(([value, label]) => ({
-    value: String(value),
-    label,
-  }));
+export const LOG_TYPE_OPTIONS: Array<{ value: string; label: string }> = Object.entries(LOG_TYPE_LABELS).map(([value, label]) => ({
+  value: String(value),
+  label,
+}));
 
 // getLogTypeLabel resolves the display label for a specific log type code.
-export const getLogTypeLabel = (type: number): string =>
-  LOG_TYPE_LABELS[type] ?? "Unknown";
+export const getLogTypeLabel = (type: number): string => LOG_TYPE_LABELS[type] ?? 'Unknown';

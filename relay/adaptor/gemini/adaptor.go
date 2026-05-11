@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -16,17 +15,18 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/random"
-	channelhelper "github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/random"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	channelhelper "github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/geminiOpenaiCompatible"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 type Adaptor struct {
@@ -36,14 +36,7 @@ func (a *Adaptor) Init(meta *meta.Meta) {
 }
 
 func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
-	defaultVersion := config.GeminiVersion
-	modelName := strings.ToLower(meta.ActualModelName)
-	if geminiOpenaiCompatible.GeminiVersionAtLeast(modelName, 1.5) ||
-		strings.Contains(modelName, "gemma-3") {
-		defaultVersion = "v1beta"
-	}
-
-	version := helper.AssignOrDefault(meta.Config.APIVersion, defaultVersion)
+	version := resolveGeminiAPIVersion(meta.ActualModelName, meta.Config.APIVersion)
 	action := ""
 	switch meta.Mode {
 	case relaymode.Embeddings:
@@ -59,20 +52,43 @@ func (a *Adaptor) GetRequestURL(meta *meta.Meta) (string, error) {
 	return fmt.Sprintf("%s/%s/models/%s:%s", meta.BaseURL, version, meta.ActualModelName, action), nil
 }
 
+// resolveGeminiAPIVersion selects the Gemini API version for the requested model.
+// Parameters: modelName is the target upstream model and configuredVersion is the optional channel override.
+// Returns: the API version string that should be used for Gemini requests.
+func resolveGeminiAPIVersion(modelName string, configuredVersion string) string {
+	defaultVersion := config.GeminiVersion
+	modelName = strings.ToLower(modelName)
+	if geminiOpenaiCompatible.GeminiVersionAtLeast(modelName, 1.5) ||
+		strings.Contains(modelName, "preview") ||
+		strings.Contains(modelName, "gemma-3") {
+		defaultVersion = "v1beta"
+	}
+
+	return helper.AssignOrDefault(configuredVersion, defaultVersion)
+}
+
 func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Request, meta *meta.Meta) error {
 	channelhelper.SetupCommonRequestHeader(c, req, meta)
 	req.Header.Set("x-goog-api-key", meta.APIKey)
-	req.URL.Query().Add("key", meta.APIKey)
+	query := req.URL.Query()
+	query.Add("key", meta.APIKey)
+	req.URL.RawQuery = query.Encode()
 	return nil
 }
 
+// ConvertRequest converts an OpenAI-compatible request into Gemini-native payloads for the selected relay mode.
+// Parameters: c is the request context, relayMode selects the endpoint family, and request is the validated OpenAI-compatible request.
+// Returns: the converted Gemini payload or an error when conversion fails.
 func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.GeneralOpenAIRequest) (any, error) {
 	if request == nil {
 		return nil, errors.New("request is nil")
 	}
 	switch relayMode {
 	case relaymode.Embeddings:
-		geminiEmbeddingRequest := ConvertEmbeddingRequest(*request)
+		geminiEmbeddingRequest, err := ConvertEmbeddingRequest(*request)
+		if err != nil {
+			return nil, errors.Wrap(err, "convert gemini embedding request")
+		}
 		return geminiEmbeddingRequest, nil
 	default:
 		geminiRequest := ConvertRequest(*request)
@@ -100,6 +116,9 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequ
 		TopP:        request.TopP,
 		Stream:      request.Stream != nil && *request.Stream,
 		Stop:        request.StopSequences,
+	}
+	if structuredResponseFormat := claudeStructuredResponseFormat(request); structuredResponseFormat != nil {
+		openaiRequest.ResponseFormat = structuredResponseFormat
 	}
 
 	// Convert system prompt
@@ -197,27 +216,29 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequ
 	}
 
 	// Convert tools
-	for _, tool := range request.Tools {
-		openaiTool := model.Tool{
-			Type: "function",
-			Function: &model.Function{
-				Name:        tool.Name,
-				Description: tool.Description,
-			},
-		}
-
-		// Convert input schema
-		if tool.InputSchema != nil {
-			if schemaMap, ok := tool.InputSchema.(map[string]any); ok {
-				openaiTool.Function.Parameters = schemaMap
+	if openaiRequest.ResponseFormat == nil {
+		for _, tool := range request.Tools {
+			openaiTool := model.Tool{
+				Type: "function",
+				Function: &model.Function{
+					Name:        tool.Name,
+					Description: tool.Description,
+				},
 			}
-		}
 
-		openaiRequest.Tools = append(openaiRequest.Tools, openaiTool)
+			// Convert input schema
+			if tool.InputSchema != nil {
+				if schemaMap, ok := tool.InputSchema.(map[string]any); ok {
+					openaiTool.Function.Parameters = schemaMap
+				}
+			}
+
+			openaiRequest.Tools = append(openaiRequest.Tools, openaiTool)
+		}
 	}
 
 	// Convert tool choice
-	if request.ToolChoice != nil {
+	if request.ToolChoice != nil && openaiRequest.ResponseFormat == nil {
 		openaiRequest.ToolChoice = request.ToolChoice
 	}
 
@@ -257,7 +278,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, meta *meta.Met
 	} else {
 		switch meta.Mode {
 		case relaymode.Embeddings:
-			err, usage = EmbeddingHandler(c, resp)
+			err, usage = EmbeddingHandler(c, resp, meta.PromptTokens)
 		default:
 			err, usage = Handler(c, resp, meta.PromptTokens, meta.ActualModelName)
 		}
@@ -399,9 +420,7 @@ func (a *Adaptor) convertNonStreamingToClaudeResponse(c *gin.Context, resp *http
 func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Response, body []byte, meta *meta.Meta) (*http.Response, *model.ErrorWithStatusCode) {
 	lg := gmw.GetLogger(c)
 
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(bufio.ScanLines)
+	lineReader := commonsse.NewLineReader(bytes.NewReader(body), commonsse.DefaultLineBufferSize)
 
 	var textBuilder strings.Builder
 	type toolUse struct {
@@ -414,20 +433,42 @@ func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Re
 	completionTokens := 0
 	totalTokens := 0
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	for {
+		line, err := lineReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			lg.Warn("error reading Gemini stream for Claude conversion", zap.Error(errors.Wrap(err, "read stream")))
+			break
+		}
+
+		var lineText string
+		if line.Oversized {
+			payloadBytes, err := io.ReadAll(line.Large)
+			if err != nil {
+				lg.Warn("error reading oversized Gemini stream payload", zap.Error(errors.Wrap(err, "read oversized stream")))
+				continue
+			}
+			lineText = "data: " + string(payloadBytes)
+		} else {
+			lineText = line.Text()
+		}
+
+		lineText = strings.TrimSpace(lineText)
+		if lineText == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "event:") {
+		if strings.HasPrefix(lineText, "event:") {
 			// Skip explicit event annotations from upstream
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
+		if !strings.HasPrefix(lineText, "data:") {
 			continue
 		}
 
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		payload := strings.TrimSpace(strings.TrimPrefix(lineText, "data:"))
 		if payload == "" {
 			continue
 		}
@@ -480,10 +521,6 @@ func (a *Adaptor) convertStreamingToClaudeResponse(c *gin.Context, resp *http.Re
 				})
 			}
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		lg.Warn("error scanning Gemini stream for Claude conversion", zap.Error(errors.Wrap(err, "scan stream")), zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
 	}
 
 	var toolArgsText strings.Builder

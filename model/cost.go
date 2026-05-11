@@ -9,9 +9,9 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/Laisky/zap"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
 )
 
 // RequestIDMaxLen is the maximum length of request_id column to enforce indexing
@@ -270,7 +270,7 @@ func MigrateUserRequestCostEnsureUniqueRequestID() error {
 
 	deletedLongCount, err := deleteLongUserRequestCostRequestIDs()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "delete long user request cost request IDs")
 	}
 	if deletedLongCount > 0 {
 		logger.Logger.Debug("Removed user_request_costs rows with oversized request_id",
@@ -286,14 +286,14 @@ func MigrateUserRequestCostEnsureUniqueRequestID() error {
 		var altered bool
 		altered, err = ensureMySQLRequestIDColumnSized()
 		if err != nil {
-			return err
+			return errors.Wrap(err, "ensure MySQL request ID column sized")
 		}
 		columnAltered = columnAltered || altered
 	} else if common.UsingPostgreSQL.Load() {
 		var altered bool
 		altered, err = ensurePostgresRequestIDColumnSized()
 		if err != nil {
-			return err
+			return errors.Wrap(err, "ensure Postgres request ID column sized")
 		}
 		columnAltered = columnAltered || altered
 	}
@@ -418,7 +418,7 @@ func mysqlTableExists(table string) (bool, error) {
 	var res result
 	query := "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
 	if err := DB.Raw(query, table).Scan(&res).Error; err != nil {
-		return false, err
+		return false, errors.Wrapf(err, "check mysql table %s exists", table)
 	}
 	return res.Count > 0, nil
 }
@@ -431,7 +431,7 @@ func mysqlColumnExists(table, column string) (bool, error) {
 	var res result
 	query := "SELECT COUNT(*) AS count FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?"
 	if err := DB.Raw(query, table, column).Scan(&res).Error; err != nil {
-		return false, err
+		return false, errors.Wrapf(err, "check mysql column %s.%s exists", table, column)
 	}
 	return res.Count > 0, nil
 }
@@ -444,7 +444,7 @@ func mysqlIndexExists(table, index string) (bool, error) {
 	var res result
 	query := "SELECT COUNT(*) AS count FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?"
 	if err := DB.Raw(query, table, index).Scan(&res).Error; err != nil {
-		return false, err
+		return false, errors.Wrapf(err, "check mysql index %s on %s exists", index, table)
 	}
 	return res.Count > 0, nil
 }

@@ -24,6 +24,7 @@
     - [Caching Strategy](#caching-strategy)
       - [Key Files](#key-files-2)
   - [Pricing System](#pricing-system)
+    - [Built-in Tool Alias Normalization (Anthropic Tool Search)](#built-in-tool-alias-normalization-anthropic-tool-search)
     - [Pricing Hierarchy](#pricing-hierarchy)
     - [Pricing Constants](#pricing-constants)
     - [Model Pricing Structure](#model-pricing-structure)
@@ -324,7 +325,7 @@ All adapters now follow the same four-layer pricing system and fallback logic, w
 **✅ Adapters with Native Pricing (25+ total)**:
 
 - **OpenAI**: 84 models with comprehensive GPT pricing
-- **Anthropic**: 15 models with Claude pricing
+- **Anthropic**: 28 models with Claude pricing
 - **Zhipu**: 23 models with GLM pricing
 - **Ali (Alibaba)**: 89 models with Qwen and other models
 - **Baidu**: 16 models with ERNIE pricing
@@ -428,6 +429,18 @@ graph LR
 - Cache TTL configurations in `model/cache.go`
 
 ## Pricing System
+
+### Built-in Tool Alias Normalization (Anthropic Tool Search)
+
+Built-in tool charging and allowlist checks use canonical tool names. For Anthropic Tool Search,
+the following aliases are normalized to `web_search` before policy checks and cost calculation:
+
+- `tool_search_tool_regex`
+- `tool_search_tool_bm25`
+- versioned variants such as `tool_search_tool_regex_20251119` and `tool_search_tool_bm25_20251119`
+
+This ensures one-api applies a single pricing and permission policy for search calls regardless of
+the upstream provider-specific identifier format.
 
 ### Pricing Hierarchy
 
@@ -638,7 +651,9 @@ To prevent lost billing in early client disconnect scenarios, controllers now re
 Flow:
 
 1. After `DoRequest` succeeds, write a provisional `UserRequestCost` for the `request_id` using the estimated pre-consumed quota (prompt tokens + max output tokens × pricing), even if physical pre-consume is skipped for trusted users/tokens.
-2. If upstream responds with a non-success HTTP status, refund pre-consumed quota (if any) and set the provisional `UserRequestCost` to `0`.
+2. If upstream responds with a non-success HTTP status, apply conservative reconciliation:
+   - if the request was not forwarded upstream, refund pre-consumed quota and set provisional `UserRequestCost` to `0`;
+   - if the request may already have reached upstream, skip refund to avoid underbilling and rely on post-consume/provisional reconciliation.
 3. When usage arrives, compute the final quota using the detailed pricing formula and reconcile the record by overwriting the provisional value. Token/user/channel updates use the delta between pre- and post-consumption.
 
 Controllers:
@@ -672,7 +687,7 @@ Base formula (no caching):
 quota = (prompt_tokens + completion_tokens * completion_ratio) * model_ratio * group_ratio
 ```
 
-Claude prompt caching extends billing with cache-read and cache-write costs. We split prompt tokens into: normal input, cached-read input, and cache-write input (5m and 1h). Completion tokens may also be cached by some providers.
+Claude prompt caching extends billing with cache-read and cache-write costs. We split prompt tokens into: normal input, cached-read input, and cache-write input (5m and 1h). Completion tokens are always billed at the output price.
 
 ```
 normal_input = prompt_tokens - cached_read - cache_write_5m - cache_write_1h
@@ -680,8 +695,7 @@ normal_input = prompt_tokens - cached_read - cache_write_5m - cache_write_1h
 quota =
     normal_input        * input_price
 + cached_read         * cached_input_price
-+ noncached_completion* output_price
-    # Note: we do not bill cached completion tokens. Providers do not return cached completion metrics and there is no CachedOutputRatio.
++ completion_tokens   * output_price
 + cache_write_5m      * write5m_price
 + cache_write_1h      * write1h_price
 
@@ -689,7 +703,6 @@ where:
     input_price           = model_ratio * group_ratio
     output_price          = model_ratio * completion_ratio * group_ratio
     cached_input_price    = (CachedInputRatio if >0 else input_price) or 0 if <0
-    # No cached output price; completions are always billed at output_price
     write5m_price         = (CacheWrite5mRatio if >0 else input_price) or 0 if <0
     write1h_price         = (CacheWrite1hRatio if >0 else input_price) or 0 if <0
 ```
@@ -744,7 +757,8 @@ The billing system now implements a universal, robust two-step billing process f
 
 **5. Logging and Quota Management:**
 
-- All quota operations (pre-consume, post-consume, refund) are logged with clear context, and quota is always refunded if the request fails.
+- All quota operations (pre-consume, post-consume, refund/skip-refund) are logged with clear context.
+- Refund behavior follows no-underbilling priority: once a request may have been forwarded upstream, refund is skipped on ambiguous failures to prevent leakage (overcharge risk is accepted and can be reconciled later).
 
 **6. Example (gpt-image-1 / gpt-image-1-mini):**
 
@@ -954,7 +968,7 @@ GET /api/channel/default-pricing?type=:channelType
 
 **Frontend:**
 
-- The logs table displays these cached token fields as tooltips in the Prompt/Completion columns for each log entry.
+- The logs table displays `cached_prompt_tokens` as a tooltip in the Prompt column for each log entry.
 
 ## Testing & Race Condition Policy (2025-08)
 
@@ -1013,7 +1027,7 @@ graph TD
 ```go
 // Each adapter implements comprehensive pricing
 func (a *Adaptor) GetDefaultModelPricing() map[string]adaptor.ModelConfig {
-    const MilliTokensUsd = 0.000001
+    const MilliTokensUsd = 0.5 // QuotaPerUsd / 1M = 500000 / 1000000
 
     return map[string]adaptor.ModelConfig{
         "model-name": {
@@ -1243,13 +1257,13 @@ func GetModelRatioWithThreeLayers(modelName string, channelOverrides map[string]
     }
 
     // Layer 3: Global model pricing (merged from selected adapters)
-    globalRatio := GetGlobalModelRatio(modelName)
-    if globalRatio > 0 {
-        return globalRatio
+    // Respect explicit zero pricing by checking existence, not value.
+    if ratio, exists := GetGlobalModelRatio(modelName); exists {
+        return ratio
     }
 
     // Layer 4: Final fallback - reasonable default
-    return 2.5 * 0.000001 // 2.5 USD per million tokens
+    return 2.5 * billingratio.MilliTokensUsd // 2.5 USD per million tokens in internal quota units
 }
 ```
 

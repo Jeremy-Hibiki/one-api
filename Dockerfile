@@ -4,7 +4,7 @@
 #   docker buildx build --platform linux/amd64,linux/arm64 -t yourrepo/one-api:latest .
 
 ARG NODE_IMAGE=node:24-bookworm
-ARG GO_IMAGE=golang:1.25.4-bookworm
+ARG GO_IMAGE=golang:1.26.2-bookworm
 ARG FFMPEG_IMAGE=linuxserver/ffmpeg:latest
 
 #############################
@@ -18,7 +18,7 @@ COPY web/ ./
 
 # Install & build each theme sequentially to avoid OOM in CI
 ENV YARN_ENABLE_IMMUTABLE_INSTALLS=0
-RUN set -e; for theme in default berry air modern; do \
+RUN set -e; for theme in berry air modern; do \
         echo "==> installing deps for $theme"; \
         (cd /web/$theme && yarn install --network-timeout 600000); \
     done
@@ -26,7 +26,7 @@ RUN set -e; for theme in default berry air modern; do \
 RUN mkdir -p /web/build
 ENV DISABLE_ESLINT_PLUGIN=true
 RUN set -e; BUILD_ID=$(date +%s); \
-        for theme in default berry air modern; do \
+        for theme in berry air modern; do \
                 echo "==> building $theme (build_id=$BUILD_ID)"; \
                 REACT_APP_VERSION=$BUILD_ID npm run build --prefix /web/$theme; \
         done

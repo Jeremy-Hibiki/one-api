@@ -1,61 +1,49 @@
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { api } from "@/lib/api";
-import { useAuthStore } from "@/lib/stores/auth";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useCallback, useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { useTranslation } from "react-i18next";
-import * as z from "zod";
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+import { useNotifications } from '@/components/ui/notifications';
+import { ResponsivePageContainer } from '@/components/ui/responsive-container';
+import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/stores/auth';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { useCallback, useEffect, useState } from 'react';
+import { useForm } from 'react-hook-form';
+import { useTranslation } from 'react-i18next';
+import * as z from 'zod';
 
 export function TopUpPage() {
   const { user, updateUser } = useAuthStore();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [userQuota, setUserQuota] = useState(user?.quota || 0);
-  const [topUpLink, setTopUpLink] = useState("");
+  const [topUpLink, setTopUpLink] = useState('');
   const [userData, setUserData] = useState<any>(null);
+  const [amount, setAmount] = useState<number>(1);
+  const [topUpCode, setTopUpCode] = useState('');
+  const [calculatedAmount, setCalculatedAmount] = useState<number | null>(null);
+  const [isCalculating, setIsCalculating] = useState(false);
   const { t } = useTranslation();
+  const { notify } = useNotifications();
   const tr = useCallback(
-    (key: string, defaultValue: string, options?: Record<string, unknown>) =>
-      t(`topup.${key}`, { defaultValue, ...options }),
+    (key: string, defaultValue: string, options?: Record<string, unknown>) => t(`topup.${key}`, { defaultValue, ...options }),
     [t]
   );
 
   const topupSchema = z.object({
-    redemption_code: z
-      .string()
-      .min(1, tr("redeem.required", "Redemption code is required")),
+    redemption_code: z.string().min(1, tr('redeem.required', 'Redemption code is required')),
   });
 
   type TopUpForm = z.infer<typeof topupSchema>;
 
   const form = useForm<TopUpForm>({
     resolver: zodResolver(topupSchema),
-    defaultValues: { redemption_code: "" },
+    defaultValues: { redemption_code: '' },
   });
 
   // Helper function to render quota with USD conversion
   const renderQuotaWithPrompt = (quota: number): string => {
-    const quotaPerUnit = parseFloat(
-      localStorage.getItem("quota_per_unit") || "500000"
-    );
-    const displayInCurrency =
-      localStorage.getItem("display_in_currency") === "true";
+    const quotaPerUnit = parseFloat(localStorage.getItem('quota_per_unit') || '500000');
+    const displayInCurrency = localStorage.getItem('display_in_currency') === 'true';
 
     if (displayInCurrency) {
       const usdValue = (quota / quotaPerUnit).toFixed(6);
@@ -67,7 +55,7 @@ export function TopUpPage() {
   const loadUserData = async () => {
     try {
       // Unified API call - complete URL with /api prefix
-      const res = await api.get("/api/user/self");
+      const res = await api.get('/api/user/self');
       const { success, data } = res.data;
       if (success) {
         setUserQuota(data.quota);
@@ -75,12 +63,12 @@ export function TopUpPage() {
         updateUser(data);
       }
     } catch (error) {
-      console.error("Error loading user data:", error);
+      console.error('Error loading user data:', error);
     }
   };
 
   const loadSystemStatus = () => {
-    const status = localStorage.getItem("status");
+    const status = localStorage.getItem('status');
     if (status) {
       try {
         const statusData = JSON.parse(status);
@@ -88,7 +76,7 @@ export function TopUpPage() {
           setTopUpLink(statusData.top_up_link);
         }
       } catch (error) {
-        console.error("Error parsing system status:", error);
+        console.error('Error parsing system status:', error);
       }
     }
   };
@@ -97,7 +85,7 @@ export function TopUpPage() {
     setIsSubmitting(true);
     try {
       // Unified API call - complete URL with /api prefix
-      const res = await api.post("/api/user/topup", {
+      const res = await api.post('/api/user/topup', {
         key: data.redemption_code,
       });
       const { success, message, data: responseData } = res.data;
@@ -106,56 +94,125 @@ export function TopUpPage() {
         const addedQuota = responseData || 0;
         setUserQuota((prev) => prev + addedQuota);
         form.reset();
-        form.setError("root", {
-          type: "success",
-          message: tr(
-            "redeem.success",
-            `Successfully redeemed! Added {{value}} tokens.`,
-            { value: addedQuota.toLocaleString() }
-          ),
+        form.setError('root', {
+          type: 'success',
+          message: tr('redeem.success', `Successfully redeemed! Added {{value}} tokens.`, { value: addedQuota.toLocaleString() }),
         });
         // Reload user data to get updated quota
         loadUserData();
       } else {
-        form.setError("root", {
-          message: message || tr("redeem.failed", "Redemption failed"),
+        form.setError('root', {
+          message: message || tr('redeem.failed', 'Redemption failed'),
         });
       }
     } catch (error) {
-      form.setError("root", {
-        message:
-          error instanceof Error
-            ? error.message
-            : tr("redeem.failed", "Redemption failed"),
+      form.setError('root', {
+        message: error instanceof Error ? error.message : tr('redeem.failed', 'Redemption failed'),
       });
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const onCalculateAmount = async () => {
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount < 1) {
+      notify({
+        type: 'error',
+        title: tr('amount.invalid_title', 'Invalid amount'),
+        message: tr('amount.invalid_message', 'Please enter an amount of at least 1.'),
+      });
+      return;
+    }
+    setIsCalculating(true);
+    try {
+      const res = await api.post('/api/user/amount', {
+        amount: numericAmount,
+        top_up_code: topUpCode,
+      });
+      const payload = res.data || {};
+      const isSuccess = payload.success === true || payload.message === 'success';
+      if (isSuccess) {
+        const computed = typeof payload.data === 'number' ? payload.data : Number(payload.data);
+        if (Number.isFinite(computed)) {
+          setCalculatedAmount(computed);
+          notify({
+            type: 'success',
+            title: tr('amount.calculated_title', 'Amount calculated'),
+            message: tr('amount.calculated_message', 'You will pay: {{value}}', { value: computed.toString() }),
+          });
+        } else {
+          notify({
+            type: 'error',
+            title: tr('amount.failed_title', 'Calculation failed'),
+            message: String(payload.data ?? tr('amount.failed_message', 'Unable to compute amount')),
+          });
+        }
+      } else {
+        notify({
+          type: 'error',
+          title: tr('amount.failed_title', 'Calculation failed'),
+          message: String(payload.data ?? payload.message ?? tr('amount.failed_message', 'Unable to compute amount')),
+        });
+      }
+    } catch (error) {
+      notify({
+        type: 'error',
+        title: tr('amount.failed_title', 'Calculation failed'),
+        message: error instanceof Error ? error.message : tr('amount.failed_message', 'Unable to compute amount'),
+      });
+    } finally {
+      setIsCalculating(false);
+    }
+  };
+
+  const buildTopUpUrl = () => {
+    const url = new URL(topUpLink);
+    if (userData) {
+      url.searchParams.append('username', userData.username);
+      url.searchParams.append('user_id', String(userData.id));
+      const uuid =
+        (globalThis as any).crypto?.randomUUID?.() ??
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          const v = c === 'x' ? r : (r & 0x3) | 0x8;
+          return v.toString(16);
+        });
+      url.searchParams.append('transaction_id', uuid);
+    }
+    return url.toString();
+  };
+
+  const onRecharge = () => {
+    if (!topUpLink) {
+      console.error('No top-up link configured');
+      return;
+    }
+    if (calculatedAmount === null) {
+      notify({
+        type: 'warning',
+        title: tr('amount.calculate_first_title', 'Calculate first'),
+        message: tr('amount.calculate_first_message', 'Please calculate the amount before recharging.'),
+      });
+      return;
+    }
+    try {
+      window.location.href = buildTopUpUrl();
+    } catch (error) {
+      console.error('Error opening top-up link:', error);
+    }
+  };
+
   const openTopUpLink = () => {
     if (!topUpLink) {
-      console.error("No top-up link configured");
+      console.error('No top-up link configured');
       return;
     }
 
     try {
-      const url = new URL(topUpLink);
-      if (userData) {
-        url.searchParams.append("username", userData.username);
-        url.searchParams.append("user_id", userData.id.toString());
-        const uuid =
-          (globalThis as any).crypto?.randomUUID?.() ??
-          "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-            const r = (Math.random() * 16) | 0;
-            const v = c === "x" ? r : (r & 0x3) | 0x8;
-            return v.toString(16);
-          });
-        url.searchParams.append("transaction_id", uuid);
-      }
-      window.open(url.toString(), "_blank");
+      window.open(buildTopUpUrl(), '_blank');
     } catch (error) {
-      console.error("Error opening top-up link:", error);
+      console.error('Error opening top-up link:', error);
     }
   };
 
@@ -165,38 +222,25 @@ export function TopUpPage() {
   }, []);
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="max-w-4xl mx-auto space-y-6">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold mb-2">{tr("title", "Top Up")}</h1>
-          <p className="text-muted-foreground">
-            {tr("description", "Manage your account balance and redeem codes")}
-          </p>
-        </div>
-
+    <ResponsivePageContainer
+      title={tr('title', 'Top Up')}
+      description={tr('description', 'Manage your account balance and redeem codes')}
+      className="max-w-4xl"
+    >
+      <div className="space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Current Balance */}
           <Card>
             <CardHeader>
-              <CardTitle>{tr("balance.title", "Current Balance")}</CardTitle>
-              <CardDescription>
-                {tr("balance.description", "Your current quota balance")}
-              </CardDescription>
+              <CardTitle>{tr('balance.title', 'Current Balance')}</CardTitle>
+              <CardDescription>{tr('balance.description', 'Your current quota balance')}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="text-center">
-                <div className="text-3xl font-bold text-primary mb-2">
-                  {renderQuotaWithPrompt(userQuota)}
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  {tr("balance.available", "Available quota for API usage")}
-                </p>
-                <Button
-                  variant="outline"
-                  className="mt-4"
-                  onClick={loadUserData}
-                >
-                  {tr("balance.refresh", "Refresh Balance")}
+                <div className="text-3xl font-bold text-primary mb-2">{renderQuotaWithPrompt(userQuota)}</div>
+                <p className="text-sm text-muted-foreground">{tr('balance.available', 'Available quota for API usage')}</p>
+                <Button variant="outline" className="mt-4" onClick={loadUserData}>
+                  {tr('balance.refresh', 'Refresh Balance')}
                 </Button>
               </div>
             </CardContent>
@@ -205,36 +249,20 @@ export function TopUpPage() {
           {/* Redemption Code */}
           <Card>
             <CardHeader>
-              <CardTitle>{tr("redeem.title", "Redeem Code")}</CardTitle>
-              <CardDescription>
-                {tr(
-                  "redeem.description",
-                  "Enter a redemption code to add quota"
-                )}
-              </CardDescription>
+              <CardTitle>{tr('redeem.title', 'Redeem Code')}</CardTitle>
+              <CardDescription>{tr('redeem.description', 'Enter a redemption code to add quota')}</CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...form}>
-                <form
-                  onSubmit={form.handleSubmit(onSubmit)}
-                  className="space-y-4"
-                >
+                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
                   <FormField
                     control={form.control}
                     name="redemption_code"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>
-                          {tr("redeem.label", "Redemption Code")}
-                        </FormLabel>
+                        <FormLabel>{tr('redeem.label', 'Redemption Code')}</FormLabel>
                         <FormControl>
-                          <Input
-                            placeholder={tr(
-                              "redeem.placeholder",
-                              "Enter your redemption code"
-                            )}
-                            {...field}
-                          />
+                          <Input placeholder={tr('redeem.placeholder', 'Enter your redemption code')} {...field} />
                         </FormControl>
                         <FormMessage />
                       </FormItem>
@@ -242,25 +270,13 @@ export function TopUpPage() {
                   />
 
                   {form.formState.errors.root && (
-                    <div
-                      className={`text-sm ${
-                        form.formState.errors.root.type === "success"
-                          ? "text-green-600"
-                          : "text-destructive"
-                      }`}
-                    >
+                    <div className={`text-sm ${form.formState.errors.root.type === 'success' ? 'text-success' : 'text-destructive'}`}>
                       {form.formState.errors.root.message}
                     </div>
                   )}
 
-                  <Button
-                    type="submit"
-                    className="w-full"
-                    disabled={isSubmitting}
-                  >
-                    {isSubmitting
-                      ? tr("redeem.processing", "Redeeming...")
-                      : tr("redeem.button", "Redeem Code")}
+                  <Button type="submit" className="w-full" disabled={isSubmitting}>
+                    {isSubmitting ? tr('redeem.processing', 'Redeeming...') : tr('redeem.button', 'Redeem Code')}
                   </Button>
                 </form>
               </Form>
@@ -268,35 +284,87 @@ export function TopUpPage() {
           </Card>
         </div>
 
-        {/* External Top-up */}
+        {/* External Top-up + Amount Calculator */}
         {topUpLink && (
           <Card>
             <CardHeader>
-              <CardTitle>{tr("online.title", "Online Payment")}</CardTitle>
-              <CardDescription>
-                {tr(
-                  "online.description",
-                  "Purchase quota through our external payment system"
-                )}
-              </CardDescription>
+              <CardTitle>{tr('online.title', 'Online Payment')}</CardTitle>
+              <CardDescription>{tr('online.description', 'Purchase quota through our external payment system')}</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="text-center space-y-4">
-                <p className="text-sm text-muted-foreground">
-                  {tr(
-                    "online.text",
-                    "Click the button below to open our secure payment portal where you can purchase additional quota for your account."
+              <div className="space-y-6">
+                {/* Amount precalculation */}
+                <div className="space-y-3 rounded-md border p-4">
+                  <div className="text-sm font-medium">{tr('amount.title', 'Calculate Payable Amount')}</div>
+                  <p className="text-xs text-muted-foreground">
+                    {tr('amount.description', 'Enter the desired top-up amount and an optional code, then preview the payable total.')}
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground" htmlFor="topup-amount">
+                        {tr('amount.amount_label', 'Amount')}
+                      </label>
+                      <Input
+                        id="topup-amount"
+                        type="number"
+                        min={1}
+                        value={amount}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setAmount(Number.isFinite(v) ? v : 1);
+                          setCalculatedAmount(null);
+                        }}
+                        placeholder={tr('amount.amount_placeholder', 'Enter amount')}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs text-muted-foreground" htmlFor="topup-code">
+                        {tr('amount.code_label', 'Top-up Code (optional)')}
+                      </label>
+                      <Input
+                        id="topup-code"
+                        value={topUpCode}
+                        onChange={(e) => {
+                          setTopUpCode(e.target.value);
+                          setCalculatedAmount(null);
+                        }}
+                        placeholder={tr('amount.code_placeholder', 'Enter top-up code')}
+                      />
+                    </div>
+                  </div>
+                  {calculatedAmount !== null && (
+                    <div className="text-sm font-medium" data-testid="topup-amount-result">
+                      {tr('amount.result', 'You will pay: {{value}}', { value: calculatedAmount.toString() })}
+                    </div>
                   )}
-                </p>
-                <Button onClick={openTopUpLink} size="lg">
-                  {tr("online.button", "Open Payment Portal")}
-                </Button>
-                <p className="text-xs text-muted-foreground">
-                  {tr(
-                    "online.note",
-                    "You will be redirected to an external payment system. Your account information will be automatically included."
-                  )}
-                </p>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <Button type="button" variant="outline" onClick={onCalculateAmount} disabled={isCalculating}>
+                      {isCalculating ? tr('amount.calculating', 'Calculating...') : tr('amount.calculate_button', 'Calculate')}
+                    </Button>
+                    <Button type="button" onClick={onRecharge} disabled={calculatedAmount === null}>
+                      {tr('amount.recharge_button', 'Recharge')}
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Legacy direct portal */}
+                <div className="text-center space-y-4">
+                  <p className="text-sm text-muted-foreground">
+                    {tr(
+                      'online.text',
+                      'Click the button below to open our secure payment portal where you can purchase additional quota for your account.'
+                    )}
+                  </p>
+                  <Button onClick={openTopUpLink} size="lg" variant="outline">
+                    {tr('online.button', 'Open Payment Portal')}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    {tr(
+                      'online.note',
+                      'You will be redirected to an external payment system. Your account information will be automatically included.'
+                    )}
+                  </p>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -305,20 +373,18 @@ export function TopUpPage() {
         {/* Usage Tips */}
         <Card>
           <CardHeader>
-            <CardTitle>{tr("tips.title", "Tips")}</CardTitle>
+            <CardTitle>{tr('tips.title', 'Tips')}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-2 text-sm text-muted-foreground">
-              {(
-                t("topup.tips.content", { returnObjects: true }) as string[]
-              ).map((tip, index) => (
+              {(t('topup.tips.content', { returnObjects: true }) as string[]).map((tip, index) => (
                 <p key={index}>• {tip}</p>
               ))}
             </div>
           </CardContent>
         </Card>
       </div>
-    </div>
+    </ResponsivePageContainer>
   );
 }
 

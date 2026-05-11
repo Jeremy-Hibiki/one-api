@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,18 +12,19 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/image"
-	"github.com/songquanpeng/one-api/common/random"
-	"github.com/songquanpeng/one-api/common/render"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/relay/adaptor/geminiOpenaiCompatible"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/constant"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/image"
+	"github.com/Laisky/one-api/common/random"
+	"github.com/Laisky/one-api/common/render"
+	commonsse "github.com/Laisky/one-api/common/sse"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/relay/adaptor/geminiOpenaiCompatible"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/constant"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // https://ai.google.dev/docs/gemini_api_overview?hl=zh-cn
@@ -490,28 +490,27 @@ func convertToolChoiceToConfig(toolChoice any) *ToolConfig {
 }
 
 // ConvertEmbeddingRequest converts an OpenAI-compatible embedding request to Gemini's BatchEmbeddingRequest format.
-// It transforms input text(s) into the format expected by Gemini's embedding API.
-func ConvertEmbeddingRequest(request model.GeneralOpenAIRequest) *BatchEmbeddingRequest {
-	inputs := request.ParseInput()
-	requests := make([]EmbeddingRequest, len(inputs))
+// Parameters: request is the OpenAI-compatible embeddings request.
+// Returns: the Gemini batch embedding request or an error when the input cannot be normalized into Gemini contents.
+func ConvertEmbeddingRequest(request model.GeneralOpenAIRequest) (*BatchEmbeddingRequest, error) {
+	contents, _, err := BuildEmbeddingContents(request.Input)
+	if err != nil {
+		return nil, errors.Wrap(err, "build gemini embedding contents")
+	}
+
+	requests := make([]EmbeddingRequest, len(contents))
 	model := fmt.Sprintf("models/%s", request.Model)
 
-	for i, input := range inputs {
+	for i, content := range contents {
 		requests[i] = EmbeddingRequest{
-			Model: model,
-			Content: ChatContent{
-				Parts: []Part{
-					{
-						Text: input,
-					},
-				},
-			},
+			Model:   model,
+			Content: content,
 		}
 	}
 
 	return &BatchEmbeddingRequest{
 		Requests: requests,
-	}
+	}, nil
 }
 
 type ChatResponse struct {
@@ -780,12 +779,19 @@ func streamResponseGeminiChat2OpenAI(c *gin.Context, geminiResponse *ChatRespons
 	return &response
 }
 
-func embeddingResponseGemini2OpenAI(response *EmbeddingResponse) *openai.EmbeddingResponse {
+// embeddingResponseGemini2OpenAI converts Gemini embedding results into OpenAI format.
+// Parameters: response is the parsed Gemini embedding response, promptTokens is the locally counted input token total, and details is the optional modality breakdown from preflight countTokens.
+// Returns: an OpenAI-compatible embedding response populated with a billing-safe usage fallback.
+func embeddingResponseGemini2OpenAI(response *EmbeddingResponse, promptTokens int, details *model.UsagePromptTokensDetails) *openai.EmbeddingResponse {
 	openAIEmbeddingResponse := openai.EmbeddingResponse{
 		Object: "list",
 		Data:   make([]openai.EmbeddingResponseItem, 0, len(response.Embeddings)),
 		Model:  "gemini-embedding",
-		Usage:  model.Usage{TotalTokens: 0},
+		Usage: model.Usage{
+			PromptTokens:        promptTokens,
+			TotalTokens:         promptTokens,
+			PromptTokensDetails: details,
+		},
 	}
 	for _, item := range response.Embeddings {
 		openAIEmbeddingResponse.Data = append(openAIEmbeddingResponse.Data, openai.EmbeddingResponseItem{
@@ -795,6 +801,25 @@ func embeddingResponseGemini2OpenAI(response *EmbeddingResponse) *openai.Embeddi
 		})
 	}
 	return &openAIEmbeddingResponse
+}
+
+// embeddingPromptTokensDetailsFromContext returns preflight embedding modality details stored in the request context.
+// Parameters: c is the current request context.
+// Returns: the stored prompt token details or nil when no preflight details were captured.
+func embeddingPromptTokensDetailsFromContext(c *gin.Context) *model.UsagePromptTokensDetails {
+	if c == nil {
+		return nil
+	}
+	raw, exists := c.Get(ctxkey.EmbeddingPromptTokensDetails)
+	if !exists {
+		return nil
+	}
+
+	details, ok := raw.(*model.UsagePromptTokensDetails)
+	if !ok {
+		return nil
+	}
+	return details
 }
 
 // geminiOutputImageCounts aggregates image counts for Gemini output parts.
@@ -863,14 +888,38 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 	outputImageCount := 0
 	inlineImageCount := 0
 	fileImageCount := 0
-	scanner := bufio.NewScanner(resp.Body)
-	helper.ConfigureScannerBuffer(scanner)
-	scanner.Split(bufio.ScanLines)
+	lineReader := commonsse.NewLineReader(resp.Body, commonsse.DefaultLineBufferSize)
 
 	common.SetEventStreamHeaders(c)
 
-	for scanner.Scan() {
-		data := scanner.Text()
+	// Wrap the reader with heartbeats to prevent reverse-proxy timeouts (e.g. Cloudflare 524).
+	hbr := render.NewHeartbeatLineReader(c, lineReader, render.DefaultHeartbeatInterval)
+	defer hbr.Close()
+	var streamErr error
+
+	for {
+		line, err := hbr.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			streamErr = err
+			break
+		}
+
+		var data string
+		if line.Oversized {
+			payload, err := io.ReadAll(line.Large)
+			if err != nil {
+				streamErr = err
+				break
+			}
+			data = "data: " + string(payload)
+		} else {
+			data = line.Text()
+		}
+
 		data = strings.TrimSpace(data)
 
 		if !strings.HasPrefix(data, "data: ") {
@@ -880,7 +929,7 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 		data = strings.TrimSuffix(data, "\"")
 
 		var geminiResponse ChatResponse
-		err := json.Unmarshal([]byte(data), &geminiResponse)
+		err = json.Unmarshal([]byte(data), &geminiResponse)
 		if err != nil {
 			lg.Error("error unmarshalling stream response",
 				zap.Error(errors.Wrap(err, "unmarshal stream")))
@@ -905,10 +954,8 @@ func StreamHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusC
 				zap.Error(errors.Wrap(err, "render stream")))
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		lg.Error("error reading stream",
-			zap.Error(errors.Wrap(err, "scanner stream")),
-			zap.Int("scanner_max_token_size", helper.DefaultScannerMaxTokenSize))
+	if streamErr != nil {
+		render.LogHeartbeatLineReaderError(c, lg, errors.Wrap(streamErr, "line reader stream"), hbr)
 	}
 
 	if outputImageCount > 0 {
@@ -1031,10 +1078,9 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 }
 
 // EmbeddingHandler processes embedding responses from the Gemini API and converts them to OpenAI-compatible format.
-// It reads the response body, unmarshals it into Gemini's embedding format, converts it to OpenAI's format,
-// and writes the response back to the client.
-// Returns an error if processing fails, and the usage statistics on success.
-func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStatusCode, *model.Usage) {
+// Parameters: c is the current request context, resp is the upstream Gemini HTTP response, and promptTokens is the preflight input token total used as a fallback when Gemini omits usage.
+// Returns: an API error when processing fails, otherwise the usage statistics written back to the client response.
+func EmbeddingHandler(c *gin.Context, resp *http.Response, promptTokens int) (*model.ErrorWithStatusCode, *model.Usage) {
 	var geminiEmbeddingResponse EmbeddingResponse
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1060,7 +1106,7 @@ func EmbeddingHandler(c *gin.Context, resp *http.Response) (*model.ErrorWithStat
 			StatusCode: resp.StatusCode,
 		}, nil
 	}
-	fullTextResponse := embeddingResponseGemini2OpenAI(&geminiEmbeddingResponse)
+	fullTextResponse := embeddingResponseGemini2OpenAI(&geminiEmbeddingResponse, promptTokens, embeddingPromptTokensDetailsFromContext(c))
 	jsonResponse, err := json.Marshal(fullTextResponse)
 	if err != nil {
 		return openai.ErrorWrapper(errors.Wrap(err, "marshal_response_body_failed"), "marshal_response_body_failed", http.StatusInternalServerError), nil

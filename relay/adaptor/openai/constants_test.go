@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/Laisky/one-api/relay/billing/ratio"
 )
 
 func TestDallE3HasPerImagePricing(t *testing.T) {
@@ -32,4 +34,53 @@ func TestOpenAIToolingDefaultsWebSearchPricing(t *testing.T) {
 		"web_search_preview_reasoning",
 		"web_search_preview_non_reasoning",
 	}, keys, "expected pricing map to enumerate all OpenAI built-in tools")
+}
+
+func TestRealtimeModelsIncludeCurrentStableIDs(t *testing.T) {
+	t.Parallel()
+
+	testCases := map[string]struct {
+		ratio            float64
+		cachedInputRatio float64
+		completionRatio  float64
+	}{
+		"gpt-realtime-1.5": {
+			ratio:            4.0 * ratio.MilliTokensUsd,
+			cachedInputRatio: 0.4 * ratio.MilliTokensUsd,
+			completionRatio:  4.0,
+		},
+		"gpt-realtime-mini": {
+			ratio:            0.6 * ratio.MilliTokensUsd,
+			cachedInputRatio: 0.06 * ratio.MilliTokensUsd,
+			completionRatio:  4.0,
+		},
+	}
+
+	for modelName, expected := range testCases {
+		cfg, ok := ModelRatios[modelName]
+		require.True(t, ok, "%s missing from pricing map", modelName)
+		require.InDelta(t, expected.ratio, cfg.Ratio, 1e-12)
+		require.InDelta(t, expected.cachedInputRatio, cfg.CachedInputRatio, 1e-12)
+		require.InDelta(t, expected.completionRatio, cfg.CompletionRatio, 1e-12)
+	}
+}
+
+// TestOpenAIAudioMetadata verifies explicit token limits for transcribe and mini-tts models.
+// Parameter t coordinates the test run. Returns no values.
+func TestOpenAIAudioMetadata(t *testing.T) {
+	t.Parallel()
+
+	transcribeCfg, ok := ModelRatios["gpt-4o-transcribe"]
+	require.True(t, ok)
+	require.EqualValues(t, 16000, transcribeCfg.ContextLength)
+	require.EqualValues(t, 2000, transcribeCfg.MaxOutputTokens)
+
+	miniTranscribeCfg, ok := ModelRatios["gpt-4o-mini-transcribe"]
+	require.True(t, ok)
+	require.EqualValues(t, 16000, miniTranscribeCfg.ContextLength)
+	require.EqualValues(t, 2000, miniTranscribeCfg.MaxOutputTokens)
+
+	miniTTSCfg, ok := ModelRatios["gpt-4o-mini-tts"]
+	require.True(t, ok)
+	require.EqualValues(t, 2000, miniTTSCfg.ContextLength)
 }

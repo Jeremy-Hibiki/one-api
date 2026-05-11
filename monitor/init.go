@@ -4,11 +4,13 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/metrics"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/monitor/otel"
-	"github.com/songquanpeng/one-api/monitor/prometheus"
+	"github.com/Laisky/errors/v2"
+
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/metrics"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/monitor/otel"
+	"github.com/Laisky/one-api/monitor/prometheus"
 )
 
 // InitMonitoring initializes all monitoring components
@@ -24,7 +26,7 @@ func InitMonitoring(version, buildTime, goVersion string, startTime time.Time) e
 	if config.OpenTelemetryEnabled {
 		otelRecorder, err := otel.NewOtelRecorder()
 		if err != nil {
-			return err
+			return errors.Wrap(err, "create OpenTelemetry recorder")
 		}
 		recorders = append(recorders, otelRecorder)
 	}

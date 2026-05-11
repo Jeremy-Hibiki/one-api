@@ -8,11 +8,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 func TestChannelSpecificConversion(t *testing.T) {
@@ -196,4 +196,51 @@ func TestAzureGPT5ConversionToResponseAPI(t *testing.T) {
 	stored, ok := c.Get(ctxkey.ConvertedRequest)
 	require.True(t, ok)
 	require.IsType(t, &ResponseAPIRequest{}, stored)
+}
+
+func TestConvertRequest_ResponseAPIModeBypassesConversionSanitization(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	req := &model.GeneralOpenAIRequest{
+		Model: "gpt-4.1-nano",
+		Messages: []model.Message{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{
+						"type": "input_text",
+						"text": "hello",
+						"cache_control": map[string]any{
+							"type": "ephemeral",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = &http.Request{}
+
+	metaInfo := &meta.Meta{
+		Mode:            relaymode.ResponseAPI,
+		ChannelType:     channeltype.OpenAI,
+		BaseURL:         "https://api.openai.com",
+		RequestURLPath:  "/v1/responses",
+		ActualModelName: req.Model,
+	}
+	c.Set(ctxkey.Meta, metaInfo)
+
+	adaptor := &Adaptor{}
+	converted, err := adaptor.ConvertRequest(c, relaymode.ResponseAPI, req)
+	require.NoError(t, err)
+	require.Same(t, req, converted, "Response API mode should pass through request object")
+
+	content, ok := req.Messages[0].Content.([]any)
+	require.True(t, ok)
+	firstItem, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	_, hasCacheControl := firstItem["cache_control"]
+	require.True(t, hasCacheControl, "cache_control must remain untouched in direct Response API mode")
 }

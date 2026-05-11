@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Form } from '@/components/ui/form';
+import { ResponsivePageContainer } from '@/components/ui/responsive-container';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { logEditPageLayout } from '@/dev/layout-debug';
 import { AlertCircle, Info } from 'lucide-react';
@@ -13,6 +14,7 @@ import { ChannelMCPSettings } from './components/ChannelMCPSettings';
 import { ChannelModelSettings } from './components/ChannelModelSettings';
 import { ChannelSpecificConfig } from './components/ChannelSpecificConfig';
 import { ChannelToolingSettings } from './components/ChannelToolingSettings';
+import { ChannelSaveWarningDialog } from './components/ChannelSaveWarningDialog';
 import { ChannelTypeChangeDialog } from './components/ChannelTypeChangeDialog';
 import { CHANNEL_TYPES } from './constants';
 import { useChannelForm } from './hooks/useChannelForm';
@@ -43,6 +45,10 @@ export function EditChannelPage() {
     requestTypeChange,
     confirmTypeChange,
     cancelTypeChange,
+    // Save warning handling
+    pendingSaveConfirmation,
+    confirmSave,
+    cancelSave,
   } = useChannelForm();
 
   const selectedChannelType = CHANNEL_TYPES.find((t) => t.value === normalizedChannelType);
@@ -57,14 +63,17 @@ export function EditChannelPage() {
 
   if (shouldShowLoading) {
     return (
-      <div className="container mx-auto px-4 py-8">
-        <Card>
+      <ResponsivePageContainer
+        title={isEdit ? tr('title.edit', 'Edit Channel') : tr('title.create', 'Create Channel')}
+        description={isEdit ? tr('description.edit', 'Update channel configuration') : tr('description.create', 'Create a new API channel')}
+      >
+        <Card className="border-0 shadow-none md:border md:shadow-sm">
           <CardContent className="flex items-center justify-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             <span className="ml-3">{tr('loading', 'Loading channel...')}</span>
           </CardContent>
         </Card>
-      </div>
+      </ResponsivePageContainer>
     );
   }
 
@@ -97,7 +106,10 @@ export function EditChannelPage() {
   };
 
   return (
-    <div className="container mx-auto px-4 py-6">
+    <ResponsivePageContainer
+      title={isEdit ? tr('title.edit', 'Edit Channel') : tr('title.create', 'Create Channel')}
+      description={isEdit ? tr('description.edit', 'Update channel configuration') : tr('description.create', 'Create a new API channel')}
+    >
       <TooltipProvider>
         {/* Channel Type Change Confirmation Dialog */}
         <ChannelTypeChangeDialog
@@ -111,33 +123,35 @@ export function EditChannelPage() {
           onCancel={cancelTypeChange}
           tr={tr}
         />
-        <Card>
-          <CardHeader>
-            <CardTitle>{isEdit ? tr('title.edit', 'Edit Channel') : tr('title.create', 'Create Channel')}</CardTitle>
-            <CardDescription>
-              {isEdit ? tr('description.edit', 'Update channel configuration') : tr('description.create', 'Create a new API channel')}
-            </CardDescription>
+        <ChannelSaveWarningDialog
+          open={pendingSaveConfirmation !== null}
+          onOpenChange={(open) => {
+            if (!open) cancelSave();
+          }}
+          unreachableMappingKeys={pendingSaveConfirmation?.unreachableMappingKeys ?? []}
+          unknownMappingTargets={pendingSaveConfirmation?.unknownMappingTargets ?? []}
+          onConfirm={confirmSave}
+          onCancel={cancelSave}
+          tr={tr}
+        />
+        <Card className="border-0 shadow-none md:border md:shadow-sm">
+          <CardContent className="space-y-6 p-4 sm:p-6">
             {selectedChannelType?.description && (
-              <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                <Info className="h-4 w-4 text-blue-600" />
-                <span className="text-sm text-blue-800">
+              <div className="flex items-center gap-2 p-3 bg-info-muted border border-info-border rounded-lg">
+                <Info className="h-4 w-4 text-info" />
+                <span className="text-sm text-info-foreground">
                   {tr(`channel_type.${selectedChannelType.value}.description`, selectedChannelType.description)}
                 </span>
               </div>
             )}
             {selectedChannelType?.tip && (
-              <div className="flex items-center gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                <AlertCircle className="h-4 w-4 text-yellow-600" />
-                <span
-                  className="text-sm text-yellow-800"
-                  dangerouslySetInnerHTML={{
-                    __html: tr(`channel_type.${selectedChannelType.value}.tip`, selectedChannelType.tip),
-                  }}
-                />
+              <div className="flex items-center gap-2 p-3 bg-warning-muted border border-warning-border rounded-lg">
+                <AlertCircle className="h-4 w-4 text-warning" />
+                <span className="text-sm text-warning-foreground">
+                  {tr(`channel_type.${selectedChannelType.value}.tip`, selectedChannelType.tip)}
+                </span>
               </div>
             )}
-          </CardHeader>
-          <CardContent>
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit, onInvalid)} className="space-y-6">
                 <ChannelBasicInfo
@@ -175,8 +189,16 @@ export function EditChannelPage() {
 
                 {form.formState.errors.root && <div className="text-sm text-destructive">{form.formState.errors.root.message}</div>}
 
-                <div className="flex gap-2">
-                  <Button type="submit" disabled={isSubmitting}>
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+                  <Button type="button" variant="outline" onClick={() => window.history.back()} className="w-full sm:w-auto">
+                    {tr('actions.cancel', 'Cancel')}
+                  </Button>
+                  {isEdit && (
+                    <Button type="button" variant="secondary" onClick={testChannel} disabled={isSubmitting} className="w-full sm:w-auto">
+                      {tr('actions.test_channel', 'Test Channel')}
+                    </Button>
+                  )}
+                  <Button type="submit" disabled={isSubmitting} className="w-full sm:w-auto">
                     {isSubmitting
                       ? isEdit
                         ? tr('actions.updating', 'Updating...')
@@ -185,21 +207,13 @@ export function EditChannelPage() {
                         ? tr('actions.update', 'Update Channel')
                         : tr('actions.create', 'Create Channel')}
                   </Button>
-                  {isEdit && (
-                    <Button type="button" variant="secondary" onClick={testChannel} disabled={isSubmitting}>
-                      {tr('actions.test_channel', 'Test Channel')}
-                    </Button>
-                  )}
-                  <Button type="button" variant="outline" onClick={() => window.history.back()}>
-                    {tr('actions.cancel', 'Cancel')}
-                  </Button>
                 </div>
               </form>
             </Form>
           </CardContent>
         </Card>
       </TooltipProvider>
-    </div>
+    </ResponsivePageContainer>
   );
 }
 

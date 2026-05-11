@@ -11,12 +11,12 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
 )
 
 // responseCaptureWriter is a gin.ResponseWriter that captures the response body and status code
@@ -138,13 +138,19 @@ func normalizeResponseAPIRawBody(rawBody []byte, request *openai.ResponseAPIRequ
 
 	if len(rawBody) == 0 {
 		patched, err := json.Marshal(request)
-		return patched, stats, err == nil, err
+		if err != nil {
+			return rawBody, stats, false, errors.Wrap(err, "marshal response API request")
+		}
+		return patched, stats, true, nil
 	}
 
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &root); err != nil {
 		patched, err2 := json.Marshal(request)
-		return patched, stats, err2 == nil, err2
+		if err2 != nil {
+			return rawBody, stats, false, errors.Wrap(err2, "marshal response API request after unmarshal failure")
+		}
+		return patched, stats, true, nil
 	}
 
 	changed := false
@@ -272,12 +278,22 @@ func normalizeResponseAPIRawBody(rawBody []byte, request *openai.ResponseAPIRequ
 	}
 
 	if !changed {
-		return rawBody, stats, false, nil
+		merged, _, mergeChanged, err := mergeControlledPassthroughJSON(rawBody, rawBody, false)
+		if err != nil {
+			return nil, stats, false, errors.Wrap(err, "merge response passthrough fields")
+		}
+		return merged, stats, mergeChanged, nil
 	}
 
 	patched, err := json.Marshal(root)
 	if err != nil {
 		return nil, stats, false, errors.Wrap(err, "marshal patched Response API request")
 	}
-	return patched, stats, true, nil
+
+	merged, _, mergeChanged, err := mergeControlledPassthroughJSON(rawBody, patched, false)
+	if err != nil {
+		return nil, stats, false, errors.Wrap(err, "merge response passthrough fields")
+	}
+
+	return merged, stats, changed || mergeChanged, nil
 }

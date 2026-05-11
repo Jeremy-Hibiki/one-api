@@ -43,9 +43,9 @@ export function RedemptionsPage() {
   const renderStatus = useCallback(
     (status: number) => {
       const map: Record<number, { text: string; cls: string }> = {
-        1: { text: tr('status.unused', 'Unused'), cls: 'text-green-600' },
-        2: { text: tr('status.disabled', 'Disabled'), cls: 'text-red-600' },
-        3: { text: tr('status.used', 'Used'), cls: 'text-gray-600' },
+        1: { text: tr('status.unused', 'Unused'), cls: 'text-success' },
+        2: { text: tr('status.disabled', 'Disabled'), cls: 'text-destructive' },
+        3: { text: tr('status.used', 'Used'), cls: 'text-muted-foreground' },
       };
       const v = map[status] || {
         text: tr('status.unknown', 'Unknown'),
@@ -219,7 +219,7 @@ export function RedemptionsPage() {
       title={tr('title', 'Redemptions')}
       description={tr('description', 'Manage recharge codes')}
       actions={
-        <div className={cn('flex gap-2 flex-wrap', isMobile ? 'w-full overflow-x-auto pb-1' : 'items-center')}>
+        <div className={cn('flex gap-2 flex-wrap max-w-full', isMobile ? 'w-full flex-col' : 'items-center')}>
           <Button
             onClick={() => navigate('/redemptions/add')}
             className={cn('whitespace-nowrap', isMobile ? 'w-full touch-target' : '')}
@@ -247,8 +247,8 @@ export function RedemptionsPage() {
       }
     >
       <Card className="border-0 md:border shadow-none md:shadow-sm">
-        <CardContent className={cn(isMobile ? 'p-2' : 'p-6')}>
-          <div className={cn('flex gap-2 mb-3 flex-wrap', isMobile ? 'w-full' : 'items-center')}>
+        <CardContent className={cn(isMobile ? 'p-3' : 'p-6')}>
+          <div className={cn('flex gap-2 mb-3 flex-wrap', isMobile ? 'w-full flex-col' : 'items-center')}>
             <SearchableDropdown
               value={searchKeyword}
               placeholder={tr('search.placeholder', 'Search redemptions by name...')}

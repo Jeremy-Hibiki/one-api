@@ -10,8 +10,9 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 // ModelConfig represents pricing and configuration information for a model
@@ -46,6 +47,66 @@ type ModelConfig struct {
 	Audio *AudioPricingConfig `json:"audio,omitempty"`
 	// Image captures pricing metadata for image prompt and render billing.
 	Image *ImagePricingConfig `json:"image,omitempty"`
+	// Embedding captures modality-specific pricing metadata for embedding requests.
+	Embedding *EmbeddingPricingConfig `json:"embedding,omitempty"`
+	// ContextLength is the total token context (input+output) the model supports.
+	// 0 means unspecified — caller should fall back to a reasonable default.
+	ContextLength int32 `json:"context_length,omitempty"`
+	// MaxOutputTokens is the maximum tokens the model can emit per response.
+	// 0 means unspecified — caller should fall back to ContextLength or a default.
+	MaxOutputTokens int32 `json:"max_output_tokens,omitempty"`
+	// InputModalities lists supported input modalities. Empty implies ["text"].
+	// Valid OpenRouter values include "text", "image", "file".
+	InputModalities []string `json:"input_modalities,omitempty"`
+	// OutputModalities lists supported output modalities. Empty implies ["text"].
+	OutputModalities []string `json:"output_modalities,omitempty"`
+	// SupportedFeatures advertises capabilities. Subset of:
+	// "tools", "json_mode", "structured_outputs", "logprobs", "web_search", "reasoning".
+	SupportedFeatures []string `json:"supported_features,omitempty"`
+	// SupportedSamplingParameters lists OpenAI-compatible sampling parameters this model accepts.
+	// Empty means caller should use a default conservative set.
+	SupportedSamplingParameters []string `json:"supported_sampling_parameters,omitempty"`
+	// Quantization advertises numeric precision. Empty means unspecified.
+	// Valid OpenRouter values: "int4","int8","fp4","fp6","fp8","fp16","bf16","fp32".
+	Quantization string `json:"quantization,omitempty"`
+	// HuggingFaceID identifies the model on HuggingFace if applicable. Empty if not on HF.
+	HuggingFaceID string `json:"hugging_face_id,omitempty"`
+	// Description is a short human-readable description (optional).
+	Description string `json:"description,omitempty"`
+}
+
+// EmbeddingPricingConfig captures modality-specific pricing metadata for embedding requests.
+// Token ratios are expressed per input token, while the USD-per-unit fields are used when
+// the relay only has image counts, audio durations, or video frame counts available.
+type EmbeddingPricingConfig struct {
+	TextTokenRatio     float64 `json:"text_token_ratio,omitempty"`
+	ImageTokenRatio    float64 `json:"image_token_ratio,omitempty"`
+	AudioTokenRatio    float64 `json:"audio_token_ratio,omitempty"`
+	VideoTokenRatio    float64 `json:"video_token_ratio,omitempty"`
+	DocumentTokenRatio float64 `json:"document_token_ratio,omitempty"`
+	UsdPerImage        float64 `json:"usd_per_image,omitempty"`
+	UsdPerAudioSecond  float64 `json:"usd_per_audio_second,omitempty"`
+	UsdPerVideoFrame   float64 `json:"usd_per_video_frame,omitempty"`
+	UsdPerDocumentPage float64 `json:"usd_per_document_page,omitempty"`
+}
+
+// HasData reports whether the embedding configuration contains any pricing metadata.
+func (cfg *EmbeddingPricingConfig) HasData() bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.TextTokenRatio != 0 || cfg.ImageTokenRatio != 0 || cfg.AudioTokenRatio != 0 ||
+		cfg.VideoTokenRatio != 0 || cfg.DocumentTokenRatio != 0 || cfg.UsdPerImage != 0 ||
+		cfg.UsdPerAudioSecond != 0 || cfg.UsdPerVideoFrame != 0 || cfg.UsdPerDocumentPage != 0
+}
+
+// Clone returns a copy of the embedding pricing configuration.
+func (cfg *EmbeddingPricingConfig) Clone() *EmbeddingPricingConfig {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	return &clone
 }
 
 // VideoPricingConfig captures pricing metadata for video generation requests.
@@ -291,6 +352,14 @@ type Adaptor interface {
 	GetCompletionRatio(modelName string) float64
 }
 
+// OCRAdaptor represents adaptors that can natively consume the dedicated OCR / layout-parsing DTO.
+// Adaptors must implement this interface to accept /v1/layout_parsing requests; otherwise the
+// controller will reject the call as unsupported.
+type OCRAdaptor interface {
+	ConvertOCRRequest(c *gin.Context, request *model.OCRRequest) (any, error)
+	DoOCRResponse(c *gin.Context, resp *http.Response, meta *meta.Meta) (usage *model.Usage, err *model.ErrorWithStatusCode)
+}
+
 // RerankAdaptor represents adaptors that can natively consume the dedicated rerank DTO.
 // Adaptors must implement this interface to accept /v1/rerank requests; otherwise the
 // controller will reject the call as unsupported.
@@ -307,7 +376,7 @@ func (d *DefaultPricingMethods) GetDefaultModelPricing() map[string]ModelConfig 
 
 func (d *DefaultPricingMethods) GetModelRatio(modelName string) float64 {
 	// Fallback to a reasonable default
-	return 2.5 * 0.000001 // 2.5 USD per million tokens
+	return 2.5 * billingratio.MilliTokensUsd // 2.5 USD per million tokens in internal quota units
 }
 
 func (d *DefaultPricingMethods) GetCompletionRatio(modelName string) float64 {

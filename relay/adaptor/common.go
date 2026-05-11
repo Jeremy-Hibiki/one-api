@@ -11,11 +11,11 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/client"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/common/tracing"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/meta"
+	"github.com/Laisky/one-api/common/client"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/meta"
 )
 
 const (
@@ -43,6 +43,9 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 	if err != nil {
 		return nil, errors.Wrap(err, "get request url failed")
 	}
+	if meta != nil {
+		meta.UpstreamRequestURL = fullRequestURL
+	}
 
 	var (
 		preview   []byte
@@ -66,7 +69,7 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 			_, _ = seeker.Seek(currentPos, io.SeekStart)
 			buf := make([]byte, requestPreviewLimit+1)
 			n, err := seeker.Read(buf)
-			if err != nil && err != io.EOF {
+			if err != nil && !errors.Is(err, io.EOF) {
 				n = 0
 			}
 			if n > requestPreviewLimit {
@@ -118,6 +121,7 @@ func DoRequestHelper(a Adaptor, c *gin.Context, meta *meta.Meta, requestBody io.
 
 	// Optionally: Record when request is forwarded to upstream (non-standard event)
 	tracing.RecordTraceTimestamp(c, model.TimestampRequestForwarded)
+	c.Set(ctxkey.UpstreamRequestPossiblyForwarded, true)
 
 	resp, err := DoRequest(c, req)
 	if err != nil {

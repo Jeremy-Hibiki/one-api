@@ -6,9 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/model"
 )
 
 func TestShouldRetry_ClientAndAuthMatrix(t *testing.T) {
@@ -104,5 +105,271 @@ func TestClassifyAuthLike(t *testing.T) {
 		t.Parallel()
 		e := &model.ErrorWithStatusCode{StatusCode: http.StatusInternalServerError, Error: model.Error{Message: "internal error"}}
 		assert.False(t, classifyAuthLike(e))
+	})
+}
+
+func TestIsUserOriginatedRelayError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil error", func(t *testing.T) {
+		t.Parallel()
+		assert.False(t, isUserOriginatedRelayError(nil))
+	})
+
+	t.Run("oneapi bad request", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Type: model.ErrorTypeOneAPI,
+				Code: "invalid_text_request",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("insufficient user quota", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "insufficient_user_quota",
+				Message: "user quota is not enough",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("insufficient token quota from pre consume", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "pre_consume_token_quota_failed",
+				Message: "insufficient token quota: required=100, available=0, tokenId=1",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("non-user pre consume failure", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "pre_consume_token_quota_failed",
+				Message: "failed to get token for pre-consume: tokenId=1",
+			},
+		}
+		assert.False(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("upstream auth failure should not be treated as user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeAuthentication,
+				Code:    "invalid_api_key",
+				Message: "invalid api key",
+			},
+		}
+		assert.False(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("oneapi token expired should be user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusUnauthorized,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "token_expired",
+				Message: "token has expired",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("oneapi model whitelist restriction should be user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "model_not_allowed",
+				Message: "model not allowed by token whitelist",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("oneapi token model permission message should be user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "forbidden",
+				Message: "model not allowed for this token",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("oneapi token balance exhausted message should be user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusForbidden,
+			Error: model.Error{
+				Type:    model.ErrorTypeOneAPI,
+				Code:    "forbidden",
+				Message: "API key quota has been exhausted",
+			},
+		}
+		assert.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("upstream malformed tool arguments should be user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Type:    model.ErrorTypeInvalidRequest,
+				Code:    "tool_use_failed",
+				Message: "Failed to parse tool call arguments as JSON",
+			},
+		}
+		require.True(t, isUserOriginatedRelayError(err))
+	})
+
+	t.Run("generic upstream bad request is not user-originated", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Type:    model.ErrorTypeInvalidRequest,
+				Code:    "invalid_request_error",
+				Message: "tool schema invalid",
+			},
+		}
+		require.False(t, isUserOriginatedRelayError(err))
+	})
+}
+
+func TestIsUpstreamMalformedToolCallError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("tool_use_failed code", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "tool_use_failed",
+				Message: "any message",
+			},
+		}
+		require.True(t, isUpstreamMalformedToolCallError(err))
+	})
+
+	t.Run("invalid_request message signature", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "invalid_request_error",
+				Message: "Failed to parse tool call arguments as JSON",
+			},
+		}
+		require.True(t, isUpstreamMalformedToolCallError(err))
+	})
+
+	t.Run("non-tool malformed request", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "invalid_request_error",
+				Message: "tool schema invalid",
+			},
+		}
+		require.False(t, isUpstreamMalformedToolCallError(err))
+	})
+
+	t.Run("non-400 status", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusInternalServerError,
+			Error: model.Error{
+				Code:    "tool_use_failed",
+				Message: "Failed to parse tool call arguments as JSON",
+			},
+		}
+		require.False(t, isUpstreamMalformedToolCallError(err))
+	})
+}
+
+func TestIsRetryableUpstreamClientError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("websocket connection limit code is retryable", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "websocket_connection_limit_reached",
+				Message: "Responses websocket connection limit reached (60 minutes).",
+			},
+		}
+		assert.True(t, isRetryableUpstreamClientError(err))
+	})
+
+	t.Run("websocket reconnection message is retryable", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Message: "Create a new websocket connection to continue.",
+			},
+		}
+		assert.True(t, isRetryableUpstreamClientError(err))
+	})
+
+	t.Run("output parse failed code is retryable", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "output_parse_failed",
+				Message: "Parsing failed. The model generated output that could not be parsed.",
+			},
+		}
+		assert.True(t, isRetryableUpstreamClientError(err))
+	})
+
+	t.Run("unparseable model output message is retryable", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "invalid_request_error",
+				Message: "The model generated output that could not be parsed. Please adjust your prompt.",
+			},
+		}
+		assert.True(t, isRetryableUpstreamClientError(err))
+	})
+
+	t.Run("normal bad request is not retryable", func(t *testing.T) {
+		t.Parallel()
+		err := &model.ErrorWithStatusCode{
+			StatusCode: http.StatusBadRequest,
+			Error: model.Error{
+				Code:    "invalid_request_error",
+				Message: "tool schema invalid",
+			},
+		}
+		assert.False(t, isRetryableUpstreamClientError(err))
 	})
 }

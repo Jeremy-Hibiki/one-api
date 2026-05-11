@@ -16,12 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/billing/ratio"
-	"github.com/songquanpeng/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/channeltype"
 )
 
 func setupModelsDisplayTestEnv(t *testing.T) {
@@ -191,6 +191,43 @@ func TestGetModelsDisplay_AnonymousUsesConfiguredModels(t *testing.T) {
 	require.InDelta(t, expected4oCached, gpt4o.CachedInputPrice, 1e-6)
 }
 
+// TestGetModelsDisplay_AnonymousFiltersHiddenModels ensures the public display omits hidden configured models.
+func TestGetModelsDisplay_AnonymousFiltersHiddenModels(t *testing.T) {
+	setupModelsDisplayTestEnv(t)
+	gin.SetMode(gin.TestMode)
+	hidden := `["hidden-alpha"]`
+	channel := &model.Channel{
+		Name:         "Hidden Display Channel",
+		Type:         channeltype.OpenAI,
+		Status:       model.ChannelStatusEnabled,
+		Models:       "hidden-alpha,public-alias",
+		Group:        "public",
+		HiddenModels: &hidden,
+	}
+	require.NoError(t, channel.Insert())
+
+	router := gin.New()
+	router.GET("/api/models/display", func(c *gin.Context) {
+		GetModelsDisplay(c)
+	})
+
+	req := httptest.NewRequest("GET", "/api/models/display", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp ModelsDisplayResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.True(t, resp.Success)
+
+	key := fmt.Sprintf("%s:%s", channeltype.IdToName(channel.Type), channel.Name)
+	info, ok := resp.Data[key]
+	require.True(t, ok, "expected channel %s in response", key)
+	require.NotContains(t, info.Models, "hidden-alpha")
+	require.Contains(t, info.Models, "public-alias")
+}
+
 // TestGetModelsDisplay_GptImageShowsTokenPrice verifies image models that bill prompt tokens expose input pricing.
 func TestGetModelsDisplay_GptImageShowsTokenPrice(t *testing.T) {
 	setupModelsDisplayTestEnv(t)
@@ -242,6 +279,54 @@ func TestGetModelsDisplay_GptImageShowsTokenPrice(t *testing.T) {
 	require.InDelta(t, expectedCached, modelInfo.CachedInputPrice, 1e-6)
 	require.NotNil(t, pricingCfg.Image, "expected image pricing metadata for gpt-image-1")
 	require.InDelta(t, pricingCfg.Image.PricePerImageUsd, modelInfo.ImagePrice, 1e-9)
+}
+
+// TestGetModelsDisplay_IncludesModelMetadata verifies /api/models/display exposes rich
+// model metadata (context, modalities, features, and sampling parameters) from adaptor ModelConfig.
+func TestGetModelsDisplay_IncludesModelMetadata(t *testing.T) {
+	setupModelsDisplayTestEnv(t)
+	gin.SetMode(gin.TestMode)
+
+	channel := &model.Channel{
+		Name:   "Metadata Channel",
+		Type:   channeltype.OpenAI,
+		Status: model.ChannelStatusEnabled,
+		Models: "gpt-4o-mini",
+		Group:  "public",
+	}
+	require.NoError(t, model.DB.Create(channel).Error)
+
+	router := gin.New()
+	router.GET("/api/models/display", func(c *gin.Context) {
+		GetModelsDisplay(c)
+	})
+
+	req := httptest.NewRequest("GET", "/api/models/display", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp ModelsDisplayResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.True(t, resp.Success)
+
+	key := fmt.Sprintf("%s:%s", channeltype.IdToName(channel.Type), channel.Name)
+	info, ok := resp.Data[key]
+	require.True(t, ok, "expected channel %s in response", key)
+	modelInfo, ok := info.Models["gpt-4o-mini"]
+	require.True(t, ok, "expected gpt-4o-mini in model listing")
+
+	cfg := openai.ModelRatios["gpt-4o-mini"]
+	require.Equal(t, cfg.ContextLength, modelInfo.ContextLength)
+	require.Equal(t, cfg.MaxOutputTokens, modelInfo.MaxOutputTokens)
+	require.Equal(t, cfg.Quantization, modelInfo.Quantization)
+	require.Equal(t, cfg.HuggingFaceID, modelInfo.HuggingFaceID)
+	require.Equal(t, cfg.Description, modelInfo.Description)
+	require.ElementsMatch(t, cfg.InputModalities, modelInfo.InputModalities)
+	require.ElementsMatch(t, cfg.OutputModalities, modelInfo.OutputModalities)
+	require.ElementsMatch(t, cfg.SupportedFeatures, modelInfo.SupportedFeatures)
+	require.ElementsMatch(t, cfg.SupportedSamplingParameters, modelInfo.SupportedSampling)
 }
 
 // TestGetModelsDisplay_AnonymousIncludesModelConfigOnlyEntries ensures channels that only declare models via

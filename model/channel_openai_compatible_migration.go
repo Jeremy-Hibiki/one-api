@@ -5,8 +5,8 @@ import (
 	"github.com/Laisky/zap"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/relay/channeltype"
 )
 
 // MigrateCustomChannelsToOpenAICompatible upgrades legacy custom channels (type 8) to the unified
@@ -46,7 +46,7 @@ func MigrateCustomChannelsToOpenAICompatible() error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "migrate custom channel type to openai compatible")
 	}
 
 	logger.Logger.Info("custom channel migration completed",

@@ -8,18 +8,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/mcp"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/mcp"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
 )
 
 // TestNormalizeChatToolChoiceForMCP verifies MCP tool choices are normalized to function.
 func TestNormalizeChatToolChoiceForMCP(t *testing.T) {
-	mcpNames := map[string]struct{}{"web_search_20250305": {}}
-	choice := map[string]any{"type": "web_search_20250305"}
+	mcpNames := map[string]struct{}{"web_search_20260209": {}}
+	choice := map[string]any{"type": "web_search_20260209"}
 
 	normalized := normalizeChatToolChoiceForMCP(choice, mcpNames)
 	result, ok := normalized.(map[string]any)
@@ -27,19 +27,19 @@ func TestNormalizeChatToolChoiceForMCP(t *testing.T) {
 	require.Equal(t, "function", result["type"])
 	function, ok := result["function"].(map[string]any)
 	require.True(t, ok)
-	require.Equal(t, "web_search_20250305", function["name"])
+	require.Equal(t, "web_search_20260209", function["name"])
 }
 
 // TestNormalizeMCPToolChoiceForResponse verifies Response API tool_choice normalization for MCP tools.
 func TestNormalizeMCPToolChoiceForResponse(t *testing.T) {
-	mcpNames := map[string]struct{}{"web_search_20250305": {}}
-	choice := map[string]any{"type": "web_search_20250305"}
+	mcpNames := map[string]struct{}{"web_search_20260209": {}}
+	choice := map[string]any{"type": "web_search_20260209"}
 
 	normalized := normalizeMCPToolChoiceForResponse(choice, mcpNames)
 	result, ok := normalized.(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "function", result["type"])
-	require.Equal(t, "web_search_20250305", result["name"])
+	require.Equal(t, "web_search_20260209", result["name"])
 }
 
 // TestMergeToolUsageSummaries merges MCP usage entries into existing summaries.

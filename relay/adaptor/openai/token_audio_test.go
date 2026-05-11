@@ -9,9 +9,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
 )
 
 var (

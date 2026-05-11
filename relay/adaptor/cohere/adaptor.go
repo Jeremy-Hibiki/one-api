@@ -10,11 +10,12 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/relay/adaptor"
-	"github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/relay/adaptor"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 type Adaptor struct {
@@ -239,7 +240,7 @@ func (a *Adaptor) GetModelRatio(modelName string) float64 {
 		return price.Ratio
 	}
 	// Default Cohere pricing
-	return 0.5 * 0.000001 // Default USD pricing
+	return 0.5 * billingratio.MilliTokensUsd // Default USD pricing in internal quota units
 }
 
 func (a *Adaptor) GetCompletionRatio(modelName string) float64 {

@@ -14,12 +14,12 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 // TestDoResponseClaudeStreamingSkipsConversion verifies that streaming Claude conversions
@@ -72,7 +72,11 @@ func TestDoResponseClaudeStreamingSkipsConversion(t *testing.T) {
 
 	_, exists := c.Get(ctxkey.ConvertedResponse)
 	require.False(t, exists)
-	require.Contains(t, recorder.Body.String(), "data: [DONE]")
+	// Claude Messages API does not use [DONE]; the stream ends after message_stop.
+	body := recorder.Body.String()
+	require.Contains(t, body, "event: message_start")
+	require.Contains(t, body, "event: message_stop")
+	require.NotContains(t, body, "[DONE]")
 }
 
 func TestDoResponseClaudeStreamingConvertsToClaudeSSE(t *testing.T) {
@@ -111,10 +115,14 @@ func TestDoResponseClaudeStreamingConvertsToClaudeSSE(t *testing.T) {
 	require.Greater(t, usage.TotalTokens, 0)
 
 	body := recorder.Body.String()
+	require.Contains(t, body, "event: message_start")
 	require.Contains(t, body, "\"type\":\"message_start\"")
+	require.Contains(t, body, "event: content_block_delta")
 	require.Contains(t, body, "\"type\":\"content_block_delta\"")
 	require.Contains(t, body, "Hello")
-	require.Contains(t, body, "data: [DONE]")
+	require.Contains(t, body, "event: message_stop")
+	// Claude Messages API does not use [DONE].
+	require.NotContains(t, body, "[DONE]")
 }
 
 func TestDoResponseClaudeNonStreamDefersToConverter(t *testing.T) {

@@ -10,11 +10,11 @@ import (
 	"github.com/Laisky/zap"
 	"gorm.io/gorm"
 
-	"github.com/songquanpeng/one-api/common"
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/helper"
-	"github.com/songquanpeng/one-api/common/logger"
-	"github.com/songquanpeng/one-api/common/message"
+	"github.com/Laisky/one-api/common"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/helper"
+	"github.com/Laisky/one-api/common/logger"
+	"github.com/Laisky/one-api/common/message"
 )
 
 const (
@@ -135,12 +135,18 @@ func GetAllUserTokens(userId int, startIdx int, num int, order string, sortBy st
 	}
 
 	err = query.Limit(num).Offset(startIdx).Find(&tokens).Error
-	return tokens, err
+	if err != nil {
+		return nil, errors.Wrapf(err, "get user %d tokens", userId)
+	}
+	return tokens, nil
 }
 
 func GetUserTokenCount(userId int) (count int64, err error) {
 	err = DB.Model(&Token{}).Where("user_id = ?", userId).Count(&count).Error
-	return count, err
+	if err != nil {
+		return 0, errors.Wrapf(err, "count user %d tokens", userId)
+	}
+	return count, nil
 }
 
 func SearchUserTokens(userId int, keyword string, startIdx int, num int, sortBy string, sortOrder string) (tokens []*Token, total int64, err error) {
@@ -151,7 +157,42 @@ func SearchUserTokens(userId int, keyword string, startIdx int, num int, sortBy 
 	orderClause := ValidateOrderClause(sortBy, sortOrder, tokenSortFields, "id desc")
 	db = db.Order(orderClause)
 	err = db.Count(&total).Limit(num).Offset(startIdx).Find(&tokens).Error
-	return tokens, total, err
+	if err != nil {
+		return nil, 0, errors.Wrapf(err, "search user %d tokens", userId)
+	}
+	return tokens, total, nil
+}
+
+// GetAllTokensForAdmin lists tokens across any user. Pass userId > 0 to filter to a single owner,
+// or 0 to see every user's tokens. Admin-scoped and read-only — callers must enforce auth.
+func GetAllTokensForAdmin(userId int, startIdx int, num int, sortBy string, sortOrder string) (tokens []*Token, total int64, err error) {
+	db := DB.Model(&Token{})
+	if userId > 0 {
+		db = db.Where("user_id = ?", userId)
+	}
+	orderClause := ValidateOrderClause(sortBy, sortOrder, tokenSortFields, "id desc")
+	db = db.Order(orderClause)
+	err = db.Count(&total).Limit(num).Offset(startIdx).Find(&tokens).Error
+	if err != nil {
+		return nil, 0, errors.Wrapf(err, "admin list tokens for user_id=%d", userId)
+	}
+	return tokens, total, nil
+}
+
+// SearchAllTokensForAdmin searches tokens across any user by keyword (token name prefix match).
+// Admin-scoped and read-only — callers must enforce auth.
+func SearchAllTokensForAdmin(keyword string, startIdx int, num int, sortBy string, sortOrder string) (tokens []*Token, total int64, err error) {
+	db := DB.Model(&Token{})
+	if keyword != "" {
+		db = db.Where("name LIKE ?", keyword+"%")
+	}
+	orderClause := ValidateOrderClause(sortBy, sortOrder, tokenSortFields, "id desc")
+	db = db.Order(orderClause)
+	err = db.Count(&total).Limit(num).Offset(startIdx).Find(&tokens).Error
+	if err != nil {
+		return nil, 0, errors.Wrapf(err, "admin search tokens by keyword=%q", keyword)
+	}
+	return tokens, total, nil
 }
 
 func ValidateUserToken(ctx context.Context, key string) (token *Token, err error) {

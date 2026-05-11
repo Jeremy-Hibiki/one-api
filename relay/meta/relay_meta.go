@@ -8,10 +8,10 @@ import (
 	"github.com/Laisky/zap"
 	"github.com/gin-gonic/gin"
 
-	"github.com/songquanpeng/one-api/common/ctxkey"
-	"github.com/songquanpeng/one-api/model"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/common/ctxkey"
+	"github.com/Laisky/one-api/model"
+	"github.com/Laisky/one-api/relay/channeltype"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 type Meta struct {
@@ -39,6 +39,9 @@ type Meta struct {
 	ChannelRatio        float64
 	ForcedSystemPrompt  string
 	StartTime           time.Time
+	// UpstreamRequestURL is the final URL sent to the upstream provider.
+	// Populated by the relay layer before/after the request is dispatched.
+	UpstreamRequestURL string
 }
 
 // GetMappedModelName returns the mapped model name and a bool indicating if the model name is mapped

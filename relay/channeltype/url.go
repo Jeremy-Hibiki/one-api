@@ -38,7 +38,7 @@ var ChannelBaseURLConfigs = []ChannelBaseURLConfig{
 	{URL: "https://generativelanguage.googleapis.com", Editable: false},                // 24 Gemini
 	{URL: "https://api.moonshot.cn", Editable: false},                                  // 25 Moonshot
 	{URL: "https://api.baichuan-ai.com", Editable: false},                              // 26 Baichuan
-	{URL: "https://api.minimax.chat", Editable: false},                                 // 27 Minimax
+	{URL: "https://api.minimax.chat", Editable: true},                                  // 27 Minimax
 	{URL: "https://api.mistral.ai", Editable: false},                                   // 28 Mistral
 	{URL: "https://api.groq.com/openai", Editable: false},                              // 29 Groq
 	{URL: "http://localhost:11434", Editable: true},                                    // 30 Ollama - often self-hosted
@@ -65,6 +65,7 @@ var ChannelBaseURLConfigs = []ChannelBaseURLConfig{
 	{URL: "https://generativelanguage.googleapis.com/v1beta/openai/", Editable: false}, // 51 GeminiOpenAICompatible
 	{URL: "", Editable: true},                                                          // 52 ClaudeCompatible - user must provide
 	{URL: "https://api.githubcopilot.com", Editable: true},                             // 53 Copilot
+	{URL: "https://api.fireworks.ai/inference", Editable: false},                       // 54 Fireworks
 }
 
 // ChannelBaseURLs provides backward compatibility by returning only the URL strings.

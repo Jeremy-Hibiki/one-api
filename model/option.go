@@ -8,9 +8,9 @@ import (
 	"github.com/Laisky/errors/v2"
 	"github.com/Laisky/zap"
 
-	"github.com/songquanpeng/one-api/common/config"
-	"github.com/songquanpeng/one-api/common/logger"
-	billingratio "github.com/songquanpeng/one-api/relay/billing/ratio"
+	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/logger"
+	billingratio "github.com/Laisky/one-api/relay/billing/ratio"
 )
 
 type Option struct {
@@ -24,7 +24,10 @@ func AllOption() ([]*Option, error) {
 	var options []*Option
 	var err error
 	err = DB.Find(&options).Error
-	return options, err
+	if err != nil {
+		return nil, errors.Wrap(err, "query all options")
+	}
+	return options, nil
 }
 
 // InitOptionMap initializes the OptionMap from config and database
@@ -171,7 +174,20 @@ func updateOptionMap(key string, value string) (err error) {
 	}
 	switch key {
 	case "EmailDomainWhitelist":
-		config.EmailDomainWhitelist = strings.Split(value, ",")
+		if strings.TrimSpace(value) == "" {
+			config.EmailDomainWhitelist = nil
+		} else {
+			parts := strings.Split(value, ",")
+			domains := make([]string, 0, len(parts))
+			for _, p := range parts {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				domains = append(domains, p)
+			}
+			config.EmailDomainWhitelist = domains
+		}
 	case "SMTPServer":
 		config.SMTPServer = value
 	case "SMTPPort":
@@ -251,6 +267,10 @@ func updateOptionMap(key string, value string) (err error) {
 	case "QuotaPerUnit":
 		config.QuotaPerUnit, _ = strconv.ParseFloat(value, 64)
 	case "Theme":
+		// Backward compatibility: redirect "default" to "modern"
+		if value == "default" {
+			value = "modern"
+		}
 		config.Theme = value
 	}
 	if err != nil {

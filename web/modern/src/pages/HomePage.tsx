@@ -3,7 +3,7 @@ import { MarkdownRenderer } from '@/components/ui/markdown';
 import { ResponsivePageContainer } from '@/components/ui/responsive-container';
 import { useResponsive } from '@/hooks/useResponsive';
 import { api } from '@/lib/api';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 export function HomePage() {
@@ -12,7 +12,7 @@ export function HomePage() {
   const { isMobile } = useResponsive();
   const { t } = useTranslation();
 
-  const loadHome = async () => {
+  const loadHome = useCallback(async () => {
     try {
       // Load cached raw content first for faster first paint
       const cachedRaw = localStorage.getItem('home_page_content');
@@ -34,16 +34,24 @@ export function HomePage() {
     } finally {
       setLoaded(true);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadHome();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadHome]);
 
-  // If home is a URL, render as iframe to allow embedding an external page
+  // If home is a URL, render as iframe to allow embedding an external page.
+  // Note: the site-wide notice banner is rendered globally in Layout, so it
+  // is intentionally not duplicated here.
   if (home.startsWith('https://')) {
-    return <iframe src={home} className="w-full h-screen border-0" title={t('home.iframe_title')} />;
+    return (
+      <iframe
+        src={home}
+        className="w-full h-screen border-0"
+        title={t('home.iframe_title')}
+        sandbox="allow-scripts allow-same-origin allow-popups"
+      />
+    );
   }
 
   // If custom content exists (Markdown), render it

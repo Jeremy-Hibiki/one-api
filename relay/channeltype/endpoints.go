@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/songquanpeng/one-api/relay/relaymode"
+	"github.com/Laisky/one-api/relay/relaymode"
 )
 
 // Endpoint represents an API endpoint type that can be enabled/disabled per channel.
@@ -28,6 +28,7 @@ const (
 	EndpointClaudeMessages     Endpoint = Endpoint(relaymode.ClaudeMessages)
 	EndpointRealtime           Endpoint = Endpoint(relaymode.Realtime)
 	EndpointVideos             Endpoint = Endpoint(relaymode.Videos)
+	EndpointOCR                Endpoint = Endpoint(relaymode.OCR)
 )
 
 // EndpointInfo contains metadata about an endpoint for display purposes.
@@ -56,6 +57,7 @@ func AllEndpoints() []EndpointInfo {
 		{ID: EndpointClaudeMessages, Name: "claude_messages", Description: "Claude Messages API", Path: "/v1/messages"},
 		{ID: EndpointRealtime, Name: "realtime", Description: "Realtime API (WebSocket)", Path: "/v1/realtime"},
 		{ID: EndpointVideos, Name: "videos", Description: "Video Generation API", Path: "/v1/videos"},
+		{ID: EndpointOCR, Name: "ocr", Description: "OCR / Layout Parsing API", Path: "/api/paas/v4/layout_parsing"},
 	}
 }
 
@@ -213,6 +215,7 @@ func DefaultEndpointsForChannelType(channelType int) []Endpoint {
 			EndpointImagesGenerations,
 			EndpointResponseAPI,
 			EndpointClaudeMessages,
+			EndpointOCR,
 		}
 	case Ali:
 		return []Endpoint{
@@ -308,7 +311,12 @@ func DefaultEndpointsForChannelType(channelType int) []Endpoint {
 	case TogetherAI:
 		return []Endpoint{
 			EndpointChatCompletions,
+			EndpointCompletions,
 			EndpointEmbeddings,
+			EndpointImagesGenerations,
+			EndpointAudioSpeech,
+			EndpointAudioTranscription,
+			EndpointAudioTranslation,
 			EndpointResponseAPI,
 			EndpointClaudeMessages,
 		}
@@ -350,6 +358,18 @@ func DefaultEndpointsForChannelType(channelType int) []Endpoint {
 		return []Endpoint{
 			EndpointChatCompletions,
 			EndpointImagesGenerations,
+			EndpointResponseAPI,
+			EndpointClaudeMessages,
+		}
+	case Fireworks:
+		// Fireworks natively serves chat completions, text completions,
+		// embeddings, rerank, the Responses API, and an Anthropic-compatible
+		// Messages endpoint under a single Bearer-authenticated base URL.
+		return []Endpoint{
+			EndpointChatCompletions,
+			EndpointCompletions,
+			EndpointEmbeddings,
+			EndpointRerank,
 			EndpointResponseAPI,
 			EndpointClaudeMessages,
 		}

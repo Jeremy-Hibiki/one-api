@@ -8,13 +8,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/songquanpeng/one-api/relay"
-	"github.com/songquanpeng/one-api/relay/adaptor/openai"
-	"github.com/songquanpeng/one-api/relay/channeltype"
-	metalib "github.com/songquanpeng/one-api/relay/meta"
-	relaymodel "github.com/songquanpeng/one-api/relay/model"
-	"github.com/songquanpeng/one-api/relay/pricing"
-	quotautil "github.com/songquanpeng/one-api/relay/quota"
+	"github.com/Laisky/one-api/relay"
+	"github.com/Laisky/one-api/relay/adaptor/openai"
+	"github.com/Laisky/one-api/relay/apitype"
+	"github.com/Laisky/one-api/relay/channeltype"
+	metalib "github.com/Laisky/one-api/relay/meta"
+	relaymodel "github.com/Laisky/one-api/relay/model"
+	"github.com/Laisky/one-api/relay/pricing"
+	quotautil "github.com/Laisky/one-api/relay/quota"
 )
 
 // absDiffI64 returns absolute difference for int64
@@ -33,8 +34,8 @@ func TestPostConsumeQuota_OutputPricingIndependentOfCache(t *testing.T) {
 	// Arrange
 	modelName := "gpt-4o" // has explicit cached input pricing in OpenAI adapter
 	channelType := channeltype.OpenAI
-	adaptor := relay.GetAdaptor(channelType)
-	require.NotNil(t, adaptor, "nil adaptor for channel %d", channelType)
+	adaptor := relay.GetAdaptor(apitype.OpenAI)
+	require.NotNil(t, adaptor, "nil adaptor for api type %d", apitype.OpenAI)
 	modelRatio := adaptor.GetModelRatio(modelName)
 	require.Positive(t, modelRatio, "unexpected model ratio: %v", modelRatio)
 	// Resolve effective cached/input ratios at our prompt token scale (for tier handling)
@@ -67,7 +68,7 @@ func TestPostConsumeQuota_OutputPricingIndependentOfCache(t *testing.T) {
 
 	// Case A: No cache
 	usageNoCache := &relaymodel.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens}
-	quotaNoCache := postConsumeQuota(context.Background(), usageNoCache, meta, req, 0, 0, 0, modelRatio, groupRatio, false, nil)
+	quotaNoCache := postConsumeQuota(context.Background(), usageNoCache, meta, req, 0, 0, 0, modelRatio, nil, groupRatio, false, nil, nil)
 
 	// Case B: Some cached prompt tokens (e.g., 60%)
 	cachedPrompt := int(float64(promptTokens) * 0.6)
@@ -78,7 +79,7 @@ func TestPostConsumeQuota_OutputPricingIndependentOfCache(t *testing.T) {
 			CachedTokens: cachedPrompt,
 		},
 	}
-	quotaCached := postConsumeQuota(context.Background(), usageCached, meta, req, 0, 0, 0, modelRatio, groupRatio, false, nil)
+	quotaCached := postConsumeQuota(context.Background(), usageCached, meta, req, 0, 0, 0, modelRatio, nil, groupRatio, false, nil, nil)
 
 	// Expected delta arises only from input pricing change on cached tokens
 	// Base prompt tokens: promptTokens. With caching, cachedPrompt tokens charged at cachedInputPrice instead of normalInputPrice.
@@ -96,8 +97,8 @@ func TestPostConsumeQuota_CacheWriteDoesNotAffectOutput(t *testing.T) {
 	t.Parallel()
 	modelName := "gpt-4o"
 	channelType := channeltype.OpenAI
-	adaptor := relay.GetAdaptor(channelType)
-	require.NotNil(t, adaptor, "nil adaptor for channel %d", channelType)
+	adaptor := relay.GetAdaptor(apitype.OpenAI)
+	require.NotNil(t, adaptor, "nil adaptor for api type %d", apitype.OpenAI)
 	modelRatio := adaptor.GetModelRatio(modelName)
 	groupRatio := 1.0
 
@@ -121,11 +122,11 @@ func TestPostConsumeQuota_CacheWriteDoesNotAffectOutput(t *testing.T) {
 
 	// Base: no cache writes
 	usageBase := &relaymodel.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens}
-	base := postConsumeQuota(context.Background(), usageBase, meta, req, 0, 0, 0, modelRatio, groupRatio, false, nil)
+	base := postConsumeQuota(context.Background(), usageBase, meta, req, 0, 0, 0, modelRatio, nil, groupRatio, false, nil, nil)
 
 	// With write tokens
 	usageWrite := &relaymodel.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens, CacheWrite5mTokens: write5m}
-	withWrite := postConsumeQuota(context.Background(), usageWrite, meta, req, 0, 0, 0, modelRatio, groupRatio, false, nil)
+	withWrite := postConsumeQuota(context.Background(), usageWrite, meta, req, 0, 0, 0, modelRatio, nil, groupRatio, false, nil, nil)
 
 	// Expected delta is purely input-side: write tokens shift from normalInputPrice to write5mPrice
 	expectedDelta := int64(math.Ceil(float64(write5m) * (write5mPrice - normalInputPrice)))
@@ -139,8 +140,8 @@ func TestPostConsumeResponseAPIQuota_UsesCachedInputPricing(t *testing.T) {
 	t.Parallel()
 	modelName := "gpt-4o"
 	channelType := channeltype.OpenAI
-	adaptor := relay.GetAdaptor(channelType)
-	require.NotNil(t, adaptor, "nil adaptor for channel %d", channelType)
+	adaptor := relay.GetAdaptor(apitype.OpenAI)
+	require.NotNil(t, adaptor, "nil adaptor for api type %d", apitype.OpenAI)
 	modelRatio := adaptor.GetModelRatio(modelName)
 	groupRatio := 1.0
 
@@ -156,7 +157,7 @@ func TestPostConsumeResponseAPIQuota_UsesCachedInputPricing(t *testing.T) {
 
 	// Base usage
 	usageBase := &relaymodel.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens}
-	base := postConsumeResponseAPIQuota(context.Background(), usageBase, meta, respReq, 0, modelRatio, groupRatio, nil)
+	base := postConsumeResponseAPIQuota(context.Background(), usageBase, meta, respReq, 0, modelRatio, nil, groupRatio, nil, nil)
 	baseResult := quotautil.Compute(quotautil.ComputeInput{
 		Usage:          usageBase,
 		ModelName:      modelName,
@@ -170,7 +171,7 @@ func TestPostConsumeResponseAPIQuota_UsesCachedInputPricing(t *testing.T) {
 	// With cached prompt details present - expect delta only from input pricing change
 	cachedPrompt := int(float64(promptTokens) * 0.6)
 	usageCached := &relaymodel.Usage{PromptTokens: promptTokens, CompletionTokens: completionTokens, PromptTokensDetails: &relaymodel.UsagePromptTokensDetails{CachedTokens: cachedPrompt}}
-	withCache := postConsumeResponseAPIQuota(context.Background(), usageCached, meta, respReq, 0, modelRatio, groupRatio, nil)
+	withCache := postConsumeResponseAPIQuota(context.Background(), usageCached, meta, respReq, 0, modelRatio, nil, groupRatio, nil, nil)
 	cachedResult := quotautil.Compute(quotautil.ComputeInput{
 		Usage:          usageCached,
 		ModelName:      modelName,

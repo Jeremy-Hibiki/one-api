@@ -1,4 +1,9 @@
 {
+  "a11y": {
+    "close": "Close",
+    "close_drawer": "Close drawer",
+    "select_language": "Select language"
+  },
   "about": {
     "cta_models": "View Supported Models",
     "cta_repo": "GitHub Repository",
@@ -64,12 +69,16 @@
     "version": "Version",
     "welcome": "Welcome to One API"
   },
+  "footer": {
+    "copyright": "© {{year}} One API. All rights reserved."
+  },
   "header": {
     "confirm_logout": "Confirm logout",
     "log_out": "Log out",
     "logging_out": "Logging out...",
     "logout_description": "Are you sure you want to log out? You'll need to sign in again to access your dashboard.",
     "navigation": "Navigation",
+    "profile": "Profile",
     "signed_in_as": "Signed in as"
   },
   "home": {
@@ -78,7 +87,16 @@
   "notFound": {
     "go_home": "Go Home Now",
     "message": "Page not found",
-    "redirecting": "Redirecting to home in {{seconds}}s..."
+    "redirecting": "Redirecting to home in {{seconds}}s...",
+    "stay_here": "Stay on this page"
+  },
+  "notice": {
+    "dismiss": "Dismiss notice"
+  },
+  "passkey_prompt": {
+    "dismiss": "Dismiss",
+    "message": "Enhance your account security — set up a passkey for fast, passwordless sign-in.",
+    "setup_button": "Set up Passkey"
   },
   "status": {
     "badges": {
@@ -136,5 +154,11 @@
     },
     "subtitle": "Monitor the status and performance of all channels",
     "title": "Channel Status"
+  },
+  "theme": {
+    "dark": "Dark",
+    "light": "Light",
+    "system": "System",
+    "toggle": "Toggle theme"
   }
 }

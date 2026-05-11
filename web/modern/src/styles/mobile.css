@@ -1,36 +1,31 @@
 /* Enhanced Mobile-responsive table styles */
 @media (max-width: 768px) {
-
-  /* Hide table headers on mobile */
-  .mobile-table thead,
-  table thead {
+  /* Hide table headers on mobile — scoped to .mobile-table only */
+  .mobile-table thead {
     display: none;
   }
 
   /* Convert table rows to cards on mobile */
   .mobile-table tbody tr,
-  .mobile-table-row,
-  table tbody tr {
+  .mobile-table-row {
     display: block;
     margin-bottom: 1rem;
     padding: 1rem;
     border: 1px solid hsl(var(--border));
     border-radius: 0.5rem;
     background-color: hsl(var(--card));
-    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    box-shadow: 0 1px 3px 0 hsl(0 0% 0% / 0.1);
     transition: box-shadow 0.2s ease-in-out;
   }
 
   .mobile-table tbody tr:hover,
-  .mobile-table-row:hover,
-  table tbody tr:hover {
-    box-shadow: 0 4px 12px 0 rgba(0, 0, 0, 0.15);
+  .mobile-table-row:hover {
+    box-shadow: 0 4px 12px 0 hsl(0 0% 0% / 0.15);
   }
 
   /* Style table cells as label-value pairs */
   .mobile-table tbody td,
-  .mobile-table-cell,
-  table tbody td {
+  .mobile-table-cell {
     display: block;
     text-align: left !important;
     padding: 0.5rem 0;
@@ -41,8 +36,7 @@
 
   /* Add labels before content using data-label attribute */
   .mobile-table tbody td:before,
-  .mobile-table-cell:before,
-  table tbody td:before {
+  .mobile-table-cell:before {
     content: attr(data-label) ': ';
     font-weight: 600;
     color: hsl(var(--muted-foreground));
@@ -54,16 +48,14 @@
 
   /* Special handling for action buttons */
   .mobile-table tbody td:last-child,
-  .mobile-table-cell:last-child,
-  table tbody td:last-child {
+  .mobile-table-cell:last-child {
     padding-top: 1rem;
     margin-top: 0.5rem;
     border-top: 1px solid hsl(var(--border));
   }
 
   .mobile-table tbody td:last-child:before,
-  .mobile-table-cell:last-child:before,
-  table tbody td:last-child:before {
+  .mobile-table-cell:last-child:before {
     content: '';
     display: none;
   }
@@ -86,8 +78,7 @@
 
   /* Touch-friendly button sizing */
   .mobile-table button,
-  .mobile-table-cell button,
-  table button {
+  .mobile-table-cell button {
     min-height: 44px;
     min-width: 44px;
     font-size: 0.875rem;
@@ -134,7 +125,6 @@
 
   /* Hide some pagination buttons on small screens */
   @media (max-width: 480px) {
-
     .pagination-mobile .pagination-controls button:first-child,
     .pagination-mobile .pagination-controls button:last-child {
       display: none;
@@ -144,11 +134,10 @@
 
 /* Enhanced touch targets and interactions */
 @media (hover: none) and (pointer: coarse) {
-
   button,
-  [role="button"],
-  input[type="button"],
-  input[type="submit"] {
+  [role='button'],
+  input[type='button'],
+  input[type='submit'] {
     min-height: 44px;
     min-width: 44px;
     touch-action: manipulation;
@@ -178,21 +167,14 @@
 
   /* Enhanced focus styles for touch devices */
   button:focus-visible,
-  [role="button"]:focus-visible {
+  [role='button']:focus-visible {
     outline: 3px solid hsl(var(--ring));
     outline-offset: 2px;
   }
 
-  /* Remove hover effects on touch devices */
-  button:hover,
-  [role="button"]:hover {
-    background-color: initial;
-    color: initial;
-  }
-
   /* Enhanced active states for better feedback */
   button:active,
-  [role="button"]:active {
+  [role='button']:active {
     transform: scale(0.98);
     transition: transform 0.1s ease-in-out;
   }
@@ -270,7 +252,7 @@
 
 /* Loading states */
 .loading-skeleton {
-  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background: linear-gradient(90deg, hsl(var(--muted)) 25%, hsl(var(--border)) 50%, hsl(var(--muted)) 75%);
   background-size: 200% 100%;
   animation: loading 1.5s infinite;
 }
@@ -314,29 +296,26 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid #3b82f6;
+  outline: 2px solid hsl(var(--ring));
   outline-offset: 2px;
 }
 
-/* Dark mode adjustments */
-@media (prefers-color-scheme: dark) {
-  .mobile-table tbody tr {
-    background-color: #1f2937;
-    border-color: #374151;
-  }
+/* Dark mode adjustments — uses class-based dark mode to match ThemeProvider */
+.dark .mobile-table tbody tr {
+  background-color: hsl(var(--card));
+  border-color: hsl(var(--border));
+}
 
-  .mobile-table tbody td:before {
-    color: #d1d5db;
-  }
+.dark .mobile-table tbody td:before {
+  color: hsl(var(--muted-foreground));
+}
 
-  .mobile-table tbody td:last-child {
-    border-top-color: #374151;
-  }
+.dark .mobile-table tbody td:last-child {
+  border-top-color: hsl(var(--border));
 }
 
 /* Additional responsive utilities */
 @layer utilities {
-
   /* Responsive text sizing */
   .text-responsive-xs {
     font-size: 0.75rem;
@@ -394,28 +373,28 @@ textarea:focus-visible {
   }
 
   /* Responsive spacing utilities */
-  .space-responsive-y>*+* {
+  .space-responsive-y > * + * {
     margin-top: 1rem;
   }
 
   @media (min-width: 768px) {
-    .space-responsive-y>*+* {
+    .space-responsive-y > * + * {
       margin-top: 1.5rem;
     }
   }
 
   @media (min-width: 1024px) {
-    .space-responsive-y>*+* {
+    .space-responsive-y > * + * {
       margin-top: 2rem;
     }
   }
 
-  .space-responsive-x>*+* {
+  .space-responsive-x > * + * {
     margin-left: 0.5rem;
   }
 
   @media (min-width: 768px) {
-    .space-responsive-x>*+* {
+    .space-responsive-x > * + * {
       margin-left: 1rem;
     }
   }
