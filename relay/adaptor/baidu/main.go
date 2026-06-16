@@ -16,7 +16,6 @@ import (
 
 	"github.com/Laisky/one-api/common"
 	"github.com/Laisky/one-api/common/client"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/render"
 	commonsse "github.com/Laisky/one-api/common/sse"
 	"github.com/Laisky/one-api/relay/adaptor/openai"
@@ -67,9 +66,6 @@ func ConvertRequest(request model.GeneralOpenAIRequest) *ChatRequest {
 		EnableCitation:  false,
 		MaxOutputTokens: request.MaxTokens,
 		UserId:          request.User,
-	}
-	if baiduRequest.MaxOutputTokens == 0 {
-		baiduRequest.MaxOutputTokens = config.DefaultMaxToken
 	}
 	for _, message := range request.Messages {
 		if message.Role == "system" {

@@ -19,7 +19,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/random"
 	"github.com/Laisky/one-api/common/tracing"
@@ -45,9 +44,6 @@ func requestOpenAI2Xunfei(request model.GeneralOpenAIRequest, xunfeiAppId string
 	xunfeiRequest.Parameter.Chat.Domain = domain
 	xunfeiRequest.Parameter.Chat.Temperature = request.Temperature
 	xunfeiRequest.Parameter.Chat.MaxTokens = request.MaxTokens
-	if xunfeiRequest.Parameter.Chat.MaxTokens == 0 {
-		xunfeiRequest.Parameter.Chat.MaxTokens = config.DefaultMaxToken
-	}
 	xunfeiRequest.Payload.Message.Text = messages
 
 	if request.N != nil {

@@ -289,11 +289,6 @@ func (a *Adaptor) applyRequestTransformations(meta *meta.Meta, request *model.Ge
 		request.MaxTokens = 0
 	}
 
-	if request.MaxCompletionTokens == nil || *request.MaxCompletionTokens <= 0 {
-		defaultMaxCompletionTokens := config.DefaultMaxToken
-		request.MaxCompletionTokens = &defaultMaxCompletionTokens
-	}
-
 	actualModel := meta.ActualModelName
 	if strings.TrimSpace(actualModel) == "" {
 		actualModel = request.Model

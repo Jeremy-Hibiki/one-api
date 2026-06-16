@@ -16,7 +16,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/tracing"
@@ -88,11 +87,7 @@ func ConvertRequest(textRequest relaymodel.GeneralOpenAIRequest) *Request {
 		Messages: ConvertMessages(textRequest.Messages),
 	}
 
-	if textRequest.MaxTokens == 0 {
-		qwenReq.MaxTokens = config.DefaultMaxToken
-	} else {
-		qwenReq.MaxTokens = textRequest.MaxTokens
-	}
+	qwenReq.MaxTokens = textRequest.MaxTokens
 
 	if textRequest.Temperature != nil {
 		qwenReq.Temperature = textRequest.Temperature
@@ -600,8 +595,6 @@ func createInferenceConfig(qwenReq *Request) *types.InferenceConfiguration {
 
 	if qwenReq.MaxTokens != 0 {
 		inferenceConfig.MaxTokens = aws.Int32(int32(qwenReq.MaxTokens))
-	} else {
-		inferenceConfig.MaxTokens = aws.Int32(int32(config.DefaultMaxToken))
 	}
 
 	if qwenReq.Temperature != nil {

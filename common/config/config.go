@@ -1025,13 +1025,6 @@ var (
 	// Example: "price", "quality"
 	OpenrouterProviderSort = env.String("OPENROUTER_PROVIDER_SORT", "")
 
-	// DefaultMaxToken enforces a global max token value when model-specific
-	// limits are unknown. Acts as a fallback limit.
-	//
-	// Environment variable: DEFAULT_MAX_TOKEN
-	// Default: 2048
-	DefaultMaxToken = env.Int("DEFAULT_MAX_TOKEN", 2048)
-
 	// DefaultUseMinMaxTokensModel controls whether new channels use the
 	// min/max token scheme by default for output token control.
 	//

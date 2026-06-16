@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/image"
@@ -292,10 +291,6 @@ func ConvertRequest(c *gin.Context, textRequest model.GeneralOpenAIRequest) (*Re
 		Stream:      textRequest.Stream,
 		Tools:       claudeTools,
 		Thinking:    textRequest.Thinking,
-	}
-
-	if claudeRequest.MaxTokens == 0 {
-		claudeRequest.MaxTokens = config.DefaultMaxToken
 	}
 
 	// Track if we need to use fallback mode (will be set if any signature restoration fails)

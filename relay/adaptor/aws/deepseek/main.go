@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/tracing"
@@ -61,11 +60,7 @@ func ConvertRequest(textRequest relaymodel.GeneralOpenAIRequest) *Request {
 	}
 
 	// Handle inference parameters
-	if textRequest.MaxTokens == 0 {
-		deepseekReq.MaxTokens = config.DefaultMaxToken
-	} else {
-		deepseekReq.MaxTokens = textRequest.MaxTokens
-	}
+	deepseekReq.MaxTokens = textRequest.MaxTokens
 
 	if textRequest.Temperature != nil {
 		deepseekReq.Temperature = textRequest.Temperature
@@ -360,8 +355,6 @@ func convertDeepSeekToConverseRequest(deepseekReq *Request, modelID string) (*be
 	inferenceConfig := &types.InferenceConfiguration{}
 	if deepseekReq.MaxTokens != 0 {
 		inferenceConfig.MaxTokens = aws.Int32(int32(deepseekReq.MaxTokens))
-	} else {
-		inferenceConfig.MaxTokens = aws.Int32(int32(config.DefaultMaxToken))
 	}
 
 	if deepseekReq.Temperature != nil {
@@ -536,8 +529,6 @@ func convertDeepSeekToConverseStreamRequest(deepseekReq *Request, modelID string
 	inferenceConfig := &types.InferenceConfiguration{}
 	if deepseekReq.MaxTokens != 0 {
 		inferenceConfig.MaxTokens = aws.Int32(int32(deepseekReq.MaxTokens))
-	} else {
-		inferenceConfig.MaxTokens = aws.Int32(int32(config.DefaultMaxToken))
 	}
 
 	if deepseekReq.Temperature != nil {

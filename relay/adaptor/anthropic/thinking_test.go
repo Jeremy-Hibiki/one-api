@@ -1,9 +1,11 @@
 package anthropic
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/relay/model"
 )
@@ -28,13 +29,17 @@ func setupTestContext() *gin.Context {
 	return c
 }
 
-func TestConvertRequest_DefaultMaxTokensWithThinking(t *testing.T) {
+func TestConvertRequest_ExplicitMaxTokensWithThinking(t *testing.T) {
 	InitSignatureCache(time.Hour)
 
 	c := setupTestContext()
+	c.Request = c.Request.Clone(context.Background())
+	c.Request.URL, _ = url.Parse("/?thinking")
 
+	explicitMaxTokens := 8192
 	textRequest := model.GeneralOpenAIRequest{
-		Model: "claude-4-sonnet",
+		Model:     "claude-4-sonnet",
+		MaxTokens: explicitMaxTokens,
 		Messages: []model.Message{
 			{Role: "user", Content: "Hello"},
 		},
@@ -42,10 +47,10 @@ func TestConvertRequest_DefaultMaxTokensWithThinking(t *testing.T) {
 
 	claudeRequest, err := ConvertRequest(c, textRequest)
 	require.NoError(t, err, "Expected no error")
-	require.Equal(t, config.DefaultMaxToken, claudeRequest.MaxTokens, "Expected max tokens to match")
+	require.Equal(t, explicitMaxTokens, claudeRequest.MaxTokens, "Expected max tokens to be forwarded as-is")
 	require.NotNil(t, claudeRequest.Thinking, "Expected thinking to be enabled when query parameter is present")
 
-	expectedBudget := int(math.Min(1024, float64(config.DefaultMaxToken/2)))
+	expectedBudget := int(math.Min(1024, float64(explicitMaxTokens/2)))
 	require.NotNil(t, claudeRequest.Thinking.BudgetTokens, "Expected budget tokens to be set")
 	require.Equal(t, expectedBudget, *claudeRequest.Thinking.BudgetTokens, "Expected budget tokens to match")
 }

@@ -5,7 +5,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/gin-gonic/gin"
 
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/relay/adaptor/anthropic"
 	"github.com/Laisky/one-api/relay/adaptor/aws/utils"
@@ -29,9 +28,6 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 	}
 	claudeReq.AnthropicVersion = "bedrock-2023-05-31"
 	claudeReq.MaxTokens = request.MaxTokens
-	if claudeReq.MaxTokens == 0 {
-		claudeReq.MaxTokens = config.DefaultMaxToken
-	}
 	if request.Temperature != nil && request.TopP != nil {
 		claudeReq.TopP = nil
 	}

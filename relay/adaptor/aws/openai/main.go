@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/tracing"
@@ -60,11 +59,7 @@ func ConvertRequest(textRequest relaymodel.GeneralOpenAIRequest) *Request {
 	}
 
 	// Handle inference parameters
-	if textRequest.MaxTokens == 0 {
-		openaiReq.MaxTokens = config.DefaultMaxToken
-	} else {
-		openaiReq.MaxTokens = textRequest.MaxTokens
-	}
+	openaiReq.MaxTokens = textRequest.MaxTokens
 
 	if textRequest.Temperature != nil {
 		openaiReq.Temperature = textRequest.Temperature
@@ -352,8 +347,6 @@ func convertOpenAIToConverseRequest(openaiReq *Request, modelID string) (*bedroc
 	inferenceConfig := &types.InferenceConfiguration{}
 	if openaiReq.MaxTokens != 0 {
 		inferenceConfig.MaxTokens = aws.Int32(int32(openaiReq.MaxTokens))
-	} else {
-		inferenceConfig.MaxTokens = aws.Int32(int32(config.DefaultMaxToken))
 	}
 
 	if openaiReq.Temperature != nil {

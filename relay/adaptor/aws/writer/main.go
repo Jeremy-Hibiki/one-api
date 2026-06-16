@@ -17,7 +17,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/relay/adaptor/aws/internal/streamfinalizer"
 	"github.com/Laisky/one-api/relay/adaptor/aws/utils"
@@ -54,11 +53,7 @@ func ConvertRequest(textRequest relaymodel.GeneralOpenAIRequest) *Request {
 	}
 
 	// Handle max tokens
-	if textRequest.MaxTokens == 0 {
-		writerRequest.MaxTokens = config.DefaultMaxToken
-	} else {
-		writerRequest.MaxTokens = textRequest.MaxTokens
-	}
+	writerRequest.MaxTokens = textRequest.MaxTokens
 
 	// Handle stop sequences
 	if textRequest.Stop != nil {

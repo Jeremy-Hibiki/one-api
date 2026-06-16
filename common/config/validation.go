@@ -348,9 +348,6 @@ func ValidateAllEnvVars() *ValidationResult {
 	if err := ValidatePositiveInt("IDLE_TIMEOUT", IdleTimeout); err != nil {
 		result.Errors = append(result.Errors, err)
 	}
-	if err := ValidatePositiveInt("DEFAULT_MAX_TOKEN", DefaultMaxToken); err != nil {
-		result.Errors = append(result.Errors, err)
-	}
 	if err := ValidatePositiveInt("TEST_MAX_TOKENS", TestMaxTokens); err != nil {
 		result.Errors = append(result.Errors, err)
 	}

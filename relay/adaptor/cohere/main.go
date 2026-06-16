@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/render"
@@ -50,9 +49,6 @@ func ConvertRequest(textRequest model.GeneralOpenAIRequest) *Request {
 		FrequencyPenalty: textRequest.FrequencyPenalty,
 		PresencePenalty:  textRequest.PresencePenalty,
 		Seed:             int(textRequest.Seed),
-	}
-	if cohereRequest.MaxTokens == 0 {
-		cohereRequest.MaxTokens = config.DefaultMaxToken
 	}
 	if cohereRequest.Model == "" {
 		cohereRequest.Model = "command-r"

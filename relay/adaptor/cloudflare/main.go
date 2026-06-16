@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common"
-	"github.com/Laisky/one-api/common/config"
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/render"
@@ -27,9 +26,6 @@ func ConvertCompletionsRequest(textRequest model.GeneralOpenAIRequest) *Request 
 		MaxTokens:   textRequest.MaxTokens,
 		Stream:      textRequest.Stream,
 		Temperature: textRequest.Temperature,
-	}
-	if request.MaxTokens == 0 {
-		request.MaxTokens = config.DefaultMaxToken
 	}
 	return request
 }
