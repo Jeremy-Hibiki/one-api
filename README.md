@@ -5,7 +5,7 @@
 Open‑source version of OpenRouter, managed through a unified gateway that handles all AI SaaS model calls. Core functions include:
 
 1. Aggregating chat, image, speech, TTS, embeddings, rerank and other capabilities.
-2. Aggregating multiple model providers such as OpenAI, Anthropic, Azure, Google Vertex, OpenRouter, DeepSeek, Replicate, AWS Bedrock, etc.
+2. Aggregating multiple model providers such as OpenAI, Anthropic, Azure, Google Vertex, OpenRouter, DeepSeek, Replicate, AWS Bedrock, NVIDIA, etc.
 3. Aggregating various upstream API request formats like Chat Completion, Response, Claude Messages.
 4. Supporting different request formats; users can issue requests via Chat Completion, Response, or Claude Messages, which are automatically and transparently converted to the native request format of the upstream model. Even if the client sends a mismatched request format to wrong api endpoint, it will still be correctly processed.
 5. Supporting multi‑tenant management, allowing each tenant to set distinct quotas and permissions.
@@ -16,6 +16,8 @@ Open‑source version of OpenRouter, managed through a unified gateway that hand
 Also welcome to register and use my deployed one-api gateway, which supports various mainstream models. For usage instructions, please refer to <https://wiki.laisky.com/projects/gpt/pay/>.
 
 Try it at <https://oneapi.laisky.com>, login with `test` / `12345678`. 🚀
+
+> 📖 **API reference** — see [docs/manuals/api_references.md](docs/manuals/api_references.md) for the complete HTTP API: authentication, conventions, errors, and every endpoint with `curl` examples, organized for both end-users (inference + API-key management) and administrators.
 
 ```plain
 === One-API Compatibility Matrix 2025-12-12T04:37:09Z ===
@@ -156,6 +158,8 @@ The original author stopped maintaining the project, leaving critical PRs and ne
       - [Support XAI/Grok Text \& Image Models](#support-xaigrok-text--image-models)
     - [Black Forest Labs Features](#black-forest-labs-features)
       - [Support black-forest-labs/flux-kontext-pro](#support-black-forest-labsflux-kontext-pro)
+    - [NVIDIA Features](#nvidia-features)
+      - [Support NVIDIA API Catalog (build.nvidia.com)](#support-nvidia-api-catalog-buildnvidiacom)
   - [Bug Fixes \& Enterprise-Grade Improvements (Including Security Enhancements)](#bug-fixes--enterprise-grade-improvements-including-security-enhancements)
 
 ## Tutorial
@@ -181,15 +185,18 @@ oneapi:
     driver: 'json-file'
     options:
       max-size: '10m'
+  environment:
+    # ⚠️ Only set ENABLE_COOKIE_SECURE=false for HTTP deployments; keep it true for HTTPS to ensure session security
+    - ENABLE_COOKIE_SECURE=false
   volumes:
     - /var/lib/oneapi:/data
   ports:
     - 3000:3000
 ```
 
-> [!TIP]
+> [!IMPORTANT]
 >
-> For production environments, consider using proper secret management solutions instead of hardcoding sensitive values in environment variables.
+> Session cookies are marked `Secure` by default, so the browser will only send them over HTTPS. If you are serving the service over plain HTTP (for example accessing `http://<host>:3000` directly, or a reverse proxy that terminates HTTPS but is misconfigured), logins will appear to succeed but the next request is unauthenticated, looping the user back to the login page. In that case set `ENABLE_COOKIE_SECURE=false` in the `environment` section. Keep it at the default (`true`) for any production deployment served over HTTPS.
 
 ### Kubernetes Deployment
 
@@ -1122,7 +1129,7 @@ You can use any model you like for Claude Code, even if the model doesn’t nati
 
 ![](https://s3.laisky.com/uploads/2025/09/claude-sonnet-4-5.png)
 
-claude-opus-4-0 / claude-opus-4-1 / claude-opus-4-5 / claude-opus-4-6 / claude-opus-4-7 / claude-sonnet-4-0 / claude-sonnet-4-5 / claude-sonnet-4-6 / claude-haiku-4-5
+claude-opus-4-0 / claude-opus-4-1 / claude-opus-4-5 / claude-opus-4-6 / claude-opus-4-7 / claude-opus-4-8 / claude-sonnet-4-0 / claude-sonnet-4-5 / claude-sonnet-4-6 / claude-haiku-4-5
 
 ### Google (Gemini & Vertex) Features
 
@@ -1347,13 +1354,18 @@ Response:
 
 #### Support kimi-k2 Family
 
-Support:
+Current multimodal flagships (text + image + video, 256k context, open weights on HuggingFace):
 
-- `kimi-k2-0905-preview`
-- `kimi-k2-0711-preview`
-- `kimi-k2-turbo-preview`
-- `kimi-k2-thinking`
-- `kimi-k2-thinking-turbo`
+- `kimi-k2.7-code` — current top coding model, thinking-only deep reasoning
+- `kimi-k2.6` — multimodal flagship, thinking and non-thinking modes
+- `kimi-k2.5` — multimodal, thinking and non-thinking modes
+
+Classic Moonshot V1 chat models (text, plus vision-preview variants):
+
+- `moonshot-v1-8k` / `moonshot-v1-32k` / `moonshot-v1-128k`
+- `moonshot-v1-8k-vision-preview` / `moonshot-v1-32k-vision-preview` / `moonshot-v1-128k-vision-preview`
+
+> The legacy `kimi-k2-0905-preview`, `kimi-k2-0711-preview`, `kimi-k2-turbo-preview`, `kimi-k2-thinking` and `kimi-k2-thinking-turbo` models were discontinued by Moonshot on 2026-05-25.
 
 ### GLM Features
 
@@ -1494,6 +1506,16 @@ Response:
 #### Support black-forest-labs/flux-kontext-pro
 
 ![](https://s3.laisky.com/uploads/2025/05/flux-kontext-pro.png)
+
+### NVIDIA Features
+
+#### Support NVIDIA API Catalog (build.nvidia.com)
+
+Adds an `NVIDIA` channel type that targets NVIDIA's OpenAI-compatible hosted inference API at `https://integrate.api.nvidia.com/v1` (the models published on [build.nvidia.com](https://build.nvidia.com/models)). Authenticate with an `nvapi-...` API key. The channel serves Chat Completions natively, and transparently handles Claude Messages / Response API requests through one-api's OpenAI-compatible conversion layer. Embeddings are not enabled by default until NVIDIA's model-specific request requirements are represented in the catalog.
+
+Curated models include NVIDIA's own Nemotron family (e.g. `nvidia/nemotron-3-ultra-550b-a55b`, `nvidia/llama-3.3-nemotron-super-49b-v1.5`, `nvidia/nemotron-nano-12b-v2-vl`) plus popular hosted open models such as `meta/llama-3.3-70b-instruct`, `deepseek-ai/deepseek-v4-flash`, `qwen/qwen3-next-80b-a3b-instruct`, `openai/gpt-oss-120b`, and `moonshotai/kimi-k2.6`.
+
+NVIDIA does not publish per-token pricing for the hosted endpoint (it is metered in free API credits rather than currency), so every bundled model defaults to free. Operators routing to NVIDIA AI Enterprise or a paid partner endpoint with real costs can set per-channel pricing overrides.
 
 ## Bug Fixes & Enterprise-Grade Improvements (Including Security Enhancements)
 

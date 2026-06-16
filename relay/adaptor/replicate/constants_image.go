@@ -20,6 +20,33 @@ var replicateImageModelRatios = map[string]adaptor.ModelConfig{
 		InputModalities: imageInputs, OutputModalities: imageOutputs,
 		Description: "FLUX 1.1 [pro] high-quality text-to-image generator from Black Forest Labs.",
 	},
+	"black-forest-labs/flux-2-dev": {
+		// FLUX.2 [dev] is the open-weight distilled variant. $0.012/MP applies to go_fast=true
+		// (default); go_fast=false is $0.014/MP. The base config assumes a single 1024x1024 (1MP)
+		// output, so a default 1MP text-to-image = $0.012.
+		// https://replicate.com/black-forest-labs/flux-2-dev#pricing
+		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.012),
+		InputModalities: imageEditInputs, OutputModalities: imageOutputs,
+		HuggingFaceID: "black-forest-labs/FLUX.2-dev",
+		Description:   "FLUX.2 [dev] open-weight 32B distilled rectified-flow text-to-image and editing model.",
+	},
+	"black-forest-labs/flux-2-max": {
+		// FLUX.2 [max] is priced at $0.04/run + $0.03 per output-image MP (+$0.03 per input-image
+		// MP for edits) on Replicate; ~$0.07 for a default 1MP text-to-image.
+		// https://replicate.com/black-forest-labs/flux-2-max#pricing
+		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.07),
+		InputModalities: imageEditInputs, OutputModalities: imageOutputs,
+		Description: "FLUX.2 [max] highest-quality FLUX.2 tier with strongest prompt following and up to 8 reference images.",
+	},
+	"black-forest-labs/flux-2-pro": {
+		// Replicate prices FLUX.2 [pro] at $0.015/run + $0.015 per output-image MP (+$0.015 per
+		// input-image MP for edits). A default single 1024x1024 (1MP) text-to-image is
+		// $0.015+$0.015 = $0.03, matching the value below.
+		// https://replicate.com/black-forest-labs/flux-2-pro#pricing
+		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.03),
+		InputModalities: imageEditInputs, OutputModalities: imageOutputs,
+		Description: "FLUX.2 [pro] high-resolution text-to-image and multi-reference editing model.",
+	},
 	"black-forest-labs/flux-1.1-pro-ultra": {
 		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.06),
 		InputModalities: imageInputs, OutputModalities: imageOutputs,
@@ -117,6 +144,31 @@ var replicateImageModelRatios = map[string]adaptor.ModelConfig{
 		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.04),
 		InputModalities: imageInputs, OutputModalities: imageOutputs,
 		Description: "ByteDance Seedream 4.5 text-to-image generator with improved fidelity.",
+	},
+	"bytedance/seedream-5-lite": {
+		// $0.035/image flat rate; image-to-image and text-to-image share the same price.
+		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.035),
+		InputModalities: imageEditInputs, OutputModalities: imageOutputs,
+		Description: "ByteDance Seedream 5.0 Lite image model with built-in reasoning and example-based editing.",
+	},
+	"openai/gpt-image-2": {
+		// Replicate exposes quality tiers; the default "auto" / "high" tier is $0.128/image,
+		// medium is $0.047/image, low is $0.012/image. The base config uses the default tier;
+		// downstream callers should override when emitting low/medium-quality requests.
+		Ratio: 0, CompletionRatio: 1.0,
+		Image: &adaptor.ImagePricingConfig{
+			PricePerImageUsd: 0.128,
+			MinImages:        1,
+			DefaultQuality:   "auto",
+			QualityMultipliers: map[string]float64{
+				"low":    0.012 / 0.128,
+				"medium": 0.047 / 0.128,
+				"high":   1.0,
+				"auto":   1.0,
+			},
+		},
+		InputModalities: imageEditInputs, OutputModalities: imageOutputs,
+		Description: "OpenAI GPT-Image-2 multimodal image generation and editing model.",
 	},
 	"google/imagen-4": {
 		Ratio: 0, CompletionRatio: 1.0, Image: replicateImageConfig(0.04),

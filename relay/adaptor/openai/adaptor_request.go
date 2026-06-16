@@ -16,6 +16,7 @@ import (
 	"github.com/Laisky/one-api/relay/adaptor"
 	"github.com/Laisky/one-api/relay/adaptor/alibailian"
 	"github.com/Laisky/one-api/relay/adaptor/baiduv2"
+	"github.com/Laisky/one-api/relay/adaptor/common/toolnamesafe"
 	"github.com/Laisky/one-api/relay/adaptor/doubao"
 	"github.com/Laisky/one-api/relay/adaptor/geminiOpenaiCompatible"
 	"github.com/Laisky/one-api/relay/adaptor/minimax"
@@ -208,7 +209,11 @@ func (a *Adaptor) ConvertRequest(c *gin.Context, relayMode int, request *model.G
 		normalizeDeepSeekToolMessageContent(lg, request)
 	}
 
-	if config.DebugEnabled {
+	if rewrites := toolnamesafe.SanitizeRequestToolNames(c, request); rewrites > 0 && lg != nil {
+		lg.Debug("sanitized tool/function names for strict upstream validators",
+			zap.String("model", request.Model),
+			zap.Int("rewritten_count", rewrites),
+		)
 	}
 
 	if relayMode == relaymode.ResponseAPI {
@@ -441,9 +446,15 @@ func (a *Adaptor) ConvertClaudeRequest(c *gin.Context, request *model.ClaudeRequ
 	metaInfo := meta.GetByContext(c)
 	if shouldNormalizeToolMessageContentForDeepSeek(metaInfo, openaiRequest) {
 		normalizeClaudeThinkingForDeepSeek(gmw.GetLogger(c), openaiRequest)
-	}
-	if shouldNormalizeToolMessageContentForDeepSeek(metaInfo, openaiRequest) {
 		normalizeDeepSeekToolMessageContent(gmw.GetLogger(c), openaiRequest)
+	}
+	if rewrites := toolnamesafe.SanitizeRequestToolNames(c, openaiRequest); rewrites > 0 {
+		if lg := gmw.GetLogger(c); lg != nil {
+			lg.Debug("sanitized tool/function names for strict upstream validators",
+				zap.String("model", openaiRequest.Model),
+				zap.Int("rewritten_count", rewrites),
+			)
+		}
 	}
 	if shouldForceResponseAPI(metaInfo) {
 		if err := a.applyRequestTransformations(metaInfo, openaiRequest); err != nil {

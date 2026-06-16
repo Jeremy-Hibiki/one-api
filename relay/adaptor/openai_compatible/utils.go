@@ -13,6 +13,7 @@ import (
 
 	"github.com/Laisky/one-api/common/ctxkey"
 	"github.com/Laisky/one-api/relay/adaptor"
+	"github.com/Laisky/one-api/relay/adaptor/common/toolnamesafe"
 	"github.com/Laisky/one-api/relay/channeltype"
 	"github.com/Laisky/one-api/relay/model"
 )
@@ -307,6 +308,7 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	reasoningFormat := c.Query("reasoning_format")
 	for i := range textResponse.Choices {
 		normalizeReasoningChoice(&textResponse.Choices[i], reasoningFormat)
+		toolnamesafe.RestoreToolCallNames(c, textResponse.Choices[i].Message.ToolCalls)
 	}
 
 	// Optionally extract <think> blocks when enabled via URL param and map to requested field
@@ -360,6 +362,10 @@ func Handler(c *gin.Context, resp *http.Response, promptTokens int, modelName st
 	if usage.TotalTokens == 0 {
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 	}
+	// Promote any top-level cached_tokens (e.g. StepFun) into the nested
+	// prompt_tokens_details.cached_tokens field so downstream billing applies
+	// the cache-hit ratio. No-op for OpenAI-shaped responses.
+	usage.NormalizeCachedTokens()
 	logger.Debug("finalized usage for non-stream (openai-compatible)",
 		zap.Int("prompt_tokens", usage.PromptTokens),
 		zap.Int("completion_tokens", usage.CompletionTokens),

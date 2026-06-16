@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { ConfirmDetailsList } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { EnhancedDataTable } from '@/components/ui/enhanced-data-table';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
@@ -333,6 +334,19 @@ export function UsersPage() {
     setConfirmState({ open: false });
   };
 
+  const confirmDetails = confirmState.user
+    ? [
+        {
+          label: tr('columns.username', 'Username'),
+          value: confirmState.user.username,
+        },
+        {
+          label: tr('columns.role', 'Role'),
+          value: getRoleLabel(confirmState.user.role),
+        },
+      ]
+    : [];
+
   const runConfirmAction = async () => {
     const { kind, user } = confirmState;
     if (!kind || !user) return;
@@ -425,17 +439,24 @@ export function UsersPage() {
         const body: any = { id, status: action === 'enable' ? 1 : 2 };
         res = await api.put('/api/user/?status_only=true', body);
       }
-      const { success } = res.data;
-      if (success) {
-        // Optimistic update like legacy
-        const next = [...data];
-        if (action === 'delete') {
-          next.splice(idx, 1);
-        } else {
-          next[idx].status = action === 'enable' ? 1 : 2;
-        }
-        setData(next);
+      const { success, message } = res.data || {};
+      if (!success) {
+        notify({
+          type: 'error',
+          title: tr('notifications.action_failed_title', 'Action failed'),
+          message: message || tr('notifications.action_failed_message', 'Unable to apply change.'),
+        });
+        return;
       }
+
+      // Optimistic update like legacy
+      const next = [...data];
+      if (action === 'delete') {
+        next.splice(idx, 1);
+      } else {
+        next[idx].status = action === 'enable' ? 1 : 2;
+      }
+      setData(next);
     } catch (error) {
       const message = (error as any)?.response?.data?.message || tr('notifications.action_failed_message', 'Unable to apply change.');
       notify({
@@ -606,22 +627,27 @@ export function UsersPage() {
                   ? tr('confirm.demote_title', 'Demote user')
                   : tr('confirm.disable_2fa_title', 'Disable 2FA')}
             </DialogTitle>
-            <DialogDescription>
-              {confirmState.kind === 'promote'
-                ? tr('confirm.promote_description', 'Promote {{username}} to administrator? They will gain admin privileges.', {
-                    username: confirmState.user?.username ?? '',
-                  })
-                : confirmState.kind === 'demote'
-                  ? tr('confirm.demote_description', 'Demote {{username}} to a regular user? They will lose admin privileges.', {
-                      username: confirmState.user?.username ?? '',
-                    })
-                  : tr(
-                      'confirm.disable_2fa_description',
-                      'Disable two-factor authentication for {{username}}? They will be able to sign in without a 2FA code.',
-                      {
+            <DialogDescription asChild>
+              <div className="space-y-3 text-sm text-muted-foreground">
+                <div>
+                  {confirmState.kind === 'promote'
+                    ? tr('confirm.promote_description', 'Promote {{username}} to administrator? They will gain admin privileges.', {
                         username: confirmState.user?.username ?? '',
-                      }
-                    )}
+                      })
+                    : confirmState.kind === 'demote'
+                      ? tr('confirm.demote_description', 'Demote {{username}} to a regular user? They will lose admin privileges.', {
+                          username: confirmState.user?.username ?? '',
+                        })
+                      : tr(
+                          'confirm.disable_2fa_description',
+                          'Disable two-factor authentication for {{username}}? They will be able to sign in without a 2FA code.',
+                          {
+                            username: confirmState.user?.username ?? '',
+                          }
+                        )}
+                </div>
+                {confirmDetails.length > 0 ? <ConfirmDetailsList details={confirmDetails} /> : null}
+              </div>
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -651,6 +677,7 @@ function CreateUserDialog({ open, onOpenChange, onCreated }: { open: boolean; on
     defaultValues: { username: '', password: '', display_name: '' },
   });
   const { t } = useTranslation();
+  const { notify } = useNotifications();
   const tr = useCallback(
     (key: string, defaultValue: string, options?: Record<string, unknown>) =>
       t(`users.dialogs.create.${key}`, { defaultValue, ...options }),
@@ -666,16 +693,33 @@ function CreateUserDialog({ open, onOpenChange, onCreated }: { open: boolean; on
           <form
             className="space-y-3"
             onSubmit={form.handleSubmit(async (values) => {
-              // Unified API call - complete URL with /api prefix
-              const res = await api.post('/api/user/', {
-                username: values.username,
-                password: values.password,
-                display_name: values.display_name || values.username,
-              });
-              if (res.data?.success) {
+              try {
+                // Unified API call - complete URL with /api prefix
+                const res = await api.post('/api/user/', {
+                  username: values.username,
+                  password: values.password,
+                  display_name: values.display_name || values.username,
+                });
+                if (!res.data?.success) {
+                  notify({
+                    type: 'error',
+                    title: tr('notifications.create_failed_title', 'Create failed'),
+                    message: res.data?.message || tr('notifications.create_failed_message', 'Unable to create user.'),
+                  });
+                  return;
+                }
                 onOpenChange(false);
                 form.reset();
                 onCreated();
+              } catch (error) {
+                notify({
+                  type: 'error',
+                  title: tr('notifications.create_failed_title', 'Create failed'),
+                  message:
+                    (error as any)?.response?.data?.message ||
+                    (error as Error)?.message ||
+                    tr('notifications.create_failed_message', 'Unable to create user.'),
+                });
               }
             })}
           >
@@ -755,6 +799,7 @@ function TopUpDialog({
     defaultValues: { quota: 0, remark: '' },
   });
   const { t } = useTranslation();
+  const { notify } = useNotifications();
   const tr = useCallback(
     (key: string, defaultValue: string, options?: Record<string, unknown>) => t(`users.dialogs.topup.${key}`, { defaultValue, ...options }),
     [t]
@@ -774,16 +819,33 @@ function TopUpDialog({
             className="space-y-3"
             onSubmit={form.handleSubmit(async (values) => {
               if (!userId) return;
-              // Unified API call - complete URL with /api prefix
-              const res = await api.post('/api/topup', {
-                user_id: userId,
-                quota: values.quota,
-                remark: values.remark,
-              });
-              if (res.data?.success) {
+              try {
+                // Unified API call - complete URL with /api prefix
+                const res = await api.post('/api/topup', {
+                  user_id: userId,
+                  quota: values.quota,
+                  remark: values.remark,
+                });
+                if (!res.data?.success) {
+                  notify({
+                    type: 'error',
+                    title: tr('notifications.submit_failed_title', 'Top up failed'),
+                    message: res.data?.message || tr('notifications.submit_failed_message', 'Unable to top up user.'),
+                  });
+                  return;
+                }
                 onOpenChange(false);
                 form.reset();
                 onDone();
+              } catch (error) {
+                notify({
+                  type: 'error',
+                  title: tr('notifications.submit_failed_title', 'Top up failed'),
+                  message:
+                    (error as any)?.response?.data?.message ||
+                    (error as Error)?.message ||
+                    tr('notifications.submit_failed_message', 'Unable to top up user.'),
+                });
               }
             })}
           >

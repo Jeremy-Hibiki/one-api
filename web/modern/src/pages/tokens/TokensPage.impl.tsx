@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { EnhancedDataTable } from '@/components/ui/enhanced-data-table';
 import { ListActionButton } from '@/components/ui/list-action-button';
+import { useNotifications } from '@/components/ui/notifications';
 import { ResponsiveActionGroup } from '@/components/ui/responsive-action-group';
 import { ResponsivePageContainer } from '@/components/ui/responsive-container';
 import { type SearchOption } from '@/components/ui/searchable-dropdown';
@@ -119,6 +120,7 @@ export function TokensPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { isMobile } = useResponsive();
   const userQuota = useAuthStore((state) => state.user?.quota ?? null);
+  const { notify } = useNotifications();
   const { t } = useTranslation();
   const [confirmDelete, ConfirmDeleteDialog] = useConfirmDialog();
   const tr = useCallback(
@@ -185,6 +187,19 @@ export function TokensPage() {
       return token.name || tr('table.id_placeholder', '(ID {{id}})', { id: token.id });
     },
     [tr]
+  );
+  const buildTokenDeleteDetails = useCallback(
+    (token: Token) => [
+      {
+        label: tr('columns.name', 'Name'),
+        value: formatTokenLabel(token),
+      },
+      {
+        label: tr('columns.id', 'ID'),
+        value: token.id,
+      },
+    ],
+    [formatTokenLabel, tr]
   );
 
   const load = async (p = 0, size = pageSize) => {
@@ -328,15 +343,30 @@ export function TokensPage() {
         });
       }
 
-      if (res.data?.success) {
-        if (searchKeyword.trim()) {
-          performSearch();
-        } else {
-          load(pageIndex, pageSize);
-        }
+      if (!res.data?.success) {
+        notify({
+          type: 'error',
+          title: tr('notifications.action_failed_title', 'Action failed'),
+          message: res.data?.message || tr('notifications.action_failed_message', 'Unable to apply change.'),
+        });
+        return;
+      }
+
+      if (searchKeyword.trim()) {
+        performSearch();
+      } else {
+        load(pageIndex, pageSize);
       }
     } catch (error) {
       console.error(`Failed to ${action} token:`, error);
+      notify({
+        type: 'error',
+        title: tr('notifications.action_failed_title', 'Action failed'),
+        message:
+          (error as any)?.response?.data?.message ||
+          (error as Error)?.message ||
+          tr('notifications.action_failed_message', 'Unable to apply change.'),
+      });
     }
   };
 
@@ -570,6 +600,7 @@ export function TokensPage() {
                 const confirmed = await confirmDelete({
                   title: tr('confirm.delete_title', 'Delete Token'),
                   description: tr('confirm.delete', 'Are you sure you want to delete token "{{label}}"?', { label }),
+                  details: buildTokenDeleteDetails(token),
                 });
                 if (confirmed) manage(token.id, 'delete');
               }}
@@ -657,6 +688,7 @@ export function TokensPage() {
                       const confirmed = await confirmDelete({
                         title: tr('confirm.delete_title', 'Delete Token'),
                         description: tr('confirm.delete', 'Are you sure you want to delete token "{{label}}"?', { label }),
+                        details: buildTokenDeleteDetails(row),
                       });
                       if (confirmed) manage(row.id, 'delete');
                     }}

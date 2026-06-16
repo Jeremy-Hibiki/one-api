@@ -166,6 +166,9 @@ describe('UsersPage promote/demote/disable_2fa actions', () => {
     await user.click(screen.getByRole('button', { name: 'Promote' }));
 
     const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Username')).toBeInTheDocument();
+    expect(within(dialog).getByText('Role')).toBeInTheDocument();
+    expect(within(dialog).getByText('User')).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
 
     await waitFor(() => {
@@ -251,6 +254,77 @@ describe('UsersPage promote/demote/disable_2fa actions', () => {
 
     await waitFor(() => {
       expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', message: 'cannot demote' }));
+    });
+  });
+
+  it('deletes a user row when the backend confirms success', async () => {
+    setSuperAdmin();
+    seedListResponse([baseUser]);
+    (api.delete as any).mockResolvedValue({
+      data: { success: true, message: '' },
+    });
+
+    renderPage();
+    const user = userEvent.setup();
+    await screen.findByText('alice');
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(api.delete).toHaveBeenCalledWith('/api/user/2');
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('alice')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows error notification when delete returns success false', async () => {
+    setSuperAdmin();
+    seedListResponse([baseUser]);
+    (api.delete as any).mockResolvedValue({
+      data: { success: false, message: 'cannot delete this user' },
+    });
+
+    renderPage();
+    const user = userEvent.setup();
+    await screen.findByText('alice');
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          title: 'Action failed',
+          message: 'cannot delete this user',
+        })
+      );
+    });
+    expect(screen.getByText('alice')).toBeInTheDocument();
+  });
+
+  it('shows an error notification when top up returns success false', async () => {
+    setSuperAdmin();
+    seedListResponse([baseUser]);
+    (api.post as any).mockResolvedValue({
+      data: { success: false, message: 'top up rejected' },
+    });
+
+    renderPage();
+    const user = userEvent.setup();
+    await screen.findByText('alice');
+
+    await user.click(screen.getByRole('button', { name: 'Top Up' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Submit' }));
+
+    await waitFor(() => {
+      expect(notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          message: 'top up rejected',
+        })
+      );
     });
   });
 

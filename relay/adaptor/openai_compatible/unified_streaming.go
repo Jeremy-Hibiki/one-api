@@ -17,6 +17,7 @@ import (
 	"github.com/Laisky/one-api/common/render"
 	commonsse "github.com/Laisky/one-api/common/sse"
 	"github.com/Laisky/one-api/common/tracing"
+	"github.com/Laisky/one-api/relay/adaptor/common/toolnamesafe"
 	"github.com/Laisky/one-api/relay/model"
 )
 
@@ -818,6 +819,11 @@ func (sc *StreamingContext) CalculateUsage(promptTokens int, modelName string) *
 			zap.Int("tool_args_len", len(toolArgsText)))
 	}
 
+	// Promote any top-level cached_tokens (e.g. StepFun) into the nested
+	// prompt_tokens_details.cached_tokens field so downstream billing applies
+	// the cache-hit ratio. No-op for OpenAI-shaped responses.
+	sc.usage.NormalizeCachedTokens()
+
 	return sc.usage
 }
 
@@ -1001,6 +1007,9 @@ func UnifiedStreamProcessing(c *gin.Context, resp *http.Response, promptTokens i
 
 			streamResponse.Id = tracing.GenerateChatCompletionID(c)
 			modifiedChunk := streamCtx.ProcessStreamChunk(&streamResponse)
+			for i := range streamResponse.Choices {
+				toolnamesafe.RestoreToolCallNames(c, streamResponse.Choices[i].Delta.ToolCalls)
+			}
 
 			if streamRewriter != nil {
 				handled, doneRendered := streamRewriter.HandleChunk(c, &streamResponse)
@@ -1087,6 +1096,9 @@ func UnifiedStreamProcessing(c *gin.Context, resp *http.Response, promptTokens i
 
 		// Process chunk using unified logic
 		modifiedChunk := streamCtx.ProcessStreamChunk(&streamResponse)
+		for i := range streamResponse.Choices {
+			toolnamesafe.RestoreToolCallNames(c, streamResponse.Choices[i].Delta.ToolCalls)
+		}
 
 		if streamRewriter != nil {
 			handled, doneRendered := streamRewriter.HandleChunk(c, &streamResponse)

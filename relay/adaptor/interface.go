@@ -49,6 +49,10 @@ type ModelConfig struct {
 	Image *ImagePricingConfig `json:"image,omitempty"`
 	// Embedding captures modality-specific pricing metadata for embedding requests.
 	Embedding *EmbeddingPricingConfig `json:"embedding,omitempty"`
+	// PerCall captures flat per-invocation pricing metadata. When set, the model
+	// is billed and displayed as flat per call rather than per token, regardless
+	// of model type (rerank is the canonical example, but the schema is generic).
+	PerCall *PerCallPricingConfig `json:"per_call,omitempty"`
 	// ContextLength is the total token context (input+output) the model supports.
 	// 0 means unspecified — caller should fall back to a reasonable default.
 	ContextLength int32 `json:"context_length,omitempty"`
@@ -66,6 +70,18 @@ type ModelConfig struct {
 	// SupportedSamplingParameters lists OpenAI-compatible sampling parameters this model accepts.
 	// Empty means caller should use a default conservative set.
 	SupportedSamplingParameters []string `json:"supported_sampling_parameters,omitempty"`
+	// SupportedReasoningEfforts enumerates the reasoning_effort levels this model accepts.
+	// Valid OpenAI-vocabulary values: "minimal","low","medium","high". Empty implies the
+	// model does not support a tunable reasoning_effort parameter (non-reasoning models,
+	// or providers that expose reasoning via a budget rather than a discrete level).
+	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
+	// DefaultReasoningEffort is the level the relay applies when a request omits
+	// reasoning_effort but the model supports it. Empty means callers must supply
+	// their own default; the OpenAI relay falls back to "medium" in that case.
+	DefaultReasoningEffort string `json:"default_reasoning_effort,omitempty"`
+	// MaxReasoningTokens caps the upstream reasoning budget (e.g., Anthropic
+	// `thinking.budget_tokens`, Gemini `thinkingBudget`). 0 means unspecified.
+	MaxReasoningTokens int32 `json:"max_reasoning_tokens,omitempty"`
 	// Quantization advertises numeric precision. Empty means unspecified.
 	// Valid OpenRouter values: "int4","int8","fp4","fp6","fp8","fp16","bf16","fp32".
 	Quantization string `json:"quantization,omitempty"`
@@ -102,6 +118,37 @@ func (cfg *EmbeddingPricingConfig) HasData() bool {
 
 // Clone returns a copy of the embedding pricing configuration.
 func (cfg *EmbeddingPricingConfig) Clone() *EmbeddingPricingConfig {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	return &clone
+}
+
+// PerCallPricingConfig captures flat per-invocation pricing metadata, applicable
+// to any model billed per request regardless of token count (rerank is the most
+// common case today). Providers typically publish "$X per 1K calls" so the
+// canonical unit is USD per 1000 calls. Presence of this struct signals to the
+// display layer that the model is per-call billed; the underlying
+// ModelConfig.Ratio field continues to carry the quota-per-call value consumed
+// by the billing pipeline.
+type PerCallPricingConfig struct {
+	// UsdPerThousandCalls is the USD price per 1000 invocations (one invocation =
+	// one upstream request; for rerank, one query against up to the provider's
+	// per-call document cap).
+	UsdPerThousandCalls float64 `json:"usd_per_thousand_calls,omitempty"`
+}
+
+// HasData reports whether the per-call pricing configuration carries any data.
+func (cfg *PerCallPricingConfig) HasData() bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.UsdPerThousandCalls != 0
+}
+
+// Clone returns a copy of the per-call pricing configuration.
+func (cfg *PerCallPricingConfig) Clone() *PerCallPricingConfig {
 	if cfg == nil {
 		return nil
 	}

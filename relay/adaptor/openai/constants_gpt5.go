@@ -10,65 +10,162 @@ import (
 // constrained to ["seed","max_tokens"] (no temperature/top_p/frequency_penalty/
 // presence_penalty), and SupportedFeatures includes "reasoning".
 //
-// Verified context windows from OpenAI docs (2026-05-01): gpt-5 family advertises
-// 400K context and 128K max output. The newer gpt-5.4 / gpt-5.5 lines extend this
-// to 1M context per the public model catalog. gpt-5-pro / gpt-5.x-pro variants
-// allow longer reasoning budgets.
-// Sources:
-//   - https://platform.openai.com/docs/models/gpt-5
-//   - https://platform.openai.com/docs/models/gpt-5.1
-//   - https://platform.openai.com/docs/models (gpt-5.4 / gpt-5.5 entries)
+// Verified context windows from OpenAI docs (2026-05-18): gpt-5 / gpt-5.1 / gpt-5.2
+// advertise 400K context with 128K max output. gpt-5.4 / gpt-5.4-pro / gpt-5.5 /
+// gpt-5.5-pro extend this to 1.05M context (1,050,000 tokens) with 128K max output
+// (272K for *-pro variants). For 1.05M-context models, prompts with >272K input
+// tokens are priced at 2x input and 1.5x output for the full session — encoded
+// here via Tiers.
+//
+// Sources verified 2026-05-18:
+//   - https://developers.openai.com/api/docs/pricing
+//   - https://developers.openai.com/api/docs/models/gpt-5.5
+//   - https://developers.openai.com/api/docs/models/gpt-5.4
+//   - https://developers.openai.com/api/docs/models/gpt-5.2
+//   - https://developers.openai.com/api/docs/models/gpt-5.1
+//   - https://developers.openai.com/api/docs/models/gpt-5
 var gpt5ReasoningFeatures = []string{"reasoning", "tools", "json_mode", "structured_outputs"}
 
+// gpt5FullEfforts is the full set of effort levels GPT-5 reasoning models accept.
+// As of GPT-5.4 / GPT-5.5, OpenAI documents the values {none, low, medium, high, xhigh}.
+// The relay maps the legacy "minimal" alias to "none" upstream when needed.
+// Source: https://developers.openai.com/api/docs/models/gpt-5.5
+var gpt5FullEfforts = []string{"minimal", "low", "medium", "high", "xhigh"}
+
+// gpt5ChatOnlyEfforts is the constrained set for `*-chat-latest` aliases, which
+// OpenAI clamps to medium-only since they mirror ChatGPT's default behavior.
+var gpt5ChatOnlyEfforts = []string{"medium"}
+
+// gpt55LongContextTier represents the >272K input-token tier applied to gpt-5.5:
+// 2x input, 1.5x output, 2x cached input. Per OpenAI's docs, the multiplier
+// applies for the full session once the threshold is crossed.
+// Source: https://developers.openai.com/api/docs/models/gpt-5.5
+var gpt55LongContextTier = adaptor.ModelRatioTier{
+	Ratio:               10.0 * ratio.MilliTokensUsd,
+	CompletionRatio:     45.0 / 10.0,
+	CachedInputRatio:    1.0 * ratio.MilliTokensUsd,
+	InputTokenThreshold: 272_001,
+}
+
+// gpt55ProLongContextTier mirrors gpt55LongContextTier for the gpt-5.5-pro tier.
+var gpt55ProLongContextTier = adaptor.ModelRatioTier{
+	Ratio:               60.0 * ratio.MilliTokensUsd,
+	CompletionRatio:     270.0 / 60.0,
+	InputTokenThreshold: 272_001,
+}
+
+// gpt54LongContextTier represents the >272K input-token tier applied to gpt-5.4:
+// 2x input, 1.5x output, 2x cached input.
+// Source: https://developers.openai.com/api/docs/models/gpt-5.4
+var gpt54LongContextTier = adaptor.ModelRatioTier{
+	Ratio:               5.0 * ratio.MilliTokensUsd,
+	CompletionRatio:     22.5 / 5.0,
+	CachedInputRatio:    0.5 * ratio.MilliTokensUsd,
+	InputTokenThreshold: 272_001,
+}
+
+// gpt54ProLongContextTier mirrors gpt54LongContextTier for the gpt-5.4-pro tier.
+var gpt54ProLongContextTier = adaptor.ModelRatioTier{
+	Ratio:               60.0 * ratio.MilliTokensUsd,
+	CompletionRatio:     270.0 / 60.0,
+	InputTokenThreshold: 272_001,
+}
+
 var gpt5ModelRatios = map[string]adaptor.ModelConfig{
-	// gpt-5.5: 1M context, 128K output (per docs page).
-	"gpt-5.5": {
+	// chat-latest: rolling alias to the latest GPT-5.5 Instant model used in ChatGPT.
+	// Replaces the retired chatgpt-4o-latest alias (sunset 2026-02-17). Released 2026-05-05.
+	// 400K context, 128K max output, $5/$0.50/$30 per 1M tokens.
+	// Source: https://developers.openai.com/api/docs/models/chat-latest
+	"chat-latest": {
 		Ratio:                       5.0 * ratio.MilliTokensUsd,
 		CompletionRatio:             30.0 / 5.0,
 		CachedInputRatio:            0.5 * ratio.MilliTokensUsd,
-		ContextLength:               1_000_000,
+		ContextLength:               400000,
 		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.5: next-generation reasoning flagship with 1M context.",
+		SupportedReasoningEfforts:   gpt5ChatOnlyEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "chat-latest: rolling alias for the GPT-5.5 Instant model behind ChatGPT (chat-latest pricing).",
 	},
-	"gpt-5.5-pro": {
-		Ratio:                       30 * ratio.MilliTokensUsd,
-		CompletionRatio:             180 / 30.0,
-		ContextLength:               1_000_000,
-		MaxOutputTokens:             272000,
+	// gpt-5.5: 1.05M context, 128K output. >272K input tokens are billed at the
+	// long-context tier (2x input, 1.5x output) for the entire session.
+	"gpt-5.5": {
+		Ratio:                       5.0 * ratio.MilliTokensUsd,
+		CompletionRatio:             30.0 / 5.0,
+		CachedInputRatio:            0.5 * ratio.MilliTokensUsd,
+		Tiers:                       []adaptor.ModelRatioTier{gpt55LongContextTier},
+		ContextLength:               1_050_000,
+		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.5 Pro: deep-research tier with extended reasoning budget.",
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.5: frontier reasoning model with 1.05M context (long-context surcharge >272K input).",
+	},
+	"gpt-5.5-pro": {
+		Ratio:                       30 * ratio.MilliTokensUsd,
+		CompletionRatio:             180 / 30.0,
+		Tiers:                       []adaptor.ModelRatioTier{gpt55ProLongContextTier},
+		ContextLength:               1_050_000,
+		MaxOutputTokens:             128000,
+		InputModalities:             []string{"text", "image"},
+		OutputModalities:            []string{"text"},
+		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
+		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.5 Pro: deep-research tier with extended reasoning budget (long-context surcharge >272K input).",
 	},
 	"gpt-5.5-2026-04-23": {
 		Ratio:                       5.0 * ratio.MilliTokensUsd,
 		CompletionRatio:             30.0 / 5.0,
 		CachedInputRatio:            0.5 * ratio.MilliTokensUsd,
-		ContextLength:               1_000_000,
+		Tiers:                       []adaptor.ModelRatioTier{gpt55LongContextTier},
+		ContextLength:               1_050_000,
 		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
-		SupportedFeatures:           gpt5ReasoningFeatures,
+		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.5 snapshot from 2026-04-23.",
 	},
-	// gpt-5.4: 1M context per docs page.
+	// gpt-5.4: 1.05M context. >272K input tokens are billed at the long-context tier.
 	"gpt-5.4": {
 		Ratio:                       2.5 * ratio.MilliTokensUsd,
 		CompletionRatio:             15 / 2.5,
 		CachedInputRatio:            0.25 * ratio.MilliTokensUsd,
-		ContextLength:               1_000_000,
+		Tiers:                       []adaptor.ModelRatioTier{gpt54LongContextTier},
+		ContextLength:               1_050_000,
 		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
-		SupportedFeatures:           gpt5ReasoningFeatures,
+		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.4: balanced reasoning model with 1M context.",
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.4: balanced reasoning model with 1.05M context (long-context surcharge >272K input).",
+	},
+	"gpt-5.4-2026-03-05": {
+		Ratio:                       2.5 * ratio.MilliTokensUsd,
+		CompletionRatio:             15 / 2.5,
+		CachedInputRatio:            0.25 * ratio.MilliTokensUsd,
+		Tiers:                       []adaptor.ModelRatioTier{gpt54LongContextTier},
+		ContextLength:               1_050_000,
+		MaxOutputTokens:             128000,
+		InputModalities:             []string{"text", "image"},
+		OutputModalities:            []string{"text"},
+		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
+		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.4 snapshot from 2026-03-05.",
 	},
 	// gpt-5.4-mini: 400K per docs.
 	"gpt-5.4-mini": {
@@ -81,6 +178,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.4 mini: cost-efficient reasoning with 400K context.",
 	},
 	"gpt-5.4-nano": {
@@ -93,18 +192,23 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.4 nano: lowest-latency reasoning tier.",
 	},
 	"gpt-5.4-pro": {
 		Ratio:                       30 * ratio.MilliTokensUsd,
 		CompletionRatio:             180 / 30.0,
-		ContextLength:               1_000_000,
-		MaxOutputTokens:             272000,
+		Tiers:                       []adaptor.ModelRatioTier{gpt54ProLongContextTier},
+		ContextLength:               1_050_000,
+		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.4 Pro: deep-research tier with web search.",
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.4 Pro: deep-research tier with web search (long-context surcharge >272K input).",
 	},
 	"gpt-5.3-chat-latest": {
 		Ratio:                       1.75 * ratio.MilliTokensUsd,
@@ -116,7 +220,9 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.3 chat-latest: rolling alias for the latest 5.3 chat snapshot.",
+		SupportedReasoningEfforts:   gpt5ChatOnlyEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.3 chat-latest: rolling alias for the latest 5.3 chat snapshot. (API retirement 2026-08-10; use gpt-5.5)",
 	},
 	"gpt-5.3-codex": {
 		Ratio:                       1.75 * ratio.MilliTokensUsd,
@@ -128,6 +234,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.3 Codex: code-tuned reasoning variant.",
 	},
 	"gpt-5.2": {
@@ -140,6 +248,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.2: reasoning chat model with 400K context.",
 	},
 	"gpt-5.2-2025-12-11": {
@@ -152,6 +262,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.2 snapshot from 2025-12-11.",
 	},
 	"gpt-5.2-codex": {
@@ -164,28 +276,34 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.2 Codex: code-tuned 5.2 reasoning variant.",
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.2 Codex: code-tuned 5.2 reasoning variant. (API retirement 2026-07-23; use gpt-5.5)",
 	},
 	"gpt-5.2-pro": {
 		Ratio:                       21 * ratio.MilliTokensUsd,
 		CompletionRatio:             168 / 21.0,
 		ContextLength:               400000,
-		MaxOutputTokens:             272000,
+		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.2 Pro: deep-research tier with web search.",
 	},
 	"gpt-5.2-pro-2025-12-11": {
 		Ratio:                       21 * ratio.MilliTokensUsd,
 		CompletionRatio:             168 / 21.0,
 		ContextLength:               400000,
-		MaxOutputTokens:             272000,
+		MaxOutputTokens:             128000,
 		InputModalities:             []string{"text", "image"},
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.2 Pro snapshot from 2025-12-11.",
 	},
 	// gpt-5.1: verified 400K context, 128K output, image input.
@@ -199,6 +317,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.1: reasoning chat model with configurable effort and 400K context.",
 	},
 	"gpt-5.1-2025-11-13": {
@@ -211,6 +331,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.1 snapshot from 2025-11-13.",
 	},
 	"gpt-5.1-chat-latest": {
@@ -223,7 +345,9 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5.1 chat-latest: rolling alias mirroring ChatGPT's GPT-5.1 default.",
+		SupportedReasoningEfforts:   gpt5ChatOnlyEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5.1 chat-latest: rolling alias mirroring ChatGPT's GPT-5.1 default. (API retirement 2026-07-23; use gpt-5.5)",
 	},
 	"gpt-5.1-codex": {
 		Ratio:                       1.25 * ratio.MilliTokensUsd,
@@ -235,6 +359,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.1 Codex: code-tuned reasoning variant for agentic coding.",
 	},
 	"gpt-5.1-codex-mini": {
@@ -247,6 +373,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.1 Codex mini: cost-efficient reasoning code model.",
 	},
 	"gpt-5.1-codex-max": {
@@ -259,6 +387,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5.1 Codex max: highest-effort coding reasoning tier.",
 	},
 	"gpt-5-chat-latest": {
@@ -271,7 +401,7 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5 chat-latest: rolling alias mirroring ChatGPT's GPT-5 default.",
+		Description:                 "GPT-5 chat-latest: rolling alias mirroring ChatGPT's GPT-5 default; reasoning_effort is ignored upstream. (API retirement 2026-07-23; use gpt-5.5)",
 	},
 	"gpt-5-codex": {
 		Ratio:                       1.25 * ratio.MilliTokensUsd,
@@ -283,7 +413,9 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
-		Description:                 "GPT-5 Codex: code-tuned 5.0 reasoning variant.",
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
+		Description:                 "GPT-5 Codex: code-tuned 5.0 reasoning variant. (API retirement 2026-07-23; use gpt-5.5)",
 	},
 	"gpt-5-pro": {
 		Ratio:                       15 * ratio.MilliTokensUsd,
@@ -294,6 +426,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 Pro: deep-research tier with extended reasoning and web search.",
 	},
 	"gpt-5-pro-2025-10-06": {
@@ -305,6 +439,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           append([]string{"web_search"}, gpt5ReasoningFeatures...),
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 Pro snapshot from 2025-10-06.",
 	},
 	"gpt-5": {
@@ -317,6 +453,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5: reasoning flagship with 400K context and configurable effort.",
 	},
 	"gpt-5-2025-08-07": {
@@ -329,6 +467,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 snapshot from 2025-08-07.",
 	},
 	"gpt-5-mini": {
@@ -341,6 +481,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 mini: cost-efficient reasoning model.",
 	},
 	"gpt-5-mini-2025-08-07": {
@@ -353,6 +495,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 mini snapshot from 2025-08-07.",
 	},
 	"gpt-5-nano": {
@@ -365,6 +509,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 nano: ultra-low-cost reasoning tier.",
 	},
 	"gpt-5-nano-2025-08-07": {
@@ -377,6 +523,8 @@ var gpt5ModelRatios = map[string]adaptor.ModelConfig{
 		OutputModalities:            []string{"text"},
 		SupportedFeatures:           gpt5ReasoningFeatures,
 		SupportedSamplingParameters: reasoningSamplingParameters(),
+		SupportedReasoningEfforts:   gpt5FullEfforts,
+		DefaultReasoningEffort:      "medium",
 		Description:                 "GPT-5 nano snapshot from 2025-08-07.",
 	},
 }

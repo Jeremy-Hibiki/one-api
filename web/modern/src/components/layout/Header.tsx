@@ -17,6 +17,7 @@ import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/stores/auth';
 import {
   BarChart3,
+  ChevronDown,
   CreditCard,
   DollarSign,
   FileText,
@@ -140,28 +141,35 @@ export function Header() {
 
               {user ? (
                 <>
-                  {/* User Welcome - Hide on mobile */}
-                  <span className="hidden md:inline text-sm text-muted-foreground truncate max-w-32">{user.username}</span>
-
-                  {/* Desktop hamburger menu for account actions */}
+                  {/* Desktop: username + chevron is the dropdown trigger for account actions */}
                   {!isMobile && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="inline-flex touch-target" aria-label="Open account menu">
-                          <Menu className="h-5 w-5" />
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="inline-flex items-center gap-1.5 touch-target max-w-48 px-2"
+                          aria-label={`Account menu for ${user.display_name || user.username}`}
+                        >
+                          <span className="text-sm font-medium truncate">{user.display_name || user.username}</span>
+                          <ChevronDown className="h-4 w-4 text-muted-foreground flex-shrink-0" aria-hidden="true" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-56">
-                        <DropdownMenuLabel className="flex flex-col">
-                          <span className="text-xs text-muted-foreground">{t('header.signed_in_as')}</span>
-                          <span className="font-medium truncate">{user.username}</span>
+                      <DropdownMenuContent align="end" className="w-60">
+                        <DropdownMenuLabel className="flex flex-col gap-0.5 py-2 font-normal">
+                          <span className="text-sm font-medium truncate">{user.display_name || user.username}</span>
+                          <span className="text-xs text-muted-foreground truncate">{user.email || `@${user.username}`}</span>
                         </DropdownMenuLabel>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => navigate('/settings')} className="flex items-center gap-2">
+                        <DropdownMenuItem onSelect={() => navigate('/settings')} className="flex items-center gap-2 cursor-pointer">
                           <User className="h-4 w-4" />
                           {t('header.profile')}
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => setLogoutDialogOpen(true)} className="flex items-center gap-2">
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={() => setLogoutDialogOpen(true)}
+                          className="flex items-center gap-2 cursor-pointer text-destructive focus:text-destructive focus:bg-destructive/10"
+                        >
                           <LogOut className="h-4 w-4" />
                           {t('common.logout')}
                         </DropdownMenuItem>
@@ -184,7 +192,9 @@ export function Header() {
                 </>
               ) : (
                 <div className="flex items-center space-x-2">
-                  {isMobile && (
+                  {isMobile ? (
+                    // On mobile, route Register/Login through the drawer footer to keep the
+                    // header narrow enough for 320px viewports — see drawer footer below.
                     <Button
                       variant="ghost"
                       size="sm"
@@ -194,13 +204,16 @@ export function Header() {
                     >
                       <Menu className="h-5 w-5" />
                     </Button>
+                  ) : (
+                    <>
+                      <Link to="/register" className="font-medium text-sm text-muted-foreground hover:text-primary transition-colors">
+                        {t('common.register')}
+                      </Link>
+                      <Button asChild size="sm" className="touch-target">
+                        <Link to="/login">{t('common.login')}</Link>
+                      </Button>
+                    </>
                   )}
-                  <Link to="/register" className="font-medium text-sm text-muted-foreground hover:text-primary transition-colors">
-                    {t('common.register')}
-                  </Link>
-                  <Button asChild size="sm" className="touch-target">
-                    <Link to="/login">{t('common.login')}</Link>
-                  </Button>
                 </div>
               )}
             </div>
@@ -239,7 +252,16 @@ export function Header() {
                   {t('common.logout')}
                 </Button>
               </div>
-            ) : undefined
+            ) : (
+              <div className="flex flex-col gap-2">
+                <Button asChild className="w-full touch-target" onClick={() => setMobileMenuOpen(false)}>
+                  <Link to="/login">{t('common.login')}</Link>
+                </Button>
+                <Button asChild variant="outline" className="w-full touch-target" onClick={() => setMobileMenuOpen(false)}>
+                  <Link to="/register">{t('common.register')}</Link>
+                </Button>
+              </div>
+            )
           }
         />
       </header>

@@ -2,9 +2,11 @@ import { LogDetailsModal } from '@/components/LogDetailsModal';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EnhancedDataTable } from '@/components/ui/enhanced-data-table';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { useNotifications } from '@/components/ui/notifications';
 import { ResponsivePageContainer } from '@/components/ui/responsive-container';
 import { SearchableDropdown, type SearchOption } from '@/components/ui/searchable-dropdown';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -89,7 +91,9 @@ interface ExportTracePayload {
 
 export function LogsPage() {
   const { t } = useTranslation();
+  const { notify } = useNotifications();
   const { user } = useAuthStore();
+  const [confirmAction, ConfirmActionDialog] = useConfirmDialog();
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<LogRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -319,15 +323,46 @@ export function LogsPage() {
 
   const handleClearLogs = async () => {
     const ts = fromDateTimeLocal(filters.end_timestamp);
-    const confirmed = window.confirm(t('logs.confirm.delete_before', { timestamp: filters.end_timestamp }));
+    const confirmed = await confirmAction({
+      title: t('logs.actions.clear'),
+      description: t('logs.confirm.delete_before', { timestamp: filters.end_timestamp }),
+      details: [
+        {
+          label: t('logs.filters.end'),
+          value: filters.end_timestamp,
+        },
+      ],
+      variant: 'destructive',
+    });
     if (!confirmed) return;
 
     try {
       // Unified API call - complete URL with /api prefix
-      await api.delete('/api/log?target_timestamp=' + ts);
+      const res = await api.delete('/api/log?target_timestamp=' + ts);
+      if (!res.data?.success) {
+        notify({
+          type: 'error',
+          title: t('logs.notifications.clear_failed_title', 'Clear failed'),
+          message: res.data?.message || t('logs.notifications.clear_failed_message', 'Failed to clear logs.'),
+        });
+        return;
+      }
       load(0, pageSize);
+      notify({
+        type: 'success',
+        title: t('logs.notifications.clear_success_title', 'Logs cleared'),
+        message: t('logs.notifications.clear_success_message', 'Logs cleared successfully.'),
+      });
     } catch (error) {
       console.error('Failed to clear logs:', error);
+      notify({
+        type: 'error',
+        title: t('logs.notifications.clear_failed_title', 'Clear failed'),
+        message:
+          (error as any)?.response?.data?.message ||
+          (error as Error)?.message ||
+          t('logs.notifications.clear_failed_message', 'Failed to clear logs.'),
+      });
     }
   };
 
@@ -838,6 +873,7 @@ export function LogsPage() {
         </CardContent>
       </Card>
 
+      <ConfirmActionDialog />
       <LogDetailsModal open={detailsModalOpen} onOpenChange={handleDetailsModalChange} log={selectedLog} />
     </ResponsivePageContainer>
   );

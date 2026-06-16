@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Laisky/one-api/common/config"
+	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/controller"
 	"github.com/Laisky/one-api/model"
 )
@@ -83,12 +84,7 @@ func getLarkUserInfoByCode(code string) (*LarkUser, error) {
 func LarkOAuth(c *gin.Context) {
 	ctx := gmw.Ctx(c)
 	session := sessions.Default(c)
-	state := c.Query("state")
-	if state == "" || session.Get("oauth_state") == nil || state != session.Get("oauth_state").(string) {
-		c.JSON(http.StatusForbidden, gin.H{
-			"success": false,
-			"message": "state is empty or not same",
-		})
+	if !validateOAuthState(c, "lark") {
 		return
 	}
 	username := session.Get("username")
@@ -99,10 +95,7 @@ func LarkOAuth(c *gin.Context) {
 	code := c.Query("code")
 	larkUser, err := getLarkUserInfoByCode(code)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 	user := model.User{
@@ -111,10 +104,7 @@ func LarkOAuth(c *gin.Context) {
 	if model.IsLarkIdAlreadyTaken(user.LarkId) {
 		err := user.FillUserByLarkId()
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": err.Error(),
-			})
+			helper.RespondError(c, err)
 			return
 		}
 	} else {
@@ -134,26 +124,17 @@ func LarkOAuth(c *gin.Context) {
 			user.Status = model.UserStatusEnabled
 
 			if err := user.Insert(ctx, 0); err != nil {
-				c.JSON(http.StatusOK, gin.H{
-					"success": false,
-					"message": err.Error(),
-				})
+				helper.RespondError(c, err)
 				return
 			}
 		} else {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "The administrator has turned off new user registration",
-			})
+			helper.RespondError(c, errors.New("The administrator has turned off new user registration"))
 			return
 		}
 	}
 
 	if user.Status != model.UserStatusEnabled {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "User has been banned",
-			"success": false,
-		})
+		helper.RespondError(c, errors.New("User has been banned"))
 		return
 	}
 	controller.SetupLogin(&user, c)
@@ -163,20 +144,14 @@ func LarkBind(c *gin.Context) {
 	code := c.Query("code")
 	larkUser, err := getLarkUserInfoByCode(code)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 	user := model.User{
 		LarkId: larkUser.OpenID,
 	}
 	if model.IsLarkIdAlreadyTaken(user.LarkId) {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": "This Lark account has already been bound",
-		})
+		helper.RespondError(c, errors.New("This Lark account has already been bound"))
 		return
 	}
 	session := sessions.Default(c)
@@ -185,19 +160,13 @@ func LarkBind(c *gin.Context) {
 	user.Id = id.(int)
 	err = user.FillUserById()
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 	user.LarkId = larkUser.OpenID
 	err = user.Update(false)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

@@ -3,6 +3,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { useConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
@@ -10,29 +11,28 @@ import { useNotifications } from '@/components/ui/notifications';
 import { Separator } from '@/components/ui/separator';
 import { useResponsive } from '@/hooks/useResponsive';
 import { api } from '@/lib/api';
-import { buildOidcOAuthUrl, getOAuthState } from '@/lib/oauth';
+import { buildLarkOAuthUrl, buildOidcOAuthUrl, getOAuthState } from '@/lib/oauth';
 import { useAuthStore } from '@/lib/stores/auth';
 import { loadSystemStatus, type SystemStatus } from '@/lib/utils';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { browserSupportsWebAuthn, startRegistration } from '@simplewebauthn/browser';
 import QRCode from 'qrcode';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useTranslation } from 'react-i18next';
 import * as z from 'zod';
 
-const personalSchema = z.object({
-  username: z.string().min(1, 'Username is required'),
-  display_name: z.string().optional(),
-  email: z.string().email('Valid email is required').optional(),
-});
-
-type PersonalForm = z.infer<typeof personalSchema>;
+type PersonalForm = {
+  username: string;
+  display_name?: string;
+  email?: string;
+};
 
 export function PersonalSettings() {
   const { t } = useTranslation();
   const { user, updateUser } = useAuthStore();
   const { notify } = useNotifications();
+  const [confirmAction, ConfirmActionDialog] = useConfirmDialog();
   const [loading, setLoading] = useState(false);
   const [systemToken, setSystemToken] = useState('');
   const [affLink, setAffLink] = useState('');
@@ -96,6 +96,16 @@ export function PersonalSettings() {
 
   const turnstileEnabled = Boolean(systemStatus.turnstile_check);
   const turnstileRenderable = turnstileEnabled && Boolean(systemStatus.turnstile_site_key);
+
+  const personalSchema = useMemo(
+    () =>
+      z.object({
+        username: z.string().min(1, t('personal_settings.profile_info.username_required')),
+        display_name: z.string().optional(),
+        email: z.string().email(t('personal_settings.profile_info.email_required')).optional(),
+      }),
+    [t]
+  );
 
   // Load system status
   const loadStatus = async () => {
@@ -242,7 +252,7 @@ export function PersonalSettings() {
 
         ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
         ctx.fillStyle = '#666666';
-        ctx.fillText('Two-Factor Authentication', canvas.width / 2, padding + 28);
+        ctx.fillText(t('personal_settings.totp.qr_caption'), canvas.width / 2, padding + 28);
 
         ctx.drawImage(img, padding, padding + textHeight, img.width, img.height);
 
@@ -364,11 +374,27 @@ export function PersonalSettings() {
   };
 
   // Delete a passkey
-  const deletePasskey = async (id: number) => {
-    if (!confirm(t('personal_settings.passkey.delete_confirm'))) return;
+  const deletePasskey = async (passkey: PasskeyInfo) => {
+    const confirmed = await confirmAction({
+      title: t('personal_settings.passkey.delete_button'),
+      description: t('personal_settings.passkey.delete_confirm'),
+      details: [
+        {
+          label: t('personal_settings.passkey.name_label'),
+          value: passkey.credential_name,
+        },
+        {
+          label: t('personal_settings.passkey.registered'),
+          value: new Date(passkey.created_at).toLocaleDateString(),
+        },
+      ],
+      variant: 'destructive',
+    });
+    if (!confirmed) return;
+
     setPasskeyLoading(true);
     try {
-      const res = await api.delete(`/api/user/passkey/${id}`);
+      const res = await api.delete(`/api/user/passkey/${passkey.id}`);
       if (res.data.success) {
         await loadPasskeys();
       } else {
@@ -420,10 +446,16 @@ export function PersonalSettings() {
         setAffLink('');
         await navigator.clipboard.writeText(data);
       } else {
-        console.error('Failed to generate token:', message);
+        notify({
+          type: 'error',
+          message: message || t('personal_settings.access_token.generate_failed'),
+        });
       }
     } catch (error) {
-      console.error('Error generating token:', error);
+      notify({
+        type: 'error',
+        message: error instanceof Error ? error.message : t('personal_settings.access_token.generate_failed'),
+      });
     }
   };
 
@@ -437,10 +469,16 @@ export function PersonalSettings() {
         setSystemToken('');
         await navigator.clipboard.writeText(link);
       } else {
-        console.error('Failed to get aff link:', message);
+        notify({
+          type: 'error',
+          message: message || t('personal_settings.access_token.invite_failed'),
+        });
       }
     } catch (error) {
-      console.error('Error getting aff link:', error);
+      notify({
+        type: 'error',
+        message: error instanceof Error ? error.message : t('personal_settings.access_token.invite_failed'),
+      });
     }
   };
 
@@ -539,17 +577,21 @@ export function PersonalSettings() {
   // Bind a Lark account by redirecting to the Lark OAuth authorize URL.
   // The OAuth callback (/oauth/lark) detects bind vs login by inspecting the
   // backend response message, so no extra "intent" query param is needed.
-  const onBindLark = () => {
+  const onBindLark = async () => {
     setOauthBindingError('');
     if (!systemStatus.lark_client_id) {
       setOauthBindingError(t('personal_settings.oauth_binding.bind_failed'));
       return;
     }
     setOauthBindingPending('lark');
-    const redirectUri = `${window.location.origin}/oauth/lark`;
-    window.location.href = `https://open.larksuite.com/open-apis/authen/v1/index?app_id=${encodeURIComponent(
-      systemStatus.lark_client_id
-    )}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    try {
+      const state = await getOAuthState();
+      const redirectUri = `${window.location.origin}/oauth/lark`;
+      window.location.href = buildLarkOAuthUrl(systemStatus.lark_client_id, state, redirectUri);
+    } catch (error) {
+      setOauthBindingPending(null);
+      setOauthBindingError(error instanceof Error && error.message ? error.message : t('auth.oauth.state_failed'));
+    }
   };
 
   // Bind an OIDC account by redirecting to the configured authorization endpoint.
@@ -567,7 +609,7 @@ export function PersonalSettings() {
       window.location.href = url;
     } catch (error) {
       setOauthBindingPending(null);
-      setOauthBindingError(error instanceof Error ? error.message : t('personal_settings.oauth_binding.bind_failed'));
+      setOauthBindingError(error instanceof Error && error.message ? error.message : t('auth.oauth.state_failed'));
     }
   };
 
@@ -874,7 +916,7 @@ export function PersonalSettings() {
                             {t('personal_settings.passkey.sign_count')}: {pk.sign_count}
                           </div>
                         </div>
-                        <Button variant="destructive" size="sm" onClick={() => deletePasskey(pk.id)} disabled={passkeyLoading}>
+                        <Button variant="destructive" size="sm" onClick={() => deletePasskey(pk)} disabled={passkeyLoading}>
                           {t('personal_settings.passkey.delete_button')}
                         </Button>
                       </div>
@@ -1027,7 +1069,7 @@ export function PersonalSettings() {
               <div className={`flex justify-center ${isMobile ? 'my-2' : 'my-4'}`}>
                 <img
                   src={totpQRCode}
-                  alt="TOTP QR Code"
+                  alt={t('personal_settings.totp.qr_alt')}
                   className={`rounded-lg shadow-md ${isMobile ? 'max-w-[240px] w-full h-auto' : 'max-w-full'}`}
                 />
               </div>
@@ -1074,6 +1116,7 @@ export function PersonalSettings() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmActionDialog />
     </div>
   );
 }

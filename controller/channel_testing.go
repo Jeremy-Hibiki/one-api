@@ -25,6 +25,7 @@ import (
 	"github.com/Laisky/one-api/common/helper"
 	"github.com/Laisky/one-api/common/logger"
 	"github.com/Laisky/one-api/common/message"
+	"github.com/Laisky/one-api/common/relayctx"
 	"github.com/Laisky/one-api/middleware"
 	"github.com/Laisky/one-api/model"
 	"github.com/Laisky/one-api/monitor"
@@ -314,10 +315,7 @@ func TestChannel(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		lg.Debug("invalid channel id", zap.Error(err))
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 
@@ -325,10 +323,7 @@ func TestChannel(c *gin.Context) {
 	channel, err := model.GetChannelById(id, true)
 	if err != nil {
 		lg.Debug("failed to get channel by id", zap.Error(err))
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 
@@ -488,17 +483,14 @@ func testChannels(ctx context.Context, notify bool, scope string) error {
 
 // TestChannels initiates a background test sweep across a set of channels defined by scope.
 func TestChannels(c *gin.Context) {
-	ctx := gmw.Ctx(c)
+	ctx := relayctx.Detach(c)
 	scope := c.Query("scope")
 	if scope == "" {
 		scope = "all"
 	}
 	err := testChannels(ctx, true, scope)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		helper.RespondError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

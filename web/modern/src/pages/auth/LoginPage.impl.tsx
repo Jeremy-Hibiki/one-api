@@ -6,8 +6,8 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 import { useSystemStatus } from '@/hooks/useSystemStatus';
-import { api } from '@/lib/api';
-import { buildGitHubOAuthUrl, buildOidcOAuthUrl, getOAuthState } from '@/lib/oauth';
+import { api, isSafeInternalPath } from '@/lib/api';
+import { buildGitHubOAuthUrl, buildLarkOAuthUrl, buildOidcOAuthUrl, getOAuthState } from '@/lib/oauth';
 import { useAuthStore } from '@/lib/stores/auth';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { browserSupportsWebAuthn, startAuthentication } from '@simplewebauthn/browser';
@@ -84,7 +84,10 @@ export function LoginPage() {
         if (redirectTo) {
           try {
             const decodedPath = decodeURIComponent(redirectTo);
-            if (decodedPath.startsWith('/')) {
+            // Reject anything that isn't a same-origin internal path (e.g. `//evil.com`).
+            // Also bounce back to /dashboard if the target is another /login URL — that
+            // would just send us back here.
+            if (isSafeInternalPath(decodedPath) && !decodedPath.startsWith('/login')) {
               navigate(decodedPath);
             } else {
               navigate('/dashboard');
@@ -130,6 +133,7 @@ export function LoginPage() {
 
   const onGitHubOAuth = async () => {
     if (!systemStatus.github_client_id) return;
+    form.clearErrors('root');
     try {
       // Request state from backend to prevent CSRF
       const state = await getOAuthState();
@@ -137,31 +141,38 @@ export function LoginPage() {
       const url = buildGitHubOAuthUrl(systemStatus.github_client_id, state, redirectUri);
       window.location.href = url;
     } catch (e) {
-      // Fallback: try without state if backend unavailable
-      const redirectUri = `${window.location.origin}/oauth/github`;
-      const url = buildGitHubOAuthUrl(systemStatus.github_client_id, '', redirectUri);
-      window.location.href = url;
+      form.setError('root', {
+        message: e instanceof Error && e.message ? e.message : t('auth.oauth.state_failed'),
+      });
     }
   };
 
-  const onLarkOAuth = () => {
-    if (systemStatus.lark_client_id) {
+  const onLarkOAuth = async () => {
+    if (!systemStatus.lark_client_id) return;
+    form.clearErrors('root');
+    try {
+      const state = await getOAuthState();
       const redirectUri = `${window.location.origin}/oauth/lark`;
-      window.location.href = `https://open.larksuite.com/open-apis/authen/v1/index?app_id=${encodeURIComponent(systemStatus.lark_client_id)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+      window.location.href = buildLarkOAuthUrl(systemStatus.lark_client_id, state, redirectUri);
+    } catch (error) {
+      form.setError('root', {
+        message: error instanceof Error && error.message ? error.message : t('auth.oauth.state_failed'),
+      });
     }
   };
 
   const onOidcOAuth = async () => {
     if (!systemStatus.oidc_client_id || !systemStatus.oidc_authorization_endpoint) return;
+    form.clearErrors('root');
     try {
       const state = await getOAuthState();
       const redirectUri = `${window.location.origin}/oauth/oidc`;
       const url = buildOidcOAuthUrl(systemStatus.oidc_authorization_endpoint, systemStatus.oidc_client_id, state, redirectUri);
       window.location.href = url;
-    } catch {
-      const redirectUri = `${window.location.origin}/oauth/oidc`;
-      const url = buildOidcOAuthUrl(systemStatus.oidc_authorization_endpoint, systemStatus.oidc_client_id, '', redirectUri);
-      window.location.href = url;
+    } catch (error) {
+      form.setError('root', {
+        message: error instanceof Error && error.message ? error.message : t('auth.oauth.state_failed'),
+      });
     }
   };
 
@@ -200,7 +211,7 @@ export function LoginPage() {
       if (redirectTo) {
         try {
           const decodedPath = decodeURIComponent(redirectTo);
-          if (decodedPath.startsWith('/')) {
+          if (isSafeInternalPath(decodedPath) && !decodedPath.startsWith('/login')) {
             navigate(decodedPath);
             return;
           }
@@ -265,11 +276,11 @@ export function LoginPage() {
           navigate('/users/edit');
           console.warn(t('auth.login.root_password_warning'));
         } else if (redirectTo) {
-          // Decode and navigate to the original page
+          // Decode and navigate to the original page, enforcing same-origin
+          // and rejecting any /login target to break potential redirect loops.
           try {
             const decodedPath = decodeURIComponent(redirectTo);
-            // Ensure the redirect path is safe (starts with /)
-            if (decodedPath.startsWith('/')) {
+            if (isSafeInternalPath(decodedPath) && !decodedPath.startsWith('/login')) {
               navigate(decodedPath);
             } else {
               navigate('/dashboard');
@@ -320,7 +331,9 @@ export function LoginPage() {
             <div className="flex justify-center mb-4">
               <img
                 src={systemStatus.logo}
-                alt={systemStatus.system_name ? `${systemStatus.system_name} logo` : 'Site logo'}
+                alt={
+                  systemStatus.system_name ? t('auth.login.logo_alt', { name: systemStatus.system_name }) : t('auth.login.site_logo_alt')
+                }
                 className="h-12 w-auto"
                 decoding="async"
               />
@@ -559,7 +572,7 @@ export function LoginPage() {
           </DialogHeader>
           <div className="flex flex-col items-center gap-3">
             {systemStatus.wechat_qrcode && (
-              <img src={systemStatus.wechat_qrcode} alt="WeChat QR code" className="max-h-64 w-auto rounded-md border" />
+              <img src={systemStatus.wechat_qrcode} alt={t('auth.login.wechat_qr_alt')} className="max-h-64 w-auto rounded-md border" />
             )}
             <Input
               type="text"

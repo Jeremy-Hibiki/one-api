@@ -42,6 +42,15 @@ var replicateLanguageModelRatios = map[string]adaptor.ModelConfig{
 		SupportedSamplingParameters: commonSamplingParams,
 		Description:                 "Anthropic Claude 4 Sonnet hosted on Replicate; supports extended thinking.",
 	},
+	"anthropic/claude-opus-4.7": {
+		// Anthropic published $5/M input and $25/M output for Opus 4.7 (unchanged from 4.6).
+		Ratio: 5.0 * ratio.MilliTokensUsd, CompletionRatio: 25.0 / 5.0,
+		ContextLength: 1000000, MaxOutputTokens: 128000,
+		InputModalities: visionTextInputs, OutputModalities: textOnlyOutputs,
+		SupportedFeatures:           []string{"tools", "json_mode", "structured_outputs", "reasoning"},
+		SupportedSamplingParameters: commonSamplingParams,
+		Description:                 "Anthropic Claude Opus 4.7 frontier model hosted on Replicate; 1M context, extended thinking.",
+	},
 	"deepseek-ai/deepseek-r1": {
 		Ratio: 3.75 * ratio.MilliTokensUsd, CompletionRatio: 10.0 / 3.75,
 		ContextLength: 65536, MaxOutputTokens: 8192,
@@ -295,8 +304,8 @@ var replicateLanguageModelRatios = map[string]adaptor.ModelConfig{
 	},
 	"moonshotai/kimi-k2.5": {
 		Ratio: 0.72 * ratio.MilliTokensUsd, CompletionRatio: 3.60 / 0.72,
-		ContextLength: 131072, MaxOutputTokens: 8192,
-		InputModalities: textOnlyInputs, OutputModalities: textOnlyOutputs,
+		ContextLength: 256000, MaxOutputTokens: 8192,
+		InputModalities: visionTextInputs, OutputModalities: textOnlyOutputs,
 		SupportedFeatures: reasoningFeatures, SupportedSamplingParameters: commonSamplingParams,
 		Quantization:  "fp8",
 		HuggingFaceID: "moonshotai/Kimi-K2.5",
