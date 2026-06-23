@@ -1251,6 +1251,27 @@ func ListModels(c *gin.Context) {
 		}
 	}
 
+	// Filter by token model restrictions if the token has specific model limitations
+	if availableModels, exists := c.Get(ctxkey.AvailableModels); exists {
+		modelsString := availableModels.(string)
+		if modelsString != "" {
+			tokenModels := make(map[string]struct{})
+			for _, m := range strings.Split(modelsString, ",") {
+				m = strings.TrimSpace(m)
+				if m != "" {
+					tokenModels[strings.ToLower(m)] = struct{}{}
+				}
+			}
+			if len(tokenModels) > 0 {
+				for key := range allowed {
+					if _, ok := tokenModels[key]; !ok {
+						delete(allowed, key)
+					}
+				}
+			}
+		}
+	}
+
 	userAvailableModels := make([]OpenAIModels, 0, len(allowed))
 	for _, model := range allowed {
 		userAvailableModels = append(userAvailableModels, model)
